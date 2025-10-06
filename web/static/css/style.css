@@ -1,0 +1,432 @@
+/* Stock Trading Chatbot CSS */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --primary-color: #2563eb;
+    --secondary-color: #10b981;
+    --danger-color: #ef4444;
+    --bg-color: #f8fafc;
+    --card-bg: #ffffff;
+    --text-primary: #1e293b;
+    --text-secondary: #64748b;
+    --border-color: #e2e8f0;
+    --success-color: #22c55e;
+    --warning-color: #f59e0b;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    line-height: 1.6;
+}
+
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+/* Header */
+header {
+    text-align: center;
+    margin-bottom: 40px;
+    padding: 30px 20px;
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    color: white;
+    border-radius: 12px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+header h1 {
+    font-size: 2.5rem;
+    margin-bottom: 10px;
+}
+
+.subtitle {
+    font-size: 1.2rem;
+    opacity: 0.9;
+}
+
+.disclaimer {
+    margin-top: 15px;
+    padding: 10px 20px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 8px;
+    font-size: 0.9rem;
+}
+
+/* Main Content */
+.main-content {
+    display: grid;
+    gap: 30px;
+}
+
+section {
+    background: var(--card-bg);
+    padding: 25px;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+section h2 {
+    margin-bottom: 20px;
+    font-size: 1.8rem;
+    color: var(--text-primary);
+}
+
+/* Chatbot Section */
+.chatbot-section {
+    grid-column: 1 / -1;
+}
+
+.chat-container {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.chat-messages {
+    height: 400px;
+    overflow-y: auto;
+    padding: 20px;
+    background: #f9fafb;
+}
+
+.bot-message, .user-message {
+    margin-bottom: 15px;
+    animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.bot-message .message-content {
+    background: var(--primary-color);
+    color: white;
+    padding: 12px 18px;
+    border-radius: 18px 18px 18px 4px;
+    display: inline-block;
+    max-width: 80%;
+}
+
+.user-message {
+    text-align: right;
+}
+
+.user-message .message-content {
+    background: var(--border-color);
+    color: var(--text-primary);
+    padding: 12px 18px;
+    border-radius: 18px 18px 4px 18px;
+    display: inline-block;
+    max-width: 80%;
+}
+
+.chat-input-container {
+    display: flex;
+    padding: 15px;
+    background: white;
+    border-top: 1px solid var(--border-color);
+}
+
+#chatInput {
+    flex: 1;
+    padding: 12px 15px;
+    border: 1px solid var(--border-color);
+    border-radius: 24px;
+    font-size: 1rem;
+    outline: none;
+}
+
+#chatInput:focus {
+    border-color: var(--primary-color);
+}
+
+#sendButton {
+    margin-left: 10px;
+    padding: 12px 30px;
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 24px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+#sendButton:hover {
+    background: #1d4ed8;
+}
+
+/* Stock Watchlist */
+.stock-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 15px;
+}
+
+.stock-card {
+    padding: 20px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.stock-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.stock-card .symbol {
+    font-size: 1.5rem;
+    font-weight: bold;
+    margin-bottom: 8px;
+}
+
+.stock-card .price {
+    font-size: 1.2rem;
+    margin-bottom: 5px;
+}
+
+.stock-card .change {
+    font-size: 0.9rem;
+}
+
+.change.positive {
+    color: var(--success-color);
+}
+
+.change.negative {
+    color: var(--danger-color);
+}
+
+/* Modal */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    background-color: rgba(0, 0, 0, 0.5);
+}
+
+.modal-content {
+    background-color: var(--card-bg);
+    margin: 5% auto;
+    padding: 30px;
+    border-radius: 12px;
+    width: 90%;
+    max-width: 800px;
+    max-height: 80vh;
+    overflow-y: auto;
+}
+
+.close {
+    color: var(--text-secondary);
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.close:hover {
+    color: var(--text-primary);
+}
+
+/* Tabs */
+.tabs {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid var(--border-color);
+}
+
+.tab-button {
+    padding: 12px 24px;
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    cursor: pointer;
+    font-size: 1rem;
+    color: var(--text-secondary);
+    transition: all 0.2s;
+}
+
+.tab-button:hover {
+    color: var(--primary-color);
+}
+
+.tab-button.active {
+    color: var(--primary-color);
+    border-bottom-color: var(--primary-color);
+}
+
+.tab-content {
+    display: none;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+/* Chart */
+.chart-controls {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.chart-controls select {
+    padding: 10px 15px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 1rem;
+}
+
+#stockChart {
+    max-height: 400px;
+}
+
+/* Predictions List */
+.prediction-item {
+    padding: 15px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+.prediction-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.prediction-action {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-weight: bold;
+    font-size: 0.9rem;
+}
+
+.prediction-action.BUY {
+    background: var(--success-color);
+    color: white;
+}
+
+.prediction-action.SELL {
+    background: var(--danger-color);
+    color: white;
+}
+
+.prediction-action.HOLD {
+    background: var(--warning-color);
+    color: white;
+}
+
+/* News List */
+.news-item {
+    padding: 15px;
+    border-left: 3px solid var(--primary-color);
+    margin-bottom: 15px;
+    background: #f9fafb;
+}
+
+.news-item h3 {
+    margin-bottom: 8px;
+    color: var(--text-primary);
+}
+
+.news-item .news-meta {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+}
+
+.news-item p {
+    margin-bottom: 10px;
+}
+
+.news-item a {
+    color: var(--primary-color);
+    text-decoration: none;
+}
+
+.news-item a:hover {
+    text-decoration: underline;
+}
+
+/* Accuracy Stats */
+.accuracy-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    margin-top: 20px;
+}
+
+.accuracy-card {
+    padding: 20px;
+    border-radius: 8px;
+    text-align: center;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.accuracy-card .stat-value {
+    font-size: 2.5rem;
+    font-weight: bold;
+    margin-bottom: 8px;
+}
+
+.accuracy-card .stat-label {
+    font-size: 0.9rem;
+    opacity: 0.9;
+}
+
+/* Loading */
+.loading {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+footer {
+    text-align: center;
+    margin-top: 40px;
+    padding: 20px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    header h1 {
+        font-size: 1.8rem;
+    }
+
+    .stock-grid {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    }
+
+    .tabs {
+        flex-wrap: wrap;
+    }
+
+    .modal-content {
+        width: 95%;
+        margin: 10% auto;
+    }
+}

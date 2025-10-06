@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Trading Chatbot - AI Day Trader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📈 Stock Trading Chatbot</h1>
+            <p class="subtitle">AI-Powered Day Trading Assistant</p>
+            <div class="disclaimer">
+                ⚠️ This is not financial advice. Consult a licensed financial advisor before making investment decisions.
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- Chatbot Section -->
+            <section class="chatbot-section">
+                <h2>💬 Ask the AI Trader</h2>
+                <div class="chat-container">
+                    <div id="chatMessages" class="chat-messages">
+                        <div class="bot-message">
+                            <div class="message-content">
+                                Hello! I'm your AI day trading assistant. Ask me about stock recommendations, trends, or specific companies like AAPL, TSLA, MSFT, etc.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chat-input-container">
+                        <input type="text" id="chatInput" placeholder="Ask me: 'Should I invest in AAPL?'" />
+                        <button id="sendButton" onclick="sendMessage()">Send</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Stock Watchlist -->
+            <section class="watchlist-section">
+                <h2>📊 Stock Watchlist</h2>
+                <div id="stockWatchlist" class="stock-grid">
+                    <div class="loading">Loading stocks...</div>
+                </div>
+            </section>
+
+            <!-- Stock Detail Modal -->
+            <div id="stockModal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeModal()">&times;</span>
+                    <div id="stockDetail">
+                        <div class="loading">Loading analysis...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tabs for different views -->
+            <section class="tabs-section">
+                <div class="tabs">
+                    <button class="tab-button active" onclick="openTab(event, 'charts')">Charts</button>
+                    <button class="tab-button" onclick="openTab(event, 'predictions')">Predictions</button>
+                    <button class="tab-button" onclick="openTab(event, 'news')">News</button>
+                    <button class="tab-button" onclick="openTab(event, 'accuracy')">Accuracy</button>
+                </div>
+
+                <!-- Charts Tab -->
+                <div id="charts" class="tab-content active">
+                    <h2>📈 Stock Chart</h2>
+                    <div class="chart-controls">
+                        <select id="chartSymbol" onchange="loadChart()">
+                            {% for stock in supported_stocks %}
+                            <option value="{{ stock }}">{{ stock }}</option>
+                            {% endfor %}
+                        </select>
+                        <select id="chartPeriod" onchange="loadChart()">
+                            <option value="1mo">1 Month</option>
+                            <option value="3mo" selected>3 Months</option>
+                            <option value="6mo">6 Months</option>
+                            <option value="1y">1 Year</option>
+                        </select>
+                    </div>
+                    <canvas id="stockChart"></canvas>
+                </div>
+
+                <!-- Predictions Tab -->
+                <div id="predictions" class="tab-content">
+                    <h2>🔮 Prediction History</h2>
+                    <div id="predictionsList">
+                        <div class="loading">Loading predictions...</div>
+                    </div>
+                </div>
+
+                <!-- News Tab -->
+                <div id="news" class="tab-content">
+                    <h2>📰 Market News</h2>
+                    <div class="news-controls">
+                        <select id="newsSymbol" onchange="loadNews()">
+                            <option value="">All News</option>
+                            {% for stock in supported_stocks %}
+                            <option value="{{ stock }}">{{ stock }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div id="newsList">
+                        <div class="loading">Loading news...</div>
+                    </div>
+                </div>
+
+                <!-- Accuracy Tab -->
+                <div id="accuracy" class="tab-content">
+                    <h2>🎯 Prediction Accuracy</h2>
+                    <div id="accuracyStats">
+                        <div class="loading">Loading accuracy stats...</div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <footer>
+            <p>&copy; 2025 Stock Trading Chatbot MVP | Powered by AI & AWS</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
