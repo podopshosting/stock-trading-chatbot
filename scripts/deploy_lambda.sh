@@ -110,6 +110,10 @@ deploy_function() {
                 --role-name $ROLE_NAME \
                 --policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
 
+            aws iam attach-role-policy \
+                --role-name $ROLE_NAME \
+                --policy-arn arn:aws:iam::aws:policy/SecretsManagerReadWrite
+
             echo "Waiting for role to propagate..."
             sleep 10
         fi
