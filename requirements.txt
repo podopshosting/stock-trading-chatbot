@@ -5,8 +5,7 @@ numpy==1.26.4
 requests==2.31.0
 
 # Technical analysis
-ta-lib-bin==0.4.28
-pandas-ta==0.3.14b0
+# pandas-ta (optional, using built-in calculations instead for Lambda compatibility)
 
 # AWS
 boto3==1.34.51

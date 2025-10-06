@@ -23,8 +23,8 @@ echo -e "${BLUE}Step 1: Creating Lambda Layer with dependencies...${NC}"
 # Create layer directory
 mkdir -p lambda-layer/python
 
-# Install dependencies to layer
-pip install -r requirements.txt -t lambda-layer/python/ --upgrade
+# Install dependencies to layer (use minimal requirements for Lambda)
+pip3 install -r requirements-lambda.txt -t lambda-layer/python/ --upgrade --break-system-packages --no-cache-dir
 
 # Create layer zip
 cd lambda-layer

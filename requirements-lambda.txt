@@ -1,0 +1,7 @@
+# Minimal requirements for Lambda deployment
+yfinance==0.2.37
+requests==2.31.0
+boto3==1.34.51
+openai==1.12.0
+vaderSentiment==3.3.2
+python-dotenv==1.0.1
