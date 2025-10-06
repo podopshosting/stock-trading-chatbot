@@ -36,18 +36,7 @@ def extract_stock_symbols(query: str) -> List[str]:
                    'PUT', 'SAY', 'SHE', 'TOO', 'USE', 'WHAT', 'WHEN', 'WHERE',
                    'WHICH', 'WHY', 'WILL', 'WITH', 'GOOD', 'BEST', 'STOCK',
                    'BUY', 'SELL', 'HOLD', 'SHOULD', 'COULD', 'WOULD', 'QUICK',
-                   'WATCH', 'TRADE', 'INVEST', 'ABOUT', 'TELL', 'THINK', 'DOING', 'DO',
-                   'IT', 'IS', 'AS', 'AT', 'BE', 'BY', 'IF', 'IN', 'OF', 'ON', 'OR', 'TO',
-                   'UP', 'SO', 'NO', 'AN', 'MY', 'WE', 'US', 'GO', 'ME', 'AM', 'FROM',
-                   'DOES', 'DIFFER', 'DIFFERS', 'DIFFERENCE', 'GROWTH', 'VALUE', 'INVESTING',
-                   'KEY', 'KNOW', 'ALSO', 'MADE', 'MAKE', 'LIKE', 'JUST', 'TIME', 'VERY',
-                   'THAN', 'FIND', 'GIVE', 'MANY', 'WELL', 'ONLY', 'THOSE', 'THEN', 'THEM',
-                   'INTO', 'SOME', 'MAY', 'TAKE', 'THESE', 'WANT', 'LOOK', 'FIRST',
-                   'SEC', 'ROLE', 'RULE', 'ACT', 'LAW', 'LAWS', 'NYSE', 'WORKS', 'WORK',
-                   'HELP', 'HELPS', 'RISK', 'RISKS', 'MEAN', 'MEANS', 'TIPS', 'IDEAS',
-                   'MAJOR', 'MINOR', 'BASIC', 'BOTH', 'MUCH', 'MORE', 'MOST', 'LESS',
-                   'EACH', 'OTHER', 'SUCH', 'EVEN', 'SAME', 'LEARN', 'START', 'LONG',
-                   'HIGH', 'LOW', 'OPEN', 'CLOSE', 'LAST', 'NEXT', 'BACK', 'DOWN'}
+                   'WATCH', 'TRADE', 'INVEST', 'ABOUT', 'TELL'}
 
     for match in matches:
         if match not in common_words and len(match) <= 5:
@@ -171,21 +160,10 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}"
         }
-        system_prompt = """You are a knowledgeable stock trading advisor who provides concise, data-driven analysis with ML insights.
-
-US MARKET EXPERTISE:
-- Markets: NYSE (largest), Nasdaq (tech-focused). Indices: S&P 500 (500 large-cap, 80% market), Dow Jones (30 blue-chips), Nasdaq Composite (3000+ stocks)
-- Instruments: Stocks (common/preferred, growth/value), bonds (debt securities), mutual funds/ETFs (diversified)
-- Investing Strategies: Value investing (low P/E, long-term), Growth investing (high-earnings tech), Diversification (spread risk via ETFs)
-- Key Regulations: Securities Act 1933 (disclosure), Exchange Act 1934 (SEC oversight, anti-fraud Rule 10b-5), Sarbanes-Oxley (transparency), Dodd-Frank (consumer protection)
-- Power Players: Warren Buffett (value, long-term hold, "own for 10 years"), Peter Lynch (invest in what you know, reasonable P/E), Ray Dalio (risk-balanced, "All Weather" portfolio)
-
-Keep responses under 150 words."""
-
         data = {
             "model": "gpt-4o-mini",
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": "You are a knowledgeable stock trading advisor who provides concise, data-driven analysis with ML insights. Keep responses under 150 words."},
                 {"role": "user", "content": prompt}
             ],
             "max_tokens": 300,
