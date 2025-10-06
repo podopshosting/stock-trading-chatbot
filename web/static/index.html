@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Trading Chatbot - AI Day Trader</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            margin-bottom: 15px;
+        }
+
+        .disclaimer {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .chatbot-section {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            margin-bottom: 30px;
+        }
+
+        .chatbot-section h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        .chat-container {
+            background: #f8f9fa;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .chat-messages {
+            height: 500px;
+            overflow-y: auto;
+            padding: 20px;
+            background: white;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .user-message {
+            align-items: flex-end;
+        }
+
+        .bot-message {
+            align-items: flex-start;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            line-height: 1.5;
+        }
+
+        .user-message .message-content {
+            background: #667eea;
+            color: white;
+        }
+
+        .bot-message .message-content {
+            background: #f1f3f5;
+            color: #333;
+        }
+
+        .typing-indicator {
+            opacity: 0.7;
+        }
+
+        .chat-input-container {
+            display: flex;
+            padding: 15px;
+            background: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+        }
+
+        #chatInput {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 24px;
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        #chatInput:focus {
+            border-color: #667eea;
+        }
+
+        #sendButton {
+            margin-left: 10px;
+            padding: 12px 30px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 24px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        #sendButton:hover {
+            background: #5568d3;
+        }
+
+        #sendButton:disabled {
+            background: #adb5bd;
+            cursor: not-allowed;
+        }
+
+        .supported-stocks {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .supported-stocks h2 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+
+        .stock-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .stock-badge {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        footer {
+            text-align: center;
+            color: white;
+            margin-top: 30px;
+            opacity: 0.8;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #6c757d;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border: 1px solid #f5c6cb;
+        }
+
+        @media (max-width: 768px) {
+            header h1 {
+                font-size: 2rem;
+            }
+
+            .chatbot-section {
+                padding: 20px;
+            }
+
+            .chat-messages {
+                height: 400px;
+            }
+
+            .message-content {
+                max-width: 85%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📈 Stock Trading Chatbot</h1>
+            <p class="subtitle">AI-Powered Day Trading Assistant</p>
+            <div class="disclaimer">
+                ⚠️ This is not financial advice. Consult a licensed financial advisor before making investment decisions.
+            </div>
+        </header>
+
+        <section class="chatbot-section">
+            <h2>💬 Ask the AI Trader</h2>
+            <div class="chat-container">
+                <div id="chatMessages" class="chat-messages">
+                    <div class="message bot-message">
+                        <div class="message-content">
+                            Hello! I'm your AI day trading assistant powered by GPT-4o-mini. Ask me about stock recommendations, trends, or specific companies like AAPL, TSLA, MSFT, GOOGL, AMZN, NVDA, META, NFLX, AMD, and INTC.
+                        </div>
+                    </div>
+                </div>
+                <div class="chat-input-container">
+                    <input type="text" id="chatInput" placeholder="Ask me: 'Should I invest in AAPL?'" />
+                    <button id="sendButton" onclick="sendMessage()">Send</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="supported-stocks">
+            <h2>📊 Supported Stocks</h2>
+            <div class="stock-badges">
+                <span class="stock-badge">AAPL - Apple</span>
+                <span class="stock-badge">TSLA - Tesla</span>
+                <span class="stock-badge">MSFT - Microsoft</span>
+                <span class="stock-badge">GOOGL - Google</span>
+                <span class="stock-badge">AMZN - Amazon</span>
+                <span class="stock-badge">NVDA - NVIDIA</span>
+                <span class="stock-badge">META - Meta</span>
+                <span class="stock-badge">NFLX - Netflix</span>
+                <span class="stock-badge">AMD - AMD</span>
+                <span class="stock-badge">INTC - Intel</span>
+            </div>
+        </section>
+
+        <footer>
+            <p>&copy; 2025 Stock Trading Chatbot MVP | Powered by AI & AWS Lambda</p>
+        </footer>
+    </div>
+
+    <script>
+        // API Gateway endpoint
+        const API_ENDPOINT = 'https://lmi4hshs7h.execute-api.us-east-2.amazonaws.com/prod/chatbot';
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('chatInput').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    sendMessage();
+                }
+            });
+        });
+
+        async function sendMessage() {
+            const input = document.getElementById('chatInput');
+            const query = input.value.trim();
+            const sendButton = document.getElementById('sendButton');
+
+            if (!query) return;
+
+            // Disable input
+            input.disabled = true;
+            sendButton.disabled = true;
+
+            // Add user message to chat
+            addMessage(query, 'user');
+            input.value = '';
+
+            // Show typing indicator
+            const typingDiv = document.createElement('div');
+            typingDiv.className = 'message bot-message typing-indicator';
+            typingDiv.innerHTML = '<div class="message-content">Thinking...</div>';
+            typingDiv.id = 'typing-indicator';
+            document.getElementById('chatMessages').appendChild(typingDiv);
+            scrollToBottom();
+
+            try {
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ query: query })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                // Remove typing indicator
+                const indicator = document.getElementById('typing-indicator');
+                if (indicator) {
+                    indicator.remove();
+                }
+
+                // Add bot response
+                if (data.response) {
+                    addMessage(data.response, 'bot');
+                } else if (data.error) {
+                    addMessage('Error: ' + data.error, 'bot');
+                } else {
+                    addMessage('Sorry, I received an unexpected response. Please try again.', 'bot');
+                }
+
+            } catch (error) {
+                // Remove typing indicator
+                const indicator = document.getElementById('typing-indicator');
+                if (indicator) {
+                    indicator.remove();
+                }
+
+                console.error('Error:', error);
+                addMessage('Sorry, I encountered a connection error. Please check your internet connection and try again.', 'bot');
+            } finally {
+                // Re-enable input
+                input.disabled = false;
+                sendButton.disabled = false;
+                input.focus();
+            }
+        }
+
+        function addMessage(text, type) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message ' + (type === 'user' ? 'user-message' : 'bot-message');
+
+            // Convert markdown-style bold to HTML
+            let formattedText = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+            messageDiv.innerHTML = `<div class="message-content">${formattedText}</div>`;
+            messagesDiv.appendChild(messageDiv);
+            scrollToBottom();
+        }
+
+        function scrollToBottom() {
+            const messagesDiv = document.getElementById('chatMessages');
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+    </script>
+</body>
+</html>

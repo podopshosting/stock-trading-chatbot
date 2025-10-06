@@ -1,0 +1,76 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  deploy:
+    name: Deploy Lambda Functions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Deploy Chatbot Router
+        run: |
+          cd lambda-micro/chatbot-router
+          mkdir -p package
+          pip install -r requirements.txt -t package/ --quiet
+          cd package && zip -r ../../../chatbot.zip . && cd ..
+          zip -g ../../chatbot.zip handler.py
+          aws lambda update-function-code \
+            --function-name stock-chatbot-router \
+            --zip-file fileb://../../chatbot.zip \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy Stock Data Service
+        run: |
+          cd lambda-micro/stock-data
+          zip -r ../../stock-data.zip handler.py
+          aws lambda update-function-code \
+            --function-name stock-data-service \
+            --zip-file fileb://../../stock-data.zip \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy News Service
+        run: |
+          cd lambda-micro/news-fetcher
+          zip -r ../../news.zip handler.py
+          aws lambda update-function-code \
+            --function-name stock-news-service \
+            --zip-file fileb://../../news.zip \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy Prediction Service
+        run: |
+          cd lambda-micro/prediction-tracker
+          zip -r ../../predictions.zip handler.py
+          aws lambda update-function-code \
+            --function-name stock-prediction-service \
+            --zip-file fileb://../../predictions.zip \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deployment Summary
+        run: |
+          echo "✅ All Lambda functions updated successfully!"
+          echo "Region: ${{ env.AWS_REGION }}"
+          echo "Timestamp: $(date)"

@@ -1,0 +1,93 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/Lambda", "Invocations", {"stat": "Sum", "label": "Chatbot Router"}],
+          [".", ".", {"stat": "Sum", "label": "Stock Data Service"}],
+          [".", ".", {"stat": "Sum", "label": "News Service"}],
+          [".", ".", {"stat": "Sum", "label": "Prediction Service"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-2",
+        "title": "Lambda Invocations",
+        "period": 300
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/Lambda", "Duration", {"stat": "Average", "label": "Chatbot Router"}],
+          [".", ".", {"stat": "Average", "label": "Stock Data"}],
+          [".", ".", {"stat": "Average", "label": "News Fetcher"}],
+          [".", ".", {"stat": "Average", "label": "Predictions"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-2",
+        "title": "Lambda Duration (ms)",
+        "period": 300
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/Lambda", "Errors", {"stat": "Sum", "label": "Errors"}],
+          [".", "Throttles", {"stat": "Sum", "label": "Throttles"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-2",
+        "title": "Lambda Errors & Throttles",
+        "period": 300,
+        "yAxis": {
+          "left": {
+            "min": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/ApiGateway", "Count", {"stat": "Sum"}],
+          [".", "4XXError", {"stat": "Sum"}],
+          [".", "5XXError", {"stat": "Sum"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-2",
+        "title": "API Gateway Requests & Errors",
+        "period": 300
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/ApiGateway", "Latency", {"stat": "Average"}],
+          [".", "IntegrationLatency", {"stat": "Average"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-2",
+        "title": "API Gateway Latency (ms)",
+        "period": 300
+      }
+    },
+    {
+      "type": "log",
+      "properties": {
+        "query": "SOURCE '/aws/lambda/stock-chatbot-router'\n| fields @timestamp, @message\n| filter @message like /Error/\n| sort @timestamp desc\n| limit 20",
+        "region": "us-east-2",
+        "title": "Recent Chatbot Errors",
+        "stacked": false
+      }
+    }
+  ]
+}
