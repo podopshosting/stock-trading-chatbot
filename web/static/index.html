@@ -22,11 +22,25 @@
             --border: #334155;
         }
 
+        body.light-mode {
+            --bg-primary: #ffffff;
+            --bg-secondary: #f8fafc;
+            --bg-tertiary: #e2e8f0;
+            --text-primary: #1e293b;
+            --text-secondary: #475569;
+            --border: #e2e8f0;
+        }
+
         body {
             font-family: 'Inter', sans-serif;
-            background: linear-gradient(135deg, var(--bg-primary) 0%, #1a1f3a 100%);
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
             min-height: 100vh;
             color: var(--text-primary);
+            transition: all 0.3s ease;
+        }
+
+        body.light-mode {
+            background: linear-gradient(135deg, #f8fafc 0%, #e0e7ff 100%);
         }
 
         .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
@@ -34,6 +48,26 @@
         header {
             text-align: center;
             padding: 40px 20px 30px;
+            position: relative;
+        }
+
+        .theme-toggle {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: var(--bg-secondary);
+            border: 2px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1.2rem;
+            transition: all 0.3s;
+        }
+
+        .theme-toggle:hover {
+            transform: scale(1.05);
+            border-color: var(--primary);
         }
 
         .logo { font-size: 3rem; animation: float 3s ease-in-out infinite; }
@@ -51,7 +85,7 @@
         .version-badge {
             background: rgba(99, 102, 241, 0.2);
             border: 1px solid var(--primary);
-            color: #818cf8;
+            color: var(--primary);
             padding: 4px 12px;
             border-radius: 20px;
             font-size: 0.75rem;
@@ -68,6 +102,7 @@
 
         @media (max-width: 1024px) {
             .main-grid { grid-template-columns: 1fr; }
+            .theme-toggle { top: 10px; right: 10px; }
         }
 
         .chat-section {
@@ -77,7 +112,7 @@
             height: 600px;
             display: flex;
             flex-direction: column;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
         }
 
         .chat-header {
@@ -106,7 +141,6 @@
             display: flex;
             flex-direction: column;
             animation: slideIn 0.3s ease-out;
-            position: relative;
         }
 
         @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -135,6 +169,19 @@
             color: var(--text-primary);
             border: 1px solid var(--border);
             border-bottom-left-radius: 4px;
+        }
+
+        .stock-link {
+            color: var(--primary);
+            text-decoration: none;
+            cursor: pointer;
+            font-weight: 600;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s;
+        }
+
+        .stock-link:hover {
+            border-bottom-color: var(--primary);
         }
 
         .pin-button {
@@ -222,7 +269,7 @@
             border-radius: 16px;
             border: 1px solid var(--border);
             padding: 20px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         }
 
         .sidebar-card h3 { font-size: 1rem; margin-bottom: 15px; }
@@ -247,18 +294,37 @@
 
         .watchlist-symbol {
             font-weight: 600;
-            color: #818cf8;
+            color: var(--primary);
             font-size: 1.1rem;
         }
 
-        .watchlist-remove {
-            background: rgba(239, 68, 68, 0.2);
+        .watchlist-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .watchlist-details, .watchlist-remove {
+            background: rgba(99, 102, 241, 0.2);
             border: none;
-            color: var(--danger);
+            color: var(--primary);
             padding: 4px 8px;
             border-radius: 6px;
             cursor: pointer;
             font-size: 0.75rem;
+            transition: all 0.3s;
+        }
+
+        .watchlist-remove {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+        }
+
+        .watchlist-details:hover {
+            background: rgba(99, 102, 241, 0.3);
+        }
+
+        .watchlist-remove:hover {
+            background: rgba(239, 68, 68, 0.3);
         }
 
         .watchlist-empty {
@@ -266,6 +332,98 @@
             font-size: 0.85rem;
             text-align: center;
             padding: 20px;
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            animation: fadeIn 0.3s;
+        }
+
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .modal-content {
+            background: var(--bg-secondary);
+            margin: 5% auto;
+            padding: 0;
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            width: 90%;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+            animation: slideDown 0.3s;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        @keyframes slideDown { from { transform: translateY(-50px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+        .modal-header {
+            background: linear-gradient(135deg, var(--primary), #8b5cf6);
+            color: white;
+            padding: 20px 25px;
+            border-radius: 20px 20px 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 { font-size: 1.5rem; }
+
+        .close {
+            color: white;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.3s;
+        }
+
+        .close:hover {
+            transform: scale(1.2);
+        }
+
+        .modal-body {
+            padding: 25px;
+            color: var(--text-primary);
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .info-item {
+            background: var(--bg-primary);
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+
+        .info-label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-bottom: 5px;
+        }
+
+        .info-value {
+            color: var(--text-primary);
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .loading-spinner {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
         }
 
         .stock-grid {
@@ -277,13 +435,14 @@
         .stock-badge {
             background: rgba(99, 102, 241, 0.1);
             border: 1px solid rgba(99, 102, 241, 0.3);
-            color: #818cf8;
+            color: var(--primary);
             padding: 8px 12px;
             border-radius: 10px;
             font-weight: 600;
             font-size: 0.85rem;
             text-align: center;
             transition: all 0.3s;
+            cursor: pointer;
         }
 
         .stock-badge:hover {
@@ -323,7 +482,7 @@
         footer {
             text-align: center;
             padding: 30px 20px;
-            color: #94a3b8;
+            color: var(--text-secondary);
             font-size: 0.9rem;
         }
     </style>
@@ -331,6 +490,9 @@
 <body>
     <div class="container">
         <header>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+                <span id="themeIcon">🌙</span>
+            </button>
             <div class="logo">📈</div>
             <h1>Stock Trading AI</h1>
             <p class="subtitle">Real-Time Market Analysis Powered by AI</p>
@@ -359,7 +521,8 @@ I analyze ANY stock with real-time data:
 "Tell me about COIN"
 "Should I buy AAPL?"
 
-📌 Click "📌 Pin" on any stock analysis to save it to your watchlist!</div>
+📌 Click stock symbols or "Pin" to save to your watchlist!
+🌙 Toggle dark/light mode in the header</div>
                     </div>
                 </div>
 
@@ -382,14 +545,14 @@ I analyze ANY stock with real-time data:
                 <div class="sidebar-card">
                     <h3>📊 Popular Stocks</h3>
                     <div class="stock-grid">
-                        <div class="stock-badge">AAPL</div>
-                        <div class="stock-badge">TSLA</div>
-                        <div class="stock-badge">MSFT</div>
-                        <div class="stock-badge">GOOGL</div>
-                        <div class="stock-badge">AMZN</div>
-                        <div class="stock-badge">NVDA</div>
-                        <div class="stock-badge">META</div>
-                        <div class="stock-badge">COIN</div>
+                        <div class="stock-badge" onclick="askAboutStock('AAPL')">AAPL</div>
+                        <div class="stock-badge" onclick="askAboutStock('TSLA')">TSLA</div>
+                        <div class="stock-badge" onclick="askAboutStock('MSFT')">MSFT</div>
+                        <div class="stock-badge" onclick="askAboutStock('GOOGL')">GOOGL</div>
+                        <div class="stock-badge" onclick="askAboutStock('AMZN')">AMZN</div>
+                        <div class="stock-badge" onclick="askAboutStock('NVDA')">NVDA</div>
+                        <div class="stock-badge" onclick="askAboutStock('META')">META</div>
+                        <div class="stock-badge" onclick="askAboutStock('COIN')">COIN</div>
                     </div>
                 </div>
 
@@ -398,8 +561,8 @@ I analyze ANY stock with real-time data:
                     <ul class="features-list">
                         <li>ALL stocks supported</li>
                         <li>Real-time prices</li>
-                        <li>RSI analysis</li>
-                        <li>Buy/Sell signals</li>
+                        <li>Company details</li>
+                        <li>Light/Dark mode</li>
                         <li>Save watchlist</li>
                         <li>AI insights</li>
                     </ul>
@@ -416,11 +579,42 @@ I analyze ANY stock with real-time data:
         </footer>
     </div>
 
+    <!-- Stock Details Modal -->
+    <div id="stockModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">Stock Details</h2>
+                <span class="close" onclick="closeModal()">&times;</span>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <div class="loading-spinner">Loading stock information...</div>
+            </div>
+        </div>
+    </div>
+
     <script>
         const API_ENDPOINT = 'https://lmi4hshs7h.execute-api.us-east-2.amazonaws.com/prod/chatbot';
         let chatHistory = [];
 
-        // Load watchlist from localStorage
+        // Theme Management
+        function toggleTheme() {
+            const body = document.body;
+            const icon = document.getElementById('themeIcon');
+            body.classList.toggle('light-mode');
+            const isLight = body.classList.contains('light-mode');
+            icon.textContent = isLight ? '☀️' : '🌙';
+            localStorage.setItem('theme', isLight ? 'light' : 'dark');
+        }
+
+        function loadTheme() {
+            const theme = localStorage.getItem('theme');
+            if (theme === 'light') {
+                document.body.classList.add('light-mode');
+                document.getElementById('themeIcon').textContent = '☀️';
+            }
+        }
+
+        // Watchlist Management
         function loadWatchlist() {
             const watchlist = JSON.parse(localStorage.getItem('stockWatchlist') || '[]');
             renderWatchlist(watchlist);
@@ -434,9 +628,12 @@ I analyze ANY stock with real-time data:
             }
 
             container.innerHTML = watchlist.map(item => `
-                <div class="watchlist-item" onclick="askAboutStock('${item.symbol}')">
-                    <span class="watchlist-symbol">${item.symbol}</span>
-                    <button class="watchlist-remove" onclick="event.stopPropagation(); removeFromWatchlist('${item.symbol}')">Remove</button>
+                <div class="watchlist-item">
+                    <span class="watchlist-symbol" onclick="askAboutStock('${item.symbol}')">${item.symbol}</span>
+                    <div class="watchlist-actions">
+                        <button class="watchlist-details" onclick="event.stopPropagation(); showStockDetails('${item.symbol}')">Details</button>
+                        <button class="watchlist-remove" onclick="event.stopPropagation(); removeFromWatchlist('${item.symbol}')">Remove</button>
+                    </div>
                 </div>
             `).join('');
         }
@@ -461,18 +658,110 @@ I analyze ANY stock with real-time data:
             renderWatchlist(watchlist);
         }
 
+        // Stock Details Modal
+        async function showStockDetails(symbol) {
+            const modal = document.getElementById('stockModal');
+            const modalTitle = document.getElementById('modalTitle');
+            const modalBody = document.getElementById('modalBody');
+            
+            modal.style.display = 'block';
+            modalTitle.textContent = `${symbol} - Company Details`;
+            modalBody.innerHTML = '<div class="loading-spinner">Loading detailed information...</div>';
+
+            try {
+                // Get fresh stock data
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: `Tell me about ${symbol}` })
+                });
+
+                const data = await response.json();
+                
+                if (data.data) {
+                    const stockData = data.data;
+                    const priceChange = parseFloat(stockData.change);
+                    const changeClass = priceChange >= 0 ? 'var(--success)' : 'var(--danger)';
+                    const changeSymbol = priceChange >= 0 ? '+' : '';
+
+                    modalBody.innerHTML = `
+                        <h3 style="margin-bottom: 20px;">${symbol} - ${stockData.price ? '$' + stockData.price : 'N/A'}</h3>
+                        
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <div class="info-label">Current Price</div>
+                                <div class="info-value">$${stockData.price || 'N/A'}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Change</div>
+                                <div class="info-value" style="color: ${changeClass}">
+                                    ${changeSymbol}$${Math.abs(stockData.change || 0).toFixed(2)} (${stockData.change_percent || 'N/A'})
+                                </div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Volume</div>
+                                <div class="info-value">${(stockData.volume || 0).toLocaleString()}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Trend</div>
+                                <div class="info-value">${(stockData.trend || 'N/A').toUpperCase()}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">RSI (14-day)</div>
+                                <div class="info-value">${stockData.rsi ? stockData.rsi.toFixed(2) : 'N/A'}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Recommendation</div>
+                                <div class="info-value">${(stockData.recommendation || 'N/A').toUpperCase()}</div>
+                            </div>
+                        </div>
+
+                        <div style="margin-top: 25px; padding: 20px; background: var(--bg-primary); border-radius: 12px; border: 1px solid var(--border);">
+                            <h4 style="margin-bottom: 15px;">📊 Analysis</h4>
+                            <p style="line-height: 1.8; color: var(--text-secondary);">${data.response || 'Analysis not available'}</p>
+                        </div>
+
+                        <div style="margin-top: 20px; padding: 15px; background: rgba(99, 102, 241, 0.1); border-radius: 12px; border: 1px solid var(--primary);">
+                            <strong>💡 Quick Actions:</strong><br><br>
+                            <button onclick="askAboutStock('${symbol}')" style="background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; margin-right: 10px;">Ask AI About ${symbol}</button>
+                            <button onclick="closeModal()" style="background: var(--bg-tertiary); color: var(--text-primary); border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer;">Close</button>
+                        </div>
+                    `;
+                } else {
+                    modalBody.innerHTML = '<p style="text-align: center; padding: 40px;">Unable to load stock details. Please try again.</p>';
+                }
+            } catch (error) {
+                console.error('Error loading stock details:', error);
+                modalBody.innerHTML = '<p style="text-align: center; padding: 40px; color: var(--danger);">Error loading stock information. Please try again.</p>';
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('stockModal').style.display = 'none';
+        }
+
+        window.onclick = function(event) {
+            const modal = document.getElementById('stockModal');
+            if (event.target == modal) {
+                closeModal();
+            }
+        }
+
         function askAboutStock(symbol) {
             document.getElementById('chatInput').value = `Tell me about ${symbol}`;
             sendMessage();
         }
 
+        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
+            loadTheme();
             loadWatchlist();
             document.getElementById('chatInput').addEventListener('keypress', function(e) {
                 if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
             });
         });
 
+        // Send Message
         async function sendMessage() {
             const input = document.getElementById('chatInput');
             const query = input.value.trim();
@@ -500,7 +789,7 @@ I analyze ANY stock with real-time data:
 
                 const data = await response.json();
                 document.getElementById('typing-indicator')?.remove();
-                addMessage(data.response || '❌ Error occurred', 'bot', data.symbol, query);
+                addMessage(data.response || '❌ Error occurred', 'bot', data.symbol, query, data.data);
             } catch (error) {
                 document.getElementById('typing-indicator')?.remove();
                 addMessage('❌ Connection error. Please try again.', 'bot');
@@ -511,12 +800,24 @@ I analyze ANY stock with real-time data:
             }
         }
 
-        function addMessage(text, type, symbol, query) {
+        function addMessage(text, type, symbol, query, stockData) {
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message ' + (type === 'user' ? 'user-message' : 'bot-message');
             
+            // Make stock symbols clickable in bot messages
             let formattedText = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
             
+            if (type === 'bot' && symbol) {
+                // Make the stock header clickable
+                const stockHeader = `📊 **${symbol}**`;
+                if (formattedText.includes(stockHeader)) {
+                    formattedText = formattedText.replace(
+                        stockHeader,
+                        `📊 <a class="stock-link" onclick="showStockDetails('${symbol}')">${symbol}</a>`
+                    );
+                }
+            }
+
             let pinButton = '';
             if (symbol && type === 'bot') {
                 pinButton = `<button class="pin-button" onclick="pinStock('${symbol}', \`${query}\`, \`${text.replace(/`/g, '\\`').replace(/\$/g, '\\$')}\`)">📌 Pin ${symbol}</button>`;
@@ -527,7 +828,7 @@ I analyze ANY stock with real-time data:
             scrollToBottom();
 
             if (symbol) {
-                chatHistory.push({ query, response: text, symbol, timestamp: new Date().toISOString() });
+                chatHistory.push({ query, response: text, symbol, data: stockData, timestamp: new Date().toISOString() });
             }
         }
 
