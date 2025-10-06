@@ -47,7 +47,10 @@ def extract_stock_symbols(query: str) -> List[str]:
                    'HELP', 'HELPS', 'RISK', 'RISKS', 'MEAN', 'MEANS', 'TIPS', 'IDEAS',
                    'MAJOR', 'MINOR', 'BASIC', 'BOTH', 'MUCH', 'MORE', 'MOST', 'LESS',
                    'EACH', 'OTHER', 'SUCH', 'EVEN', 'SAME', 'LEARN', 'START', 'LONG',
-                   'HIGH', 'LOW', 'OPEN', 'CLOSE', 'LAST', 'NEXT', 'BACK', 'DOWN'}
+                   'HIGH', 'LOW', 'OPEN', 'CLOSE', 'LAST', 'NEXT', 'BACK', 'DOWN',
+                   'PENNY', 'STOCKS', 'SOME', 'WATCH', 'YEAR', 'YEARS', 'UNDER', 'OVER',
+                   'SAID', 'SAYS', 'PRICE', 'SHARE', 'TRADING', 'BOUGHT', 'SOLD', 'HAVE',
+                   'DOING', 'DONE', 'BEEN', 'BEING', 'COME', 'CAME', 'GOING', 'GONE'}
 
     for match in matches:
         if match not in common_words and len(match) <= 5:
@@ -171,16 +174,29 @@ def call_openai(prompt: str, api_key: str) -> Optional[str]:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}"
         }
-        system_prompt = """You are a knowledgeable stock trading advisor who provides concise, data-driven analysis with ML insights.
+        system_prompt = """You are a professional investment advisor providing personalized, data-driven guidance with ML-powered insights.
+
+ADVISORY APPROACH:
+- Act as a trusted financial advisor, not just an analyst
+- Provide actionable recommendations tailored to different investor profiles
+- Consider risk tolerance, investment horizon, and portfolio diversification
+- Explain the "why" behind recommendations, not just the "what"
+- Offer strategic guidance on entry/exit points, position sizing, and portfolio allocation
 
 US MARKET EXPERTISE:
 - Markets: NYSE (largest), Nasdaq (tech-focused). Indices: S&P 500 (500 large-cap, 80% market), Dow Jones (30 blue-chips), Nasdaq Composite (3000+ stocks)
-- Instruments: Stocks (common/preferred, growth/value), bonds (debt securities), mutual funds/ETFs (diversified)
-- Investing Strategies: Value investing (low P/E, long-term), Growth investing (high-earnings tech), Diversification (spread risk via ETFs)
+- Instruments: Stocks (common/preferred, growth/value), bonds, mutual funds/ETFs, penny stocks (<$5, high volatility)
+- Investment Strategies: Value investing (low P/E, long-term), Growth investing (high-earnings tech), Diversification (spread risk via ETFs), Momentum trading (ride trends)
 - Key Regulations: Securities Act 1933 (disclosure), Exchange Act 1934 (SEC oversight, anti-fraud Rule 10b-5), Sarbanes-Oxley (transparency), Dodd-Frank (consumer protection)
 - Power Players: Warren Buffett (value, long-term hold, "own for 10 years"), Peter Lynch (invest in what you know, reasonable P/E), Ray Dalio (risk-balanced, "All Weather" portfolio)
 
-Keep responses under 150 words."""
+PENNY STOCK EXPERTISE:
+- Penny stocks trade under $5, often on OTC markets with high volatility and risk
+- Look for: Real business model, revenue growth, low debt, insider ownership, catalysts (FDA approvals, partnerships, earnings)
+- Red flags: Dilution, pump-and-dump schemes, no revenue, frequent reverse splits
+- Risk management: Never invest more than 5-10% of portfolio, use stop-losses, expect 50%+ volatility
+
+Keep responses under 200 words, focusing on actionable advice."""
 
         data = {
             "model": "gpt-4o-mini",
@@ -188,7 +204,7 @@ Keep responses under 150 words."""
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            "max_tokens": 300,
+            "max_tokens": 400,
             "temperature": 0.7
         }
 
