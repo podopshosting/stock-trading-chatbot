@@ -4,372 +4,403 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-    <meta http-equiv="Pragma" content="no-cache">
-    <meta http-equiv="Expires" content="0">
-    <title>Stock Trading Chatbot - AI Day Trader (v2.0 - Alpha Vantage)</title>
+    <title>Stock Trading AI - Real-Time Market Analysis</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        :root {
+            --primary: #6366f1;
+            --primary-dark: #4f46e5;
+            --success: #10b981;
+            --danger: #ef4444;
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --border: #334155;
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, #1a1f3a 100%);
             min-height: 100vh;
-            padding: 20px;
+            color: var(--text-primary);
         }
 
-        .container {
-            max-width: 1000px;
-            margin: 0 auto;
-        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
 
         header {
             text-align: center;
-            color: white;
-            margin-bottom: 30px;
+            padding: 40px 20px 30px;
         }
 
-        header h1 {
+        .logo { font-size: 3rem; animation: float 3s ease-in-out infinite; }
+        @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+
+        h1 {
             font-size: 2.5rem;
-            margin-bottom: 10px;
+            background: linear-gradient(135deg, #818cf8, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin: 10px 0;
         }
 
-        .subtitle {
-            font-size: 1.2rem;
-            opacity: 0.9;
-            margin-bottom: 15px;
+        .subtitle { color: var(--text-secondary); margin: 10px 0; }
+        .version-badge {
+            background: rgba(99, 102, 241, 0.2);
+            border: 1px solid var(--primary);
+            color: #818cf8;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            display: inline-block;
+            margin-top: 10px;
         }
 
-        .disclaimer {
-            background: rgba(255, 255, 255, 0.2);
-            padding: 10px 20px;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            max-width: 600px;
-            margin: 0 auto;
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 20px;
+            margin-top: 30px;
         }
 
-        .chatbot-section {
-            background: white;
-            border-radius: 12px;
-            padding: 30px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-            margin-bottom: 30px;
+        @media (max-width: 1024px) {
+            .main-grid { grid-template-columns: 1fr; }
         }
 
-        .chatbot-section h2 {
-            color: #333;
-            margin-bottom: 20px;
-        }
-
-        .chat-container {
-            background: #f8f9fa;
-            border-radius: 8px;
-            overflow: hidden;
-        }
-
-        .chat-messages {
-            height: 500px;
-            overflow-y: auto;
-            padding: 20px;
-            background: white;
-        }
-
-        .message {
-            margin-bottom: 15px;
+        .chat-section {
+            background: var(--bg-secondary);
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            height: 600px;
             display: flex;
             flex-direction: column;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
         }
 
-        .user-message {
-            align-items: flex-end;
+        .chat-header {
+            padding: 20px 25px;
+            background: linear-gradient(135deg, var(--primary), #8b5cf6);
+            color: white;
+            border-radius: 20px 20px 0 0;
         }
 
-        .bot-message {
-            align-items: flex-start;
+        .chat-header h2 { font-size: 1.2rem; margin-bottom: 4px; }
+        .chat-header p { font-size: 0.85rem; opacity: 0.9; }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 25px;
+            background: var(--bg-primary);
         }
+
+        .chat-messages::-webkit-scrollbar { width: 8px; }
+        .chat-messages::-webkit-scrollbar-track { background: var(--bg-secondary); }
+        .chat-messages::-webkit-scrollbar-thumb { background: var(--bg-tertiary); border-radius: 10px; }
+
+        .message {
+            margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        .user-message { align-items: flex-end; }
+        .bot-message { align-items: flex-start; }
 
         .message-content {
-            max-width: 70%;
-            padding: 12px 16px;
-            border-radius: 18px;
-            line-height: 1.5;
+            max-width: 85%;
+            padding: 14px 18px;
+            border-radius: 16px;
+            line-height: 1.6;
+            font-size: 0.95rem;
+            white-space: pre-wrap;
         }
 
         .user-message .message-content {
-            background: #667eea;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
             color: white;
+            border-bottom-right-radius: 4px;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
         }
 
         .bot-message .message-content {
-            background: #f1f3f5;
-            color: #333;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-bottom-left-radius: 4px;
         }
 
-        .typing-indicator {
-            opacity: 0.7;
+        .typing-indicator { display: flex; gap: 4px; padding: 14px 18px; }
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            background: #94a3b8;
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typing { 0%, 60%, 100% { transform: translateY(0); opacity: 0.7; } 30% { transform: translateY(-10px); opacity: 1; } }
+
+        .chat-input-wrapper {
+            padding: 20px 25px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
         }
 
-        .chat-input-container {
-            display: flex;
-            padding: 15px;
-            background: #f8f9fa;
-            border-top: 1px solid #e9ecef;
-        }
+        .chat-input-container { display: flex; gap: 12px; }
 
         #chatInput {
             flex: 1;
-            padding: 12px 16px;
-            border: 2px solid #e9ecef;
-            border-radius: 24px;
-            font-size: 1rem;
+            padding: 14px 18px;
+            background: var(--bg-primary);
+            border: 2px solid var(--border);
+            border-radius: 12px;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            font-family: inherit;
             outline: none;
-            transition: border-color 0.3s;
+            transition: all 0.3s;
         }
 
         #chatInput:focus {
-            border-color: #667eea;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
         }
 
         #sendButton {
-            margin-left: 10px;
-            padding: 12px 30px;
-            background: #667eea;
+            padding: 14px 28px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
             color: white;
             border: none;
-            border-radius: 24px;
-            font-size: 1rem;
-            cursor: pointer;
-            transition: background 0.3s;
-        }
-
-        #sendButton:hover {
-            background: #5568d3;
-        }
-
-        #sendButton:disabled {
-            background: #adb5bd;
-            cursor: not-allowed;
-        }
-
-        .supported-stocks {
-            background: white;
             border-radius: 12px;
-            padding: 30px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
         }
 
-        .supported-stocks h2 {
-            color: #333;
-            margin-bottom: 15px;
+        #sendButton:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
         }
 
-        .stock-badges {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
+        #sendButton:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .sidebar { display: flex; flex-direction: column; gap: 20px; }
+        .sidebar-card {
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .sidebar-card h3 { font-size: 1rem; margin-bottom: 15px; }
+
+        .stock-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
         }
 
         .stock-badge {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 8px 16px;
-            border-radius: 20px;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            color: #818cf8;
+            padding: 8px 12px;
+            border-radius: 10px;
             font-weight: 600;
+            font-size: 0.85rem;
+            text-align: center;
+            transition: all 0.3s;
+        }
+
+        .stock-badge:hover {
+            background: rgba(99, 102, 241, 0.2);
+            transform: translateY(-2px);
+        }
+
+        .features-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .features-list li {
+            padding: 10px 0;
+            color: var(--text-secondary);
             font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .features-list li::before {
+            content: '✓';
+            color: var(--success);
+            font-weight: bold;
+        }
+
+        .disclaimer {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
         }
 
         footer {
             text-align: center;
-            color: white;
-            margin-top: 30px;
-            opacity: 0.8;
-        }
-
-        .loading {
-            text-align: center;
-            padding: 20px;
-            color: #6c757d;
-        }
-
-        .error-message {
-            background: #f8d7da;
-            color: #721c24;
-            padding: 12px 16px;
-            border-radius: 8px;
-            margin: 10px 0;
-            border: 1px solid #f5c6cb;
-        }
-
-        @media (max-width: 768px) {
-            header h1 {
-                font-size: 2rem;
-            }
-
-            .chatbot-section {
-                padding: 20px;
-            }
-
-            .chat-messages {
-                height: 400px;
-            }
-
-            .message-content {
-                max-width: 85%;
-            }
+            padding: 30px 20px;
+            color: #94a3b8;
+            font-size: 0.9rem;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>📈 Stock Trading Chatbot</h1>
-            <p class="subtitle">AI-Powered Day Trading Assistant</p>
-            <div class="disclaimer">
-                ⚠️ This is not financial advice. Consult a licensed financial advisor before making investment decisions.
-            </div>
+            <div class="logo">📈</div>
+            <h1>Stock Trading AI</h1>
+            <p class="subtitle">Real-Time Market Analysis Powered by AI</p>
+            <span class="version-badge">🔴 Live • Alpha Vantage v2.0</span>
         </header>
 
-        <section class="chatbot-section">
-            <h2>💬 Ask the AI Trader</h2>
-            <div class="chat-container">
+        <div class="main-grid">
+            <div class="chat-section">
+                <div class="chat-header">
+                    <h2>🤖 AI Trading Assistant</h2>
+                    <p>Ask me about any stock for real-time analysis</p>
+                </div>
+
                 <div id="chatMessages" class="chat-messages">
                     <div class="message bot-message">
-                        <div class="message-content">
-                            Hello! I'm your AI day trading assistant powered by GPT-4o-mini. Ask me about stock recommendations, trends, or specific companies like AAPL, TSLA, MSFT, GOOGL, AMZN, NVDA, META, NFLX, AMD, and INTC.
-                        </div>
+                        <div class="message-content">👋 <strong>Welcome to Stock Trading AI!</strong>
+
+I provide real-time stock analysis using:
+• Live market data from Alpha Vantage
+• RSI technical indicators
+• AI-powered insights from GPT-4o-mini
+
+<strong>Try asking:</strong>
+"Should I buy AAPL?"
+"What's the trend for TSLA?"</div>
                     </div>
                 </div>
-                <div class="chat-input-container">
-                    <input type="text" id="chatInput" placeholder="Ask me: 'Should I invest in AAPL?'" />
-                    <button id="sendButton" onclick="sendMessage()">Send</button>
+
+                <div class="chat-input-wrapper">
+                    <div class="chat-input-container">
+                        <input type="text" id="chatInput" placeholder="Ask me about a stock..." autocomplete="off" />
+                        <button id="sendButton" onclick="sendMessage()">Send</button>
+                    </div>
                 </div>
             </div>
-        </section>
 
-        <section class="supported-stocks">
-            <h2>📊 Supported Stocks</h2>
-            <div class="stock-badges">
-                <span class="stock-badge">AAPL - Apple</span>
-                <span class="stock-badge">TSLA - Tesla</span>
-                <span class="stock-badge">MSFT - Microsoft</span>
-                <span class="stock-badge">GOOGL - Google</span>
-                <span class="stock-badge">AMZN - Amazon</span>
-                <span class="stock-badge">NVDA - NVIDIA</span>
-                <span class="stock-badge">META - Meta</span>
-                <span class="stock-badge">NFLX - Netflix</span>
-                <span class="stock-badge">AMD - AMD</span>
-                <span class="stock-badge">INTC - Intel</span>
+            <div class="sidebar">
+                <div class="sidebar-card">
+                    <h3>📊 Supported Stocks</h3>
+                    <div class="stock-grid">
+                        <div class="stock-badge">AAPL</div>
+                        <div class="stock-badge">TSLA</div>
+                        <div class="stock-badge">MSFT</div>
+                        <div class="stock-badge">GOOGL</div>
+                        <div class="stock-badge">AMZN</div>
+                        <div class="stock-badge">NVDA</div>
+                        <div class="stock-badge">META</div>
+                        <div class="stock-badge">NFLX</div>
+                        <div class="stock-badge">AMD</div>
+                        <div class="stock-badge">INTC</div>
+                    </div>
+                </div>
+
+                <div class="sidebar-card">
+                    <h3>✨ Features</h3>
+                    <ul class="features-list">
+                        <li>Real-time stock prices</li>
+                        <li>RSI technical analysis</li>
+                        <li>Buy/Sell/Hold signals</li>
+                        <li>AI-powered insights</li>
+                        <li>Volume tracking</li>
+                        <li>Trend detection</li>
+                    </ul>
+                </div>
+
+                <div class="disclaimer">
+                    ⚠️ <strong>Important:</strong> This is not financial advice. Always consult a licensed financial advisor.
+                </div>
             </div>
-        </section>
+        </div>
 
         <footer>
-            <p>&copy; 2025 Stock Trading Chatbot MVP | Powered by AI & AWS Lambda</p>
+            <p>Powered by Alpha Vantage • OpenAI GPT-4o-mini • AWS Lambda</p>
         </footer>
     </div>
 
     <script>
-        // API Gateway endpoint
         const API_ENDPOINT = 'https://lmi4hshs7h.execute-api.us-east-2.amazonaws.com/prod/chatbot';
 
-        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('chatInput').addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') {
-                    sendMessage();
-                }
+                if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
             });
         });
 
         async function sendMessage() {
             const input = document.getElementById('chatInput');
             const query = input.value.trim();
-            const sendButton = document.getElementById('sendButton');
-
             if (!query) return;
 
-            // Disable input
             input.disabled = true;
-            sendButton.disabled = true;
+            document.getElementById('sendButton').disabled = true;
 
-            // Add user message to chat
             addMessage(query, 'user');
             input.value = '';
 
-            // Show typing indicator
             const typingDiv = document.createElement('div');
-            typingDiv.className = 'message bot-message typing-indicator';
-            typingDiv.innerHTML = '<div class="message-content">Thinking...</div>';
+            typingDiv.className = 'message bot-message';
             typingDiv.id = 'typing-indicator';
+            typingDiv.innerHTML = '<div class="message-content typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
             document.getElementById('chatMessages').appendChild(typingDiv);
             scrollToBottom();
 
             try {
                 const response = await fetch(API_ENDPOINT, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ query: query })
                 });
 
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-
                 const data = await response.json();
-
-                // Remove typing indicator
-                const indicator = document.getElementById('typing-indicator');
-                if (indicator) {
-                    indicator.remove();
-                }
-
-                // Add bot response
-                if (data.response) {
-                    addMessage(data.response, 'bot');
-                } else if (data.error) {
-                    addMessage('Error: ' + data.error, 'bot');
-                } else {
-                    addMessage('Sorry, I received an unexpected response. Please try again.', 'bot');
-                }
-
+                document.getElementById('typing-indicator')?.remove();
+                addMessage(data.response || '❌ Error occurred', 'bot');
             } catch (error) {
-                // Remove typing indicator
-                const indicator = document.getElementById('typing-indicator');
-                if (indicator) {
-                    indicator.remove();
-                }
-
-                console.error('Error:', error);
-                addMessage('Sorry, I encountered a connection error. Please check your internet connection and try again.', 'bot');
+                document.getElementById('typing-indicator')?.remove();
+                addMessage('❌ Connection error. Please try again.', 'bot');
             } finally {
-                // Re-enable input
                 input.disabled = false;
-                sendButton.disabled = false;
+                document.getElementById('sendButton').disabled = false;
                 input.focus();
             }
         }
 
         function addMessage(text, type) {
-            const messagesDiv = document.getElementById('chatMessages');
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message ' + (type === 'user' ? 'user-message' : 'bot-message');
-
-            // Convert markdown-style bold to HTML
-            let formattedText = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-
-            messageDiv.innerHTML = `<div class="message-content">${formattedText}</div>`;
-            messagesDiv.appendChild(messageDiv);
+            messageDiv.innerHTML = `<div class="message-content">${text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}</div>`;
+            document.getElementById('chatMessages').appendChild(messageDiv);
             scrollToBottom();
         }
 
         function scrollToBottom() {
-            const messagesDiv = document.getElementById('chatMessages');
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            const div = document.getElementById('chatMessages');
+            div.scrollTop = div.scrollHeight;
         }
     </script>
 </body>
