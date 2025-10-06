@@ -470,7 +470,7 @@ Want to improve the chatbot?
 - [x] Cost breakdown provided
 
 ### Optional Enhancements
-- [ ] Web frontend deployed
+- [x] Web frontend deployed (S3 static hosting)
 - [ ] CloudWatch dashboard (requires permissions)
 - [ ] Additional stock exchanges
 - [ ] Mobile app
@@ -484,6 +484,7 @@ You've successfully built and deployed a **production-ready AI-powered stock tra
 
 ### What's Live:
 ✅ **REST API:** https://lmi4hshs7h.execute-api.us-east-2.amazonaws.com/prod/chatbot
+✅ **Web App:** http://stock-chatbot-web.s3-website.us-east-2.amazonaws.com
 ✅ **AI Model:** GPT-4o-mini
 ✅ **Cost:** ~$0.00015 per query
 ✅ **Scalability:** Millions of requests

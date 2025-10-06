@@ -5,6 +5,20 @@ An AI-powered virtual day trader that analyzes stock trends, historical data, an
 ![Version](https://img.shields.io/badge/version-1.0.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9+-green)
 ![AWS](https://img.shields.io/badge/AWS-Lambda%20%7C%20DynamoDB%20%7C%20API%20Gateway-orange)
+![Status](https://img.shields.io/badge/status-live-success)
+
+## 🌐 Live Demo
+
+**Web App:** http://stock-chatbot-web.s3-website.us-east-2.amazonaws.com
+
+**API Endpoint:** https://lmi4hshs7h.execute-api.us-east-2.amazonaws.com/prod/chatbot
+
+Try it now:
+```bash
+curl -X POST 'https://lmi4hshs7h.execute-api.us-east-2.amazonaws.com/prod/chatbot' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Should I invest in AAPL?"}'
+```
 
 ## ✨ Features
 
