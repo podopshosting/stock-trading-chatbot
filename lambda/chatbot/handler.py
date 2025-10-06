@@ -10,6 +10,7 @@ sys.path.insert(0, '/opt/python')  # Lambda layer path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../shared'))
 
 from recommendation_engine import RecommendationEngine
+from openai_helper import enhance_response_with_openai
 import logging
 
 logger = logging.getLogger()
