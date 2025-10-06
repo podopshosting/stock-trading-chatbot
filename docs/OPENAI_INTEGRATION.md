@@ -128,25 +128,29 @@ The Lambda function automatically:
 
 ## 💰 Costs
 
-### OpenAI Pricing (GPT-4)
+### OpenAI Pricing (GPT-4o-mini) ✨
 
-- **Input**: $0.03 per 1K tokens
-- **Output**: $0.06 per 1K tokens
+- **Input**: $0.15 per 1M tokens ($0.00015 per 1K tokens)
+- **Output**: $0.60 per 1M tokens ($0.0006 per 1K tokens)
 
 ### Typical Usage
 
 Average response:
-- Input: ~400 tokens ($0.012)
-- Output: ~150 tokens ($0.009)
-- **Cost per query: ~$0.021**
+- Input: ~400 tokens ($0.00006)
+- Output: ~150 tokens ($0.00009)
+- **Cost per query: ~$0.00015** (less than a penny!)
 
 ### Monthly Estimates
 
 | Users/Day | Queries/Day | Monthly Cost |
 |-----------|-------------|--------------|
-| 10        | 50          | $31.50       |
-| 50        | 250         | $157.50      |
-| 100       | 500         | $315.00      |
+| 10        | 50          | $0.23        |
+| 50        | 250         | $1.13        |
+| 100       | 500         | $2.25        |
+| 500       | 2,500       | $11.25       |
+| 1000      | 5,000       | $22.50       |
+
+**💡 Cost Savings**: GPT-4o-mini is **200x cheaper** than GPT-4 while maintaining excellent quality!
 
 ### AWS Secrets Manager
 
@@ -267,14 +271,17 @@ Edit `shared/openai_helper.py` to customize the system prompt:
 Switch between models:
 
 ```python
-# Fast & cheap
-model="gpt-3.5-turbo"
+# Recommended: Best value (current default)
+model="gpt-4o-mini"  # $0.15/$0.60 per 1M tokens
 
-# Balanced
-model="gpt-4"
+# Alternative: Slightly older
+model="gpt-3.5-turbo"  # $0.50/$1.50 per 1M tokens
 
-# Most capable
-model="gpt-4-turbo"
+# Premium: Most capable
+model="gpt-4o"  # $2.50/$10.00 per 1M tokens
+
+# Legacy: Expensive
+model="gpt-4"  # $30/$60 per 1M tokens
 ```
 
 ### Temperature Tuning
@@ -320,16 +327,17 @@ Monitor:
 
 ## 📊 Comparison
 
-### With OpenAI
+### With OpenAI (GPT-4o-mini)
 **Pros:**
 - Natural, conversational responses
 - Better context understanding
 - Professional tone
 - Flexible explanations
+- **Very affordable** (~$0.00015/query)
 
 **Cons:**
-- Additional cost (~$0.02/query)
-- Slower response time (+2-3s)
+- Minimal cost (pennies per day)
+- Slightly slower response time (+1-2s)
 - External dependency
 - Requires API key management
 

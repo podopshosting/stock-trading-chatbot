@@ -105,9 +105,9 @@ Provide a conversational, professional response that:
 Keep the response under 150 words and make it easy to understand for non-experts.
 """
 
-        # Call OpenAI API
+        # Call OpenAI API - Using GPT-4o-mini for cost efficiency
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model="gpt-4o-mini",  # Much cheaper: $0.15/$0.60 per 1M tokens vs GPT-4's $30/$60
             messages=[
                 {
                     "role": "system",
@@ -198,7 +198,7 @@ Make it conversational and highlight any interesting trends.
 """
 
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",  # Cost-effective choice
             messages=[
                 {"role": "system", "content": "You are a stock market analyst."},
                 {"role": "user", "content": context}
