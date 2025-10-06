@@ -36,6 +36,7 @@ def lambda_handler(event, context):
 
         query = body.get('query', '')
         user_id = body.get('user_id', 'anonymous')
+        use_openai = body.get('use_openai', True)  # Enable OpenAI by default
 
         if not query:
             return {
@@ -55,8 +56,23 @@ def lambda_handler(event, context):
         api_key = os.getenv('MARKETAUX_API_KEY')
         engine = RecommendationEngine(api_key=api_key)
 
-        # Process query
-        response = engine.process_query(query)
+        # Check if this is a specific stock query
+        query_lower = query.lower()
+        symbols = [w.upper() for w in query_lower.split()
+                  if w.upper() in ['AAPL', 'TSLA', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'NFLX', 'AMD', 'INTC']]
+
+        # If asking about a specific stock and OpenAI is enabled, use enhanced response
+        if symbols and use_openai:
+            symbol = symbols[0]
+            analysis = engine.analyze_stock(symbol)
+
+            if 'error' not in analysis:
+                response = enhance_response_with_openai(analysis, query)
+            else:
+                response = f"Sorry, I couldn't analyze {symbol}: {analysis.get('error', 'Unknown error')}"
+        else:
+            # Use standard recommendation engine
+            response = engine.process_query(query)
 
         return {
             'statusCode': 200,
