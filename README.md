@@ -20,15 +20,22 @@ curl -X POST 'https://lmi4hshs7h.execute-api.us-east-2.amazonaws.com/prod/chatbo
   -d '{"query":"Should I invest in AAPL?"}'
 ```
 
+**🆕 Now with Real-Time Stock Data!**
+- 📊 Live prices from Alpha Vantage API
+- 📈 RSI technical indicators
+- 🎯 Smart buy/sell/hold recommendations
+- 🤖 AI analysis with real market data
+
 ## ✨ Features
 
-- 🤖 **AI Chatbot**: Natural language interface for stock queries
-- 📊 **Technical Analysis**: Moving averages, RSI, MACD, Bollinger Bands
+- 🤖 **AI Chatbot**: Natural language interface powered by GPT-4o-mini
+- 📊 **Real-Time Data**: Live stock prices via Alpha Vantage API
+- 📈 **Technical Analysis**: RSI, moving averages, MACD, Bollinger Bands
+- 🎯 **Smart Recommendations**: AI-powered buy/sell/hold signals with confidence scores
 - 📰 **News Sentiment**: Real-time news analysis with sentiment scoring
-- 💡 **Smart Recommendations**: ML-powered buy/sell/hold suggestions
-- 📈 **Interactive Charts**: Real-time stock price visualizations
-- 🎯 **Prediction Tracking**: Monitor accuracy of past recommendations
-- 🌐 **Web Dashboard**: Beautiful, responsive interface
+- 💹 **Trend Analysis**: Bullish, bearish, and neutral market trend detection
+- 📉 **Volume Tracking**: Real-time trading volume analysis
+- 🌐 **Web Dashboard**: Beautiful, responsive interface with live chatbot
 
 ## 🏗️ Architecture
 
