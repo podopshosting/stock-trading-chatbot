@@ -1,3 +1,8 @@
+> **⚠️ SUPERSEDED — historical record.**
+> This document does not describe what is deployed. See
+> [PRODUCTION-STATE.md](PRODUCTION-STATE.md) for the current architecture,
+> deployment procedure and known constraints.
+
 # 🎉 Stock Trading Chatbot - COMPLETE DEPLOYMENT
 
 ## ✅ PROJECT COMPLETE - PRODUCTION READY!

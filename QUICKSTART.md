@@ -1,3 +1,8 @@
+> **⚠️ SUPERSEDED — historical record.**
+> This document does not describe what is deployed. See
+> [PRODUCTION-STATE.md](PRODUCTION-STATE.md) for the current architecture,
+> deployment procedure and known constraints.
+
 # 🚀 Quick Start Guide - Stock Trading Chatbot
 
 Get your AI stock trading assistant up and running in minutes!
