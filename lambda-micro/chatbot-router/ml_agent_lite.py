@@ -72,7 +72,12 @@ class MLTradingAgent:
         avg_loss = self.mean(losses[-period:])
 
         if avg_loss == 0:
-            return 100
+            # No losses only means "maximally overbought" if there were
+            # gains. With neither, the series did not move and RSI is
+            # 0/0 - undefined, not 100. Returning 100 made a halted or
+            # frozen price cast an overbought SELL vote for having done
+            # nothing at all.
+            return 100 if avg_gain > 0 else 50
 
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))

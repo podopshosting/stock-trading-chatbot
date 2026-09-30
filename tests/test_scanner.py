@@ -27,6 +27,9 @@ from agent.scanner import (  # noqa: E402
     rank_candidates, relative_volume, static_eligibility,
 )
 from agent.scanner.features import RELATIVE_VOLUME_BASIS  # noqa: E402
+from agent.scanner.universe import (  # noqa: E402
+    _ETF_EXCHANGES, _ETF_NAME_PATTERNS, classify_security_type,
+)
 
 POLICY = UniverseConfig()
 
@@ -462,6 +465,83 @@ class TestCandidateShape(unittest.TestCase):
                          Candidate.make_id("run1", "AAPL"))
         self.assertNotEqual(Candidate.make_id("run1", "AAPL"),
                             Candidate.make_id("run2", "AAPL"))
+
+
+class TestFundIssuerClassification(unittest.TestCase):
+    """
+    Regression for a leveraged inverse ETF reaching a long-only funnel.
+
+    SQQQ ("ProShares UltraPro Short QQQ") lists on NASDAQ and carries no
+    fund word in its name, so it was classified EQUITY from the exchange
+    alone. The leveraged-product check only runs on ETFs, so it was
+    skipped, and a 3x INVERSE product ranked in the top eight research
+    candidates. The near-identical SPXU was caught purely because it
+    happens to list on ARCA.
+    """
+
+    LEVERAGED_FUNDS = [
+        ("ProShares UltraPro Short QQQ", "NASDAQ"),      # SQQQ
+        ("ProShares UltraPro QQQ", "NASDAQ"),            # TQQQ
+        ("ProShares UltraPro Short S&P 500", "ARCA"),    # SPXU
+        ("ProShares Short QQQ", "ARCA"),                 # PSQ
+        ("Direxion Daily Semiconductor Bull 3X ETF", "ARCA"),
+    ]
+
+    # Every one of these matches a leverage pattern or a fund-issuer
+    # prefix, and every one is a real operating company.
+    OPERATING_COMPANIES = [
+        ("Invesco LTD", "NYSE"),                       # the manager itself
+        ("WisdomTree, Inc.", "NYSE"),                  # ditto
+        ("Invesco Mortgage Capital Inc.", "NYSE"),     # a REIT
+        ("Build-A-Bear Workshop, Inc.", "NYSE"),       # "bear"
+        ("Ultrapar Participacoes S.A.", "NYSE"),       # "ultra"
+        ("Ultra Clean Holdings, Inc. Common Stock", "NASDAQ"),
+        ("Ultralife Corporation Common Stock", "NASDAQ"),
+        ("Ultragenyx Pharmaceutical Inc. Common Stock", "NASDAQ"),
+        ("10x Genomics, Inc. Class A Common Stock", "NASDAQ"),
+    ]
+
+    def test_leveraged_funds_are_classified_and_excluded(self):
+        for name, exchange in self.LEVERAGED_FUNDS:
+            with self.subTest(name=name):
+                kind = classify_security_type(name, exchange)
+                self.assertIs(kind, SecurityType.ETF)
+                self.assertTrue(looks_leveraged(name, kind),
+                                f"{name} escaped the leverage filter")
+
+    def test_operating_companies_are_not_reclassified_as_funds(self):
+        """
+        The exclusion matters as much as the issuer list: matching
+        "Invesco" alone would turn the asset manager's own shares into
+        a fund.
+        """
+        for name, exchange in self.OPERATING_COMPANIES:
+            with self.subTest(name=name):
+                kind = classify_security_type(name, exchange)
+                self.assertIs(kind, SecurityType.EQUITY,
+                              f"{name} was misclassified as a fund")
+                self.assertFalse(looks_leveraged(name, kind),
+                                 f"{name} was wrongly excluded as leveraged")
+
+    def test_an_ordinary_fund_from_a_fund_issuer_stays_eligible(self):
+        """Reclassifying is not excluding: only leveraged names go."""
+        kind = classify_security_type("INVESCO QUALITY MUNICIPAL SECURITIES",
+                                      "NYSE")
+        self.assertIs(kind, SecurityType.ETF)
+        self.assertFalse(looks_leveraged(
+            "INVESCO QUALITY MUNICIPAL SECURITIES", kind))
+
+    def test_falsifying_control_the_exchange_rule_alone_would_miss_sqqq(self):
+        """
+        Proves the issuer rule is what catches it, not something else:
+        NASDAQ is not an ETF exchange and the name has no fund word, so
+        without the issuer check the classifier has nothing to go on.
+        """
+        name = "ProShares UltraPro Short QQQ"
+        self.assertNotIn("NASDAQ", _ETF_EXCHANGES)
+        lowered = name.lower()
+        self.assertFalse(any(p in lowered for p in _ETF_NAME_PATTERNS),
+                         "the name unexpectedly contains a fund word")
 
 
 if __name__ == "__main__":

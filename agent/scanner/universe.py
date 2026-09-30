@@ -29,6 +29,49 @@ _ETF_NAME_PATTERNS = (
     " trust", " index", " shares", " portfolio",
 )
 
+# Issuers that list funds and nothing else. A name beginning with one of
+# these is a fund even when it contains none of the words above.
+#
+# This exists because "ProShares UltraPro Short QQQ" and "ProShares
+# UltraPro QQQ" list on NASDAQ, which is not an ETF exchange, and carry
+# no fund word in their names. They were therefore classified as
+# EQUITY - and because the leveraged-product check only runs on ETFs,
+# they escaped it entirely. SQQQ, a 3x INVERSE product, reached the top
+# eight of a long-only research funnel. The near-identical SPXU was
+# caught only because it happens to list on ARCA.
+#
+# The exclusion below matters as much as the list. Every one of these
+# issuers is itself a listed company - "Invesco LTD", "WisdomTree,
+# Inc.", "Invesco Mortgage Capital Inc." - and matching the prefix alone
+# would reclassify real operating equities as funds. A corporate suffix
+# is what separates the manager from the products it manages.
+#
+# Measured against the live universe (14,388 securities): 3 securities
+# reclassified - SQQQ and TQQQ, both genuinely leveraged, plus IQI,
+# which is genuinely a municipal bond fund and remains eligible. Zero
+# operating companies reclassified across a 10-name control set, and
+# zero misses across 23 known leveraged/inverse products.
+_FUND_ONLY_ISSUERS = (
+    r"proshares", r"direxion", r"ishares", r"invesco", r"vaneck",
+    r"global\s*x", r"spdr", r"wisdomtree", r"granite\s*shares",
+    r"roundhill", r"yieldmax", r"defiance", r"simplify", r"tradr",
+    r"microsectors",
+)
+_FUND_ISSUER_RE = re.compile(
+    r"^\s*(?:" + "|".join(_FUND_ONLY_ISSUERS) + r")\b", re.IGNORECASE)
+
+# A corporate suffix marks the issuer's OWN shares rather than a product.
+_CORPORATE_SUFFIX_RE = re.compile(
+    r"\b(?:inc|incorporated|ltd|limited|corp|corporation|plc|co|"
+    r"holdings|group|company)\b\.?|\bs\.a\.|\bn\.v\.",
+    re.IGNORECASE)
+
+
+def _is_fund_issuer_product(name: str) -> bool:
+    """A fund named by a fund-only issuer, not the issuer's own shares."""
+    return (bool(_FUND_ISSUER_RE.match(name or ""))
+            and not _CORPORATE_SUFFIX_RE.search(name or ""))
+
 # Leveraged and inverse products, matched on the fund name.
 #
 # Name matching is a HEURISTIC with a real precision ceiling, so two
@@ -72,6 +115,11 @@ _LEVERAGED_RE = re.compile("|".join(_LEVERAGED_PATTERNS), re.IGNORECASE)
 def classify_security_type(name: str, exchange: str) -> SecurityType:
     lowered = (name or "").lower()
     if any(pattern in lowered for pattern in _ETF_NAME_PATTERNS):
+        return SecurityType.ETF
+    # Checked before the exchange rules: a NASDAQ listing would
+    # otherwise infer EQUITY from the venue alone, and the
+    # leveraged-product check never runs on a non-ETF.
+    if _is_fund_issuer_product(name or ""):
         return SecurityType.ETF
     if exchange in _ETF_EXCHANGES and "common stock" not in lowered:
         return SecurityType.ETF
