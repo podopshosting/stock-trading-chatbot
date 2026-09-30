@@ -70,6 +70,12 @@ EVENTS = frozenset({
     "hypothesis_run_started",
     "hypothesis_run_completed",
     "hypothesis_persisted",
+    # risk
+    "risk_decision",
+    "risk_halt_observed",
+    "risk_lock_engaged",
+    "global_halt_engaged",
+    "global_halt_cleared",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")

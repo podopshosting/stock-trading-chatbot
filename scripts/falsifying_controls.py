@@ -46,9 +46,13 @@ EV_MODELS = REPO / "agent" / "evidence" / "models.py"
 
 HYP_ENGINE = REPO / "agent" / "hypothesis" / "engine.py"
 
+RISK_GOV = REPO / "agent" / "risk" / "governor.py"
+RISK_MODELS = REPO / "agent" / "risk" / "models.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
-          "tests.test_evidence_service", "tests.test_hypothesis"]
+          "tests.test_evidence_service", "tests.test_hypothesis",
+          "tests.test_risk"]
 
 
 @dataclass
@@ -305,6 +309,78 @@ MUTATIONS = [
         new="    strength = max(0.0, min(1.0, base - min(penalty, 0.9)))\n"
             "    return strength, {}  # MUTATION",
         expect=["component", "decompos", "transparen"],
+    ),
+    # --- Milestone 8: risk governor --------------------------------------
+    Mutation(
+        name="remove-daily-capital-ceiling",
+        description="stop rejecting a trade that exceeds the day's capital",
+        path=RISK_GOV,
+        old="    if value > remaining + 1e-9:",
+        new="    if False:  # MUTATION",
+        expect=["capital", "ceiling", "exhausted"],
+    ),
+    Mutation(
+        name="ignore-daily-loss-lock",
+        description="allow new exposure after the daily loss limit",
+        path=RISK_GOV,
+        old="    if context.daily_risk_lock:\n"
+            "        rej.add(RejectionCode.DAILY_RISK_LOCK,",
+        new="    if False:  # MUTATION\n"
+            "        rej.add(RejectionCode.DAILY_RISK_LOCK,",
+        expect=["risk_lock", "daily"],
+    ),
+    Mutation(
+        name="accept-stale-prices",
+        description="treat an unknown or stale quote as usable",
+        path=RISK_GOV,
+        old="    if context.quote_age_seconds is None:\n"
+            "        rej.add(RejectionCode.STALE_MARKET_DATA,",
+        new="    if False:  # MUTATION\n"
+            "        rej.add(RejectionCode.STALE_MARKET_DATA,",
+        expect=["stale", "quote_age", "fail_closed"],
+    ),
+    Mutation(
+        name="ignore-emergency-stop",
+        description="proceed despite a global halt",
+        path=RISK_GOV,
+        old="    if halt is not None and halt.halted:",
+        new="    if False:  # MUTATION",
+        expect=["halt", "emergency", "rollover"],
+    ),
+    Mutation(
+        name="remove-max-positions",
+        description="allow unlimited concurrent positions",
+        path=RISK_GOV,
+        old="    if context.open_positions >= limits.max_concurrent_positions:",
+        new="    if False:  # MUTATION",
+        expect=["max_concurrent", "positions"],
+    ),
+    Mutation(
+        name="remove-spread-rule",
+        description="accept any spread",
+        path=RISK_GOV,
+        old="    elif context.spread_pct > limits.max_spread_pct:",
+        new="    elif False:  # MUTATION",
+        expect=["spread"],
+    ),
+    Mutation(
+        name="allow-averaging-down",
+        description="permit adding to an existing position",
+        path=RISK_GOV,
+        old="        rej.add(RejectionCode.ALREADY_HOLDING,\n"
+            '                f"already holding {symbol}")',
+        new="        pass  # MUTATION",
+        expect=["averaging", "already_holding"],
+    ),
+    Mutation(
+        name="size-by-conviction-not-risk",
+        description="scale the position with hypothesis strength",
+        path=RISK_GOV,
+        old="    value = min(risk_sized, limits.max_position_value, remaining)",
+        new="    value = min(risk_sized * (1 + getattr(hypothesis, "
+            "'hypothesis_strength', 0.0)), limits.max_position_value, "
+            "remaining)  # MUTATION",
+        expect=["conviction", "per_trade", "risk"],
     ),
     Mutation(
         name="agreement-includes-magnitude",
