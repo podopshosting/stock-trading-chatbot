@@ -44,9 +44,11 @@ EV_LLM = REPO / "agent" / "evidence" / "llm.py"
 EV_SERVICE = REPO / "agent" / "evidence" / "service.py"
 EV_MODELS = REPO / "agent" / "evidence" / "models.py"
 
+HYP_ENGINE = REPO / "agent" / "hypothesis" / "engine.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
-          "tests.test_evidence_service"]
+          "tests.test_evidence_service", "tests.test_hypothesis"]
 
 
 @dataclass
@@ -251,6 +253,58 @@ MUTATIONS = [
             "            items = []  # MUTATION\n"
             "        company_name = self._company_name(symbol)",
         expect=["provider", "erase", "failing", "survives"],
+    ),
+    # --- Milestone 7: hypotheses -----------------------------------------
+    Mutation(
+        name="buy-into-material-negative-news",
+        description="stop blocking a long when material negative evidence "
+                    "is published",
+        path=HYP_ENGINE,
+        old='            "MATERIAL_NEGATIVE_EVIDENCE", '
+            "ContradictionSeverity.BLOCKING,",
+        new='            "MATERIAL_NEGATIVE_EVIDENCE", '
+            "ContradictionSeverity.MINOR,  # MUTATION",
+        expect=["material_negative", "contradiction"],
+    ),
+    Mutation(
+        name="catalyst-alone-becomes-a-trade",
+        description="let a positive catalyst produce a long without price "
+                    "confirmation",
+        path=HYP_ENGINE,
+        old="        return Strategy.NO_VALID_STRATEGY, reasons\n"
+            "\n"
+            "    return Strategy.NO_VALID_STRATEGY, [",
+        new="        return Strategy.MOMENTUM_CATALYST, reasons  # MUTATION\n"
+            "\n"
+            "    return Strategy.NO_VALID_STRATEGY, [",
+        expect=["catalyst_only", "confirm", "not_a_trade"],
+    ),
+    Mutation(
+        name="trade-on-stale-prices",
+        description="stop blocking hypotheses built on stale price data",
+        path=HYP_ENGINE,
+        old="BLOCKING_FRESHNESS = frozenset({\"STALE\", \"MISSING\", "
+            "\"UNKNOWN\"})",
+        new="BLOCKING_FRESHNESS = frozenset()  # MUTATION",
+        expect=["stale"],
+    ),
+    Mutation(
+        name="ignore-hostile-regime",
+        description="propose new long exposure into a strongly bearish market",
+        path=HYP_ENGINE,
+        old='HOSTILE_REGIMES = frozenset({"STRONG_BEARISH"})',
+        new="HOSTILE_REGIMES = frozenset()  # MUTATION",
+        expect=["hostile", "regime"],
+    ),
+    Mutation(
+        name="hide-the-strength-components",
+        description="return an opaque score with no decomposition",
+        path=HYP_ENGINE,
+        old="    strength = max(0.0, min(1.0, base - min(penalty, 0.9)))\n"
+            "    return strength, components",
+        new="    strength = max(0.0, min(1.0, base - min(penalty, 0.9)))\n"
+            "    return strength, {}  # MUTATION",
+        expect=["component", "decompos", "transparen"],
     ),
     Mutation(
         name="agreement-includes-magnitude",

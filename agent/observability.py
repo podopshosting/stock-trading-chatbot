@@ -64,6 +64,12 @@ EVENTS = frozenset({
     "llm_enrichment_failed",
     "evidence_stale",
     "evidence_result_persisted",
+    # hypothesis
+    "hypothesis_generated",
+    "hypothesis_rejected",
+    "hypothesis_run_started",
+    "hypothesis_run_completed",
+    "hypothesis_persisted",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")
