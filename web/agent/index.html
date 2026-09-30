@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading Agent — Operations</title>
+<meta name="description" content="Development dashboard for the trading agent. Paper only; no execution path.">
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface-2: #1c232c;
+    --border: #2d333b; --border-strong: #3d444d;
+    --text: #e6edf3; --text-dim: #9198a1; --text-faint: #6e7681;
+    --up: #3fb950; --up-bg: rgba(63,185,80,.12);
+    --down: #f85149; --down-bg: rgba(248,81,73,.12);
+    --flat: #8b949e; --flat-bg: rgba(139,148,158,.12);
+    --warn: #d29922; --warn-bg: rgba(210,153,34,.14);
+    --accent: #58a6ff;
+    --radius: 10px; --gap: 16px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  :root:not([data-theme="light"]) { color-scheme: dark; }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f6f8fa; --surface: #ffffff; --surface-2: #f0f3f6;
+    --border: #d1d9e0; --border-strong: #b6c0cb;
+    --text: #1f2328; --text-dim: #59636e; --text-faint: #818b98;
+    --up: #1a7f37; --up-bg: rgba(26,127,55,.10);
+    --down: #cf222e; --down-bg: rgba(207,34,46,.10);
+    --flat: #59636e; --flat-bg: rgba(89,99,110,.10);
+    --warn: #9a6700; --warn-bg: rgba(154,103,0,.12);
+    --accent: #0969da;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 16px 64px; }
+
+  /* --- the banner that must never be subtle --- */
+  .paper-banner {
+    background: var(--warn-bg); border-bottom: 2px solid var(--warn);
+    padding: 10px 16px; text-align: center; font-weight: 650;
+    color: var(--text); position: sticky; top: 0; z-index: 20;
+  }
+  .paper-banner .detail {
+    display: block; font-weight: 400; font-size: 13px;
+    color: var(--text-dim); margin-top: 2px;
+  }
+
+  header { padding: 24px 0 8px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--text-dim); font-size: 14px; margin: 0; }
+  .theme-btn {
+    position: absolute; top: 56px; right: 16px;
+    background: var(--surface); color: var(--text-dim);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; font-size: 13px; cursor: pointer;
+  }
+
+  .grid { display: grid; gap: var(--gap); }
+  @media (min-width: 760px) { .grid.cols-2 { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 980px) { .grid.cols-3 { grid-template-columns: repeat(3, 1fr); } }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; min-width: 0;
+  }
+  .card h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-dim); margin: 0 0 12px; font-weight: 650;
+  }
+  .card h3 { font-size: 14px; margin: 16px 0 8px; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 14px; }
+  .kv dt { color: var(--text-dim); white-space: nowrap; }
+  .kv dd { margin: 0; font-family: var(--mono); text-align: right; word-break: break-word; }
+
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 99px;
+    font-size: 12px; font-weight: 650; font-family: var(--mono);
+    border: 1px solid transparent;
+  }
+  .pill.up { background: var(--up-bg); color: var(--up); border-color: var(--up); }
+  .pill.down { background: var(--down-bg); color: var(--down); border-color: var(--down); }
+  .pill.flat { background: var(--flat-bg); color: var(--flat); border-color: var(--flat); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
+
+  /* A bar that shows a component's value WITHOUT blending it into others. */
+  .bar-row { margin-bottom: 10px; }
+  .bar-label {
+    display: flex; justify-content: space-between; font-size: 13px;
+    color: var(--text-dim); margin-bottom: 3px; gap: 8px;
+  }
+  .bar-label b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+  .bar-track {
+    height: 6px; background: var(--surface-2); border-radius: 99px;
+    overflow: hidden;
+  }
+  .bar-fill { height: 100%; border-radius: 99px; background: var(--accent); }
+  .bar-fill.up { background: var(--up); }
+  .bar-fill.down { background: var(--down); }
+  .bar-fill.warn { background: var(--warn); }
+  .bar-missing { font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
+
+  .note {
+    font-size: 13px; color: var(--text-dim); margin: 10px 0 0;
+    padding: 10px 12px; background: var(--surface-2);
+    border-left: 3px solid var(--border-strong); border-radius: 0 6px 6px 0;
+  }
+  .note.warn { border-left-color: var(--warn); }
+
+  .reasons { list-style: none; padding: 0; margin: 8px 0 0; }
+  .reasons li {
+    font-size: 13px; padding: 7px 10px; margin-bottom: 5px;
+    background: var(--surface-2); border-radius: 6px;
+    border-left: 3px solid var(--flat); word-break: break-word;
+  }
+  .reasons li.blocking { border-left-color: var(--down); }
+  .reasons li.major { border-left-color: var(--warn); }
+  .reasons li.minor { border-left-color: var(--flat); }
+  .reasons code { font-family: var(--mono); font-size: 12px; color: var(--text); }
+
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: var(--gap); }
+  input[type="text"] {
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    padding: 9px 12px; font-size: 15px; font-family: var(--mono);
+    text-transform: uppercase; width: 130px;
+  }
+  button.go {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 9px 16px; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  button.go:disabled { opacity: .5; cursor: default; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-dim); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .04em; }
+  td.num { text-align: right; font-family: var(--mono); }
+  .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  .empty { color: var(--text-faint); font-size: 14px; font-style: italic; }
+  .err { color: var(--down); font-size: 14px; font-family: var(--mono); }
+  .stage-sep { border: 0; border-top: 1px solid var(--border); margin: 18px 0 14px; }
+  .muted { color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<div class="paper-banner" id="paperBanner">
+  PAPER ONLY — NO EXECUTION PATH
+  <span class="detail" id="paperDetail">Checking switches…</span>
+</div>
+
+<div class="wrap">
+  <button class="theme-btn" id="themeBtn" type="button">Light</button>
+
+  <header>
+    <h1>Trading Agent — Operations</h1>
+    <p class="sub">Development dashboard. Every stage is shown separately;
+      there is no combined score.</p>
+  </header>
+
+  <!-- Switches and limits -->
+  <div class="grid cols-2" style="margin-bottom:var(--gap)">
+    <section class="card">
+      <h2>Permissions</h2>
+      <dl class="kv" id="switches"><dd class="empty">Loading…</dd></dl>
+      <p class="note warn" id="switchNote"></p>
+    </section>
+    <section class="card">
+      <h2>Risk limits in force</h2>
+      <dl class="kv" id="limits"><dd class="empty">Loading…</dd></dl>
+      <p class="note">Capital limits are a <strong>ceiling, not a
+        target</strong>. The agent is not expected to deploy them.</p>
+    </section>
+  </div>
+
+  <!-- Pipeline inspector -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Pipeline inspector</h2>
+    <div class="controls">
+      <input type="text" id="symbol" value="AAPL" maxlength="6"
+             autocapitalize="characters" autocomplete="off" spellcheck="false">
+      <button class="go" id="runBtn" type="button">Inspect</button>
+      <span class="muted" id="pipeStatus"></span>
+    </div>
+
+    <div id="pipeline" hidden>
+      <h3>1 · Quantitative signals</h3>
+      <div id="stageQuant"></div>
+
+      <hr class="stage-sep">
+      <h3>2 · Evidence</h3>
+      <div id="stageEvidence"></div>
+
+      <hr class="stage-sep">
+      <h3>3 · Market regime</h3>
+      <div id="stageRegime"></div>
+
+      <hr class="stage-sep">
+      <h3>4 · Hypothesis</h3>
+      <div id="stageHypothesis"></div>
+
+      <hr class="stage-sep">
+      <h3>5 · Risk decision</h3>
+      <div id="stageRisk"></div>
+
+      <p class="note" id="compositeNote"></p>
+    </div>
+  </section>
+
+  <!-- Positions -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Open positions</h2>
+    <div id="positions"><p class="empty">Loading…</p></div>
+  </section>
+
+  <!-- Performance -->
+  <section class="card">
+    <h2>Performance</h2>
+    <div id="performance"><p class="empty">Loading…</p></div>
+  </section>
+</div>
+
+<script src="config.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var API = (window.AGENT_API_BASE || "").replace(/\/+$/, "");
+
+  // ---- theme -----------------------------------------------------------
+  var themeBtn = document.getElementById("themeBtn");
+  function applyTheme(t) {
+    document.documentElement.setAttribute("data-theme", t);
+    themeBtn.textContent = t === "light" ? "Dark" : "Light";
+    try { localStorage.setItem("agent-theme", t); } catch (e) {}
+  }
+  var stored = null;
+  try { stored = localStorage.getItem("agent-theme"); } catch (e) {}
+  applyTheme(stored || "dark");
+  themeBtn.addEventListener("click", function () {
+    applyTheme(document.documentElement.getAttribute("data-theme") === "light"
+      ? "dark" : "light");
+  });
+
+  // ---- helpers ---------------------------------------------------------
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+  function fmt(v, digits) {
+    if (v === null || v === undefined || v === "") return "—";
+    if (typeof v === "boolean") return v ? "yes" : "no";
+    if (typeof v === "number") {
+      return digits === undefined ? String(v) : v.toFixed(digits);
+    }
+    return String(v);
+  }
+  function kv(parent, pairs) {
+    parent.innerHTML = "";
+    pairs.forEach(function (p) {
+      parent.appendChild(el("dt", null, p[0]));
+      var dd = el("dd");
+      if (p[2]) { dd.appendChild(pill(p[1], p[2])); } else { dd.textContent = fmt(p[1]); }
+      parent.appendChild(dd);
+    });
+  }
+  function pill(text, tone) {
+    var p = el("span", "pill " + tone, fmt(text));
+    return p;
+  }
+
+  /* A single component's value, on its own track.
+     Deliberately never summed with its neighbours: the whole point of
+     showing agreement, magnitude, materiality and novelty side by side
+     is that a reader can see WHICH one is weak. A blended number would
+     make a strong signal with no catalyst look the same as a mediocre
+     signal with a good one. */
+  function barRow(parent, label, value, tone) {
+    var row = el("div", "bar-row");
+    var lab = el("div", "bar-label");
+    lab.appendChild(el("span", null, label));
+    if (value === null || value === undefined) {
+      lab.appendChild(el("span", "bar-missing", "not measured"));
+      row.appendChild(lab);
+      parent.appendChild(row);
+      return;
+    }
+    lab.appendChild(el("b", null, Number(value).toFixed(2)));
+    row.appendChild(lab);
+    var track = el("div", "bar-track");
+    var fill = el("div", "bar-fill " + (tone || ""));
+    fill.style.width = Math.max(0, Math.min(100, Number(value) * 100)) + "%";
+    track.appendChild(fill);
+    row.appendChild(track);
+    parent.appendChild(row);
+  }
+
+  function get(path) {
+    return fetch(API + path, { headers: { "Accept": "application/json" } })
+      .then(function (r) {
+        return r.json().then(function (body) {
+          if (!r.ok) { throw new Error(body.error || ("HTTP " + r.status)); }
+          return body;
+        });
+      });
+  }
+  function showError(node, err) {
+    node.innerHTML = "";
+    node.appendChild(el("p", "err", "Could not load: " + err.message));
+  }
+
+  // ---- switches --------------------------------------------------------
+  function loadSwitches() {
+    var box = document.getElementById("switches");
+    var note = document.getElementById("switchNote");
+    get("/agent/switches").then(function (d) {
+      kv(box, [
+        ["trading_enabled", d.trading_enabled ? "TRUE" : "FALSE",
+         d.trading_enabled ? "up" : "flat"],
+        ["execution_available", d.execution_available ? "TRUE" : "FALSE",
+         d.execution_available ? "up" : "flat"],
+        ["global_halt", d.global_halt ? "HALTED" : "clear",
+         d.global_halt ? "down" : "up"],
+        ["can place orders", d.can_place_orders ? "YES" : "NO",
+         d.can_place_orders ? "down" : "up"]
+      ]);
+      note.textContent = d.can_place_orders_detail || "";
+      var detail = document.getElementById("paperDetail");
+      detail.textContent = d.can_place_orders_detail
+        || "This build has no broker adapter.";
+      if (d.global_halt_detail) {
+        note.textContent += " Halt: " + d.global_halt_detail;
+      }
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  // ---- limits ----------------------------------------------------------
+  function loadLimits() {
+    var box = document.getElementById("limits");
+    get("/agent/risk/limits").then(function (d) {
+      var L = d.limits || {};
+      kv(box, [
+        ["version", d.version],
+        ["daily capital", "$" + fmt(L.daily_capital_limit, 2)],
+        ["max position", "$" + fmt(L.max_position_value, 2)],
+        ["daily loss limit", "$" + fmt(L.daily_loss_limit, 2)],
+        ["max trade risk", "$" + fmt(L.max_trade_risk, 2)],
+        ["concurrent positions", L.max_concurrent_positions],
+        ["new positions / day", L.max_new_positions_per_day],
+        ["long only", L.long_only]
+      ]);
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  // ---- pipeline --------------------------------------------------------
+  function renderQuant(s) {
+    var box = document.getElementById("stageQuant");
+    box.innerHTML = "";
+    var head = el("div", null);
+    head.appendChild(pill(s.direction || "NO_SIGNAL",
+      s.direction === "BUY" ? "up" : s.direction === "SELL" ? "down" : "flat"));
+    head.appendChild(document.createTextNode(" "));
+    head.appendChild(pill(s.strength_band || "NONE", "flat"));
+    head.appendChild(document.createTextNode(" "));
+    head.appendChild(pill("freshness: " + (s.freshness || "UNKNOWN"),
+      s.freshness === "FRESH" ? "up" : "warn"));
+    box.appendChild(head);
+    box.appendChild(el("div", null, " "));
+    barRow(box, "signal agreement", s.signal_agreement, "up");
+    barRow(box, "signal magnitude", s.signal_magnitude, "up");
+    barRow(box, "regime-adjusted magnitude", s.regime_adjusted_magnitude, "up");
+    var groups = el("p", "note",
+      "Groups: " + fmt(s.buy_groups) + " buy, " + fmt(s.sell_groups) +
+      " sell. Agreement and magnitude are separate: unanimous but weak is " +
+      "not the same as split but strong.");
+    box.appendChild(groups);
+  }
+
+  function renderEvidence(e) {
+    var box = document.getElementById("stageEvidence");
+    box.innerHTML = "";
+    if (!e.collected) {
+      box.appendChild(pill("NOT COLLECTED", "warn"));
+      box.appendChild(el("p", "note warn", e.detail ||
+        "Evidence was not collected. This is different from having looked " +
+        "and found nothing."));
+      return;
+    }
+    var head = el("div", null);
+    head.appendChild(pill(e.has_active_catalyst ? "CATALYST" : "no catalyst",
+      e.has_active_catalyst ? "up" : "flat"));
+    head.appendChild(document.createTextNode(" "));
+    head.appendChild(pill(e.direction || "NEUTRAL",
+      e.direction === "POSITIVE" ? "up" :
+      e.direction === "NEGATIVE" ? "down" : "flat"));
+    if (e.conflicting) {
+      head.appendChild(document.createTextNode(" "));
+      head.appendChild(pill("CONFLICTING", "warn"));
+    }
+    box.appendChild(head);
+    box.appendChild(el("div", null, " "));
+    barRow(box, "materiality", e.materiality, "up");
+    barRow(box, "novelty", e.novelty, "up");
+    box.appendChild(el("p", "note",
+      "Sources: " + fmt(e.independent_sources) + " independent, " +
+      fmt(e.primary_sources) + " primary. Multiple outlets carrying one " +
+      "wire story are one observation, not several."));
+  }
+
+  function renderRegime(r) {
+    var box = document.getElementById("stageRegime");
+    box.innerHTML = "";
+    var head = el("div", null);
+    head.appendChild(pill(r.regime || "UNKNOWN",
+      r.regime === "BULLISH" ? "up" :
+      (r.regime || "").indexOf("BEAR") >= 0 ? "down" : "flat"));
+    head.appendChild(document.createTextNode(" "));
+    head.appendChild(pill("posture: " + (r.risk_posture || "NO_NEW_TRADES"),
+      r.risk_posture === "NORMAL" ? "up" : "warn"));
+    box.appendChild(head);
+    box.appendChild(el("div", null, " "));
+    barRow(box, "regime confidence", r.confidence, "up");
+  }
+
+  function renderHypothesis(h) {
+    var box = document.getElementById("stageHypothesis");
+    box.innerHTML = "";
+    var head = el("div", null);
+    head.appendChild(pill(h.strategy || "NO_VALID_STRATEGY",
+      h.strategy === "NO_VALID_STRATEGY" ? "flat" : "up"));
+    head.appendChild(document.createTextNode(" "));
+    head.appendChild(pill(h.is_actionable ? "ACTIONABLE" : "not actionable",
+      h.is_actionable ? "up" : "flat"));
+    box.appendChild(head);
+    box.appendChild(el("div", null, " "));
+    barRow(box, "hypothesis strength", h.hypothesis_strength, "up");
+
+    /* Strength IS a combination, so its contributions are itemised
+       rather than left as one number. Otherwise it would be exactly the
+       opaque score this dashboard exists to avoid. */
+    var comps = h.strength_components || {};
+    var keys = Object.keys(comps);
+    if (keys.length) {
+      box.appendChild(el("p", "note",
+        "Strength is a combination, so its contributions are itemised:"));
+      keys.forEach(function (k) {
+        var v = comps[k];
+        if (typeof v === "number") {
+          barRow(box, "· " + k.replace(/_/g, " "), Math.abs(v),
+            v < 0 ? "down" : "warn");
+        }
+      });
+    }
+
+    var cons = h.contradictions || [];
+    if (cons.length) {
+      box.appendChild(el("h3", null, "Contradictions"));
+      var ul = el("ul", "reasons");
+      cons.forEach(function (c) {
+        var sev = String(c.severity || "MINOR").toLowerCase();
+        var li = el("li", sev);
+        var code = el("code", null, c.code || "?");
+        li.appendChild(code);
+        li.appendChild(document.createTextNode(" — " + (c.detail || "")));
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+  }
+
+  function renderRisk(d) {
+    var box = document.getElementById("stageRisk");
+    box.innerHTML = "";
+    box.appendChild(pill(d.approved ? "APPROVED" : "REFUSED",
+      d.approved ? "up" : "down"));
+    var dl = el("dl", "kv");
+    box.appendChild(dl);
+    kv(dl, [
+      ["capital required", d.capital_required === null ? "—"
+        : "$" + fmt(d.capital_required, 2)],
+      ["max loss", d.max_loss === null ? "—" : "$" + fmt(d.max_loss, 2)],
+      ["stop distance", d.stop_distance_pct === null ? "—"
+        : fmt(d.stop_distance_pct, 2) + "%"],
+      ["limits version", d.limits_version]
+    ]);
+
+    var codes = d.reason_codes || [];
+    if (codes.length) {
+      box.appendChild(el("h3", null, "Why it was refused"));
+      var ul = el("ul", "reasons");
+      var reasons = d.reasons || [];
+      codes.forEach(function (c, i) {
+        var li = el("li", "blocking");
+        li.appendChild(el("code", null, c));
+        if (reasons[i]) {
+          li.appendChild(document.createTextNode(" — " + reasons[i]));
+        }
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+      box.appendChild(el("p", "note",
+        "Every reason is listed, not just the first. Approval is derived " +
+        "from this list being empty; there is no override."));
+    }
+  }
+
+  function runPipeline() {
+    var symbol = (document.getElementById("symbol").value || "").trim().toUpperCase();
+    if (!symbol) { return; }
+    var btn = document.getElementById("runBtn");
+    var status = document.getElementById("pipeStatus");
+    var panel = document.getElementById("pipeline");
+    btn.disabled = true;
+    status.textContent = "Loading " + symbol + "…";
+    get("/agent/pipeline?symbol=" + encodeURIComponent(symbol))
+      .then(function (d) {
+        var s = d.stages || {};
+        renderQuant(s.quantitative || {});
+        renderEvidence(s.evidence || {});
+        renderRegime(s.regime || {});
+        renderHypothesis(s.hypothesis || {});
+        renderRisk(s.risk || {});
+        document.getElementById("compositeNote").textContent =
+          d.composite_score_detail || "";
+        panel.hidden = false;
+        status.textContent = symbol;
+      })
+      .catch(function (e) {
+        status.textContent = "";
+        panel.hidden = false;
+        document.getElementById("stageQuant").innerHTML = "";
+        showError(document.getElementById("stageQuant"), e);
+      })
+      .then(function () { btn.disabled = false; });
+  }
+  document.getElementById("runBtn").addEventListener("click", runPipeline);
+  document.getElementById("symbol").addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") { runPipeline(); }
+  });
+
+  // ---- positions -------------------------------------------------------
+  function loadPositions() {
+    var box = document.getElementById("positions");
+    get("/agent/positions").then(function (d) {
+      box.innerHTML = "";
+      var rows = d.positions || [];
+      if (!rows.length) {
+        /* "No positions" and "position store not wired" look identical
+           unless the reason is stated. */
+        box.appendChild(el("p", "empty", d.detail || "No open positions."));
+        return;
+      }
+      var wrap = el("div", "scroll-x");
+      var t = el("table");
+      t.innerHTML = "<thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th>" +
+        "<th>Stop</th><th>Open risk</th><th>Unreal. P&amp;L</th>" +
+        "<th>Stop type</th></tr></thead>";
+      var tb = el("tbody");
+      rows.forEach(function (p) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, p.symbol));
+        tr.appendChild(el("td", "num", fmt(p.quantity, 4)));
+        tr.appendChild(el("td", "num", fmt(p.entry_price, 2)));
+        tr.appendChild(el("td", "num", fmt((p.plan || {}).stop_price, 2)));
+        tr.appendChild(el("td", "num", fmt(p.open_risk, 2)));
+        tr.appendChild(el("td", "num", fmt(p.unrealized_pnl, 2)));
+        tr.appendChild(el("td", null, (p.plan || {}).stop_mechanism || "—"));
+        tb.appendChild(tr);
+      });
+      t.appendChild(tb);
+      wrap.appendChild(t);
+      box.appendChild(wrap);
+      box.appendChild(el("p", "note warn",
+        "An ENGINE_POLLED stop is only checked when a cycle runs. If the " +
+        "agent is not running, that stop does not exist."));
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  // ---- performance -----------------------------------------------------
+  function loadPerformance() {
+    var box = document.getElementById("performance");
+    get("/agent/performance").then(function (d) {
+      box.innerHTML = "";
+
+      var verdict = d.verdict || "UNKNOWN";
+      var tone = verdict === "POSITIVE_EDGE_DEMONSTRATED" ? "up"
+        : verdict === "NEGATIVE_EDGE_DEMONSTRATED" ? "down" : "warn";
+      box.appendChild(pill(verdict, tone));
+      if (d.summary || d.detail) {
+        box.appendChild(el("p", "note warn", d.summary || d.detail));
+      }
+
+      var metrics = d.metrics || {};
+      var names = Object.keys(metrics);
+      if (!names.length) {
+        box.appendChild(el("p", "empty", "No completed trades yet."));
+        return;
+      }
+      var wrap = el("div", "scroll-x");
+      var t = el("table");
+      t.innerHTML = "<thead><tr><th>Metric</th><th>Value</th>" +
+        "<th>95% interval</th><th>n</th><th>Adequacy</th>" +
+        "<th>Is evidence?</th></tr></thead>";
+      var tb = el("tbody");
+      names.forEach(function (n) {
+        var m = metrics[n];
+        var tr = el("tr");
+        tr.appendChild(el("td", null, n.replace(/_/g, " ")));
+        tr.appendChild(el("td", "num", fmt(m.value, 3)));
+        var ci = (m.ci_low === null || m.ci_low === undefined) ? "—"
+          : fmt(m.ci_low, 3) + " – " + fmt(m.ci_high, 3);
+        tr.appendChild(el("td", "num", ci));
+        tr.appendChild(el("td", "num", m.sample_size));
+        var ad = el("td");
+        ad.appendChild(pill(m.adequacy,
+          m.adequacy === "DEMONSTRATED" ? "up"
+            : m.adequacy === "INSUFFICIENT" ? "warn" : "flat"));
+        tr.appendChild(ad);
+        var ev = el("td");
+        /* The ONLY cell that should gate a decision to increase size. */
+        ev.appendChild(pill(m.is_evidence ? "YES" : "no",
+          m.is_evidence ? "up" : "flat"));
+        tr.appendChild(ev);
+        tb.appendChild(tr);
+      });
+      t.appendChild(tb);
+      wrap.appendChild(t);
+      box.appendChild(wrap);
+
+      var si = d.stop_integrity || {};
+      if (si.trades_assessed) {
+        box.appendChild(el("h3", null, "Stop integrity"));
+        var dl = el("dl", "kv");
+        box.appendChild(dl);
+        kv(dl, [
+          ["trades assessed", si.trades_assessed],
+          ["stop breaches", si.stop_breaches],
+          ["breach rate", fmt(si.breach_rate, 3)],
+          ["worst result", si.worst_r === null ? "—" : fmt(si.worst_r, 2) + "R"]
+        ]);
+        box.appendChild(el("p", "note warn", si.note || ""));
+      }
+
+      box.appendChild(el("p", "note",
+        "A metric counts as evidence only when the sample is large enough " +
+        "AND the interval excludes the no-edge value. Both are required: " +
+        "a striking number from a handful of trades is not a finding."));
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  // ---- boot ------------------------------------------------------------
+  if (!API) {
+    document.getElementById("paperDetail").textContent =
+      "AGENT_API_BASE is not configured; no data will load.";
+  }
+  loadSwitches();
+  loadLimits();
+  loadPositions();
+  loadPerformance();
+})();
+</script>
+</body>
+</html>

@@ -34,6 +34,10 @@ from typing import Callable, Dict, List, Optional
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
+# Every mutation carries this marker, which is what makes a
+# leaked mutation detectable on the next run.
+MUTATION_MARKER = "MUTATION"
+
 ENGINE = REPO / "agent" / "signals" / "engine.py"
 INDICATORS = REPO / "agent" / "signals" / "indicators.py"
 
@@ -71,12 +75,16 @@ ORC_MODELS = REPO / "agent" / "orchestration" / "models.py"
 ORC_DAY = REPO / "agent" / "orchestration" / "day.py"
 ORC_LOCK = REPO / "agent" / "orchestration" / "lock.py"
 
+API_HANDLER = REPO / "lambda-micro" / "agent-api" / "handler.py"
+DASHBOARD = REPO / "web" / "agent" / "index.html"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
           "tests.test_risk", "tests.test_broker",
           "tests.test_positions", "tests.test_journal",
-          "tests.test_replay", "tests.test_orchestration"]
+          "tests.test_replay", "tests.test_orchestration",
+          "tests.test_agent_dashboard"]
 
 
 @dataclass
@@ -1021,6 +1029,84 @@ MUTATIONS = [
         new="            result.exits_failed += 1  # MUTATION",
         expect=["record is missing", "journal"],
     ),
+    # --- Milestone 14: dashboard and read API ----------------------------
+    Mutation(
+        name="claim-the-api-can-place-orders",
+        description="report an execution capability that does not exist",
+        path=API_HANDLER,
+        old='        "can_place_orders": False,\n'
+            '        "can_place_orders_detail": (',
+        new='        "can_place_orders": True,  # MUTATION\n'
+            '        "can_place_orders_detail": (',
+        expect=["can_place_orders", "paper"],
+    ),
+    Mutation(
+        name="default-the-switches-to-on",
+        description="treat a missing environment variable as permission",
+        path=API_HANDLER,
+        old='def _switch(name: str, default: str = "false") -> bool:',
+        new='def _switch(name: str, default: str = "true") -> bool:  # MUTATION',
+        expect=["switch", "default", "permission"],
+    ),
+    Mutation(
+        name="report-an-unreadable-halt-as-clear",
+        description="show an unknown halt state as safe",
+        path=API_HANDLER,
+        old="        halt = True\n"
+            "        halt_detail = f\"halt state unreadable, assuming halted: {exc}\"",
+        new="        halt = False  # MUTATION\n"
+            "        halt_detail = \"unknown\"",
+        expect=["halt", "unreadable"],
+    ),
+    Mutation(
+        name="add-a-composite-score",
+        description="blend the pipeline stages into one number",
+        path=API_HANDLER,
+        old='        "composite_score": None,',
+        new='        "composite_score": 0.5,  # MUTATION',
+        expect=["composite", "score"],
+    ),
+    Mutation(
+        name="report-zero-open-risk-when-unknown",
+        description="claim there is no risk when the total is unknown",
+        path=API_HANDLER,
+        old='        "total_open_risk": None,',
+        new='        "total_open_risk": 0.0,  # MUTATION',
+        expect=["open_risk", "None", "zero"],
+    ),
+    Mutation(
+        name="drop-the-paper-banner",
+        description="remove the notice that nothing here is real money",
+        path=DASHBOARD,
+        old="  PAPER ONLY — NO EXECUTION PATH",
+        new="  Agent status",
+        expect=["PAPER", "paper"],
+    ),
+    Mutation(
+        name="hide-the-evidence-column",
+        description="show a metric without saying whether it is evidence",
+        path=DASHBOARD,
+        old="        ev.appendChild(pill(m.is_evidence ? \"YES\" : \"no\",",
+        new="        ev.appendChild(pill(\"-\",  // MUTATION",
+        expect=["is_evidence", "evidence"],
+    ),
+    Mutation(
+        name="hide-the-sample-size",
+        description="present a metric without its sample size",
+        path=DASHBOARD,
+        old='        tr.appendChild(el("td", "num", m.sample_size));',
+        new='        tr.appendChild(el("td", "num", ""));  // MUTATION',
+        expect=["sample_size", "sample size"],
+    ),
+    Mutation(
+        name="stop-disclosing-the-polled-stop-gap",
+        description="show a stop price without saying what it does not promise",
+        path=DASHBOARD,
+        old="        \"An ENGINE_POLLED stop is only checked when a cycle runs. If the \" +\n"
+            "        \"agent is not running, that stop does not exist.\"));",
+        new="        \"Stops are active.\"));  // MUTATION",
+        expect=["ENGINE_POLLED", "does not exist"],
+    ),
 ]
 
 
@@ -1074,7 +1160,40 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
-    originals = {p: p.read_text() for p in {m.path for m in MUTATIONS}}
+    targets = {m.path for m in MUTATIONS}
+
+    # --- pre-flight: refuse to snapshot an already-mutated tree -------
+    #
+    # This check exists because its absence caused a real incident. The
+    # snapshot below is taken from the WORKING TREE, so a mutation left
+    # behind by an interrupted run gets recorded as the "original",
+    # faithfully restored afterwards, and certified by the checksum as
+    # "restored cleanly" - forever. The checksum only ever proved
+    # "unchanged since this run started", which is not the same as
+    # "matches the real source", and the difference is invisible.
+    #
+    # Worse, the corrupted file then ships: a disabled spread check
+    # reached a deployed Lambda that way.
+    #
+    # Every mutation writes the marker below, so its presence before any
+    # mutation has been applied means a previous run did not clean up.
+    contaminated = [p for p in sorted(targets)
+                    if MUTATION_MARKER in p.read_text()]
+    if contaminated:
+        print("=" * 74)
+        print("HARNESS ABORTED: source files still contain mutations from a "
+              "previous run.")
+        print("Snapshotting these would record the mutation as the original "
+              "and report it as clean.")
+        for path in contaminated:
+            print(f"   {path.relative_to(REPO)}")
+        print("\nRestore them before running, e.g.:")
+        print("   git checkout -- " + " ".join(
+            str(p.relative_to(REPO)) for p in contaminated))
+        print("=" * 74)
+        return 3
+
+    originals = {p: p.read_text() for p in targets}
     original_sums = {p: checksum(p) for p in originals}
 
     def restore() -> None:
@@ -1152,6 +1271,18 @@ def main() -> int:
     broken = [m.name for m, caught, _ in results if caught is None]
 
     print("=" * 74)
+    leaked = [p for p in sorted(originals)
+              if MUTATION_MARKER in p.read_text()]
+    if leaked:
+        # Independent of the checksum comparison, which can only detect
+        # drift from a snapshot that might itself be contaminated.
+        print("\nRESTORE FAILED: mutation markers remain in:")
+        for path in leaked:
+            print(f"   {path.relative_to(REPO)}")
+        print("Run: git checkout -- " + " ".join(
+            str(p.relative_to(REPO)) for p in leaked))
+        return 3
+
     print(f"restored cleanly; suite is "
           f"{'GREEN' if final['passed'] else 'RED'} again")
     print(f"{len(results) - len(survived) - len(broken)}/{len(results)} "

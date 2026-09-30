@@ -17,8 +17,30 @@ current API has no authentication, and an unauthenticated endpoint that
 spends provider quota on demand is an obvious way for a stranger to
 exhaust the budget. It stays off until there is auth in front of it.
 
-Nothing in this module can place an order. There is no broker adapter in
-this build at all.
+Milestone 14 adds read endpoints for the trading pipeline:
+
+    GET  /agent/hypothesis         decomposed hypothesis for a symbol
+    GET  /agent/risk/limits        the limits actually in force
+    GET  /agent/risk/preview       what the risk governor would decide
+    GET  /agent/positions          open positions, plans and open risk
+    GET  /agent/journal            completed trades
+    GET  /agent/performance        metrics WITH sample adequacy
+    GET  /agent/switches           kill-switch state
+    GET  /agent/pipeline           every stage for one symbol, separately
+
+**Nothing in this module can place an order.** `/agent/risk/preview`
+runs the risk governor and returns its verdict; it does not touch a
+broker, and there is no broker adapter wired into this Lambda at all.
+The endpoints that would execute are deliberately absent rather than
+disabled, so there is no flag anywhere in this file that could turn
+execution on.
+
+The dashboard these serve shows every stage SEPARATELY - scanner score,
+signal agreement, signal magnitude, evidence materiality, evidence
+novelty, hypothesis strength, risk verdict. There is deliberately no
+composite "AI score", because a single number would hide which stage
+actually drove a decision and make the pipeline impossible to debug or
+to distrust intelligently.
 """
 from __future__ import annotations
 
@@ -36,6 +58,11 @@ from agent.scanner import DynamoDBScannerStore
 from agent.signals import DynamoDBSignalStore, SignalService
 from agent.evidence import DynamoDBEvidenceStore, EvidenceService
 from agent.evidence.providers import AlpacaNewsProvider, SECProvider
+from agent.hypothesis import generate as generate_hypothesis
+from agent.journal import DynamoDBJournal, describe as describe_perf
+from agent.risk import RiskContext, RiskLimits
+from agent.risk import evaluate as evaluate_risk
+from agent.risk import DynamoDBHaltStore
 from agent.state import (
     AgentState, AgentStateService, DynamoDBStateStore, MarketSession,
 )
@@ -83,6 +110,13 @@ def _provider():
         )
         _PROVIDER = (inner, CachedProvider(inner, backend=MemoryCache()))
     return _PROVIDER
+
+
+def _journal():
+    cfg = _config()
+    return DynamoDBJournal(
+        table_name=os.environ.get("AGENT_JOURNAL_TABLE",
+                                  "stock-agent-dev-journal"))
 
 
 def _scanner_store():
@@ -741,6 +775,288 @@ def handle_scanner_evidence(event) -> Dict:
     return _response(200, {"found": True, "run": run})
 
 
+
+# --- Milestone 14: trading pipeline read endpoints -----------------------
+
+def _switch(name: str, default: str = "false") -> bool:
+    """Read a kill switch from the environment.
+
+    Both default to FALSE. A missing variable is not permission.
+    """
+    return os.environ.get(name, default).strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def handle_switches(event) -> Dict:
+    """What the agent is currently allowed to do.
+
+    Exposed so the dashboard can state it plainly rather than implying
+    readiness from the presence of data.
+    """
+    trading = _switch("AGENT_TRADING_ENABLED")
+    execution = _switch("AGENT_EXECUTION_AVAILABLE")
+    halt = None
+    halt_detail = "not checked"
+    try:
+        cfg = _config()
+        state = DynamoDBHaltStore(
+            table_name=cfg.storage.state_table,
+            region=cfg.storage.region).get()
+        halt = bool(getattr(state, "halted", True))
+        halt_detail = getattr(state, "reason", "") or ""
+    except Exception as exc:                              # noqa: BLE001
+        # Fail closed in the REPORT as well as in the engine: an
+        # unreadable halt state is shown as halted, not as unknown.
+        halt = True
+        halt_detail = f"halt state unreadable, assuming halted: {exc}"
+
+    return _response(200, {
+        "trading_enabled": trading,
+        "execution_available": execution,
+        "global_halt": halt,
+        "global_halt_detail": halt_detail,
+        "can_place_orders": False,
+        "can_place_orders_detail": (
+            "This API has no broker adapter. No endpoint in this Lambda "
+            "can submit an order, whatever these switches say."),
+        "is_paper_only": True,
+    })
+
+
+def handle_risk_limits(event) -> Dict:
+    """The limits actually in force, not a description of them."""
+    limits = RiskLimits()
+    return _response(200, {
+        "limits": limits.as_dict() if hasattr(limits, "as_dict")
+        else {k: v for k, v in vars(limits).items()},
+        "version": limits.version,
+        "note": ("These are the values the governor uses. Capital limits "
+                 "are a CEILING, not a target - the agent is not expected "
+                 "to deploy them."),
+    })
+
+
+def _hypothesis_for(symbol: str):
+    """Build a hypothesis from live data, returning the pieces too."""
+    # Reuse the module's own factories. They read credentials from
+    # Secrets Manager and share one cached provider, so a page view does
+    # not pay for the same quote twice.
+    signal = _signal_service().evaluate_symbol(symbol)
+    signal_dict = signal.as_dict()
+
+    # Read the STORED regime rather than evaluating a fresh one, as
+    # handle_market_regime does. Evaluating spends provider quota on
+    # every page view, and the orchestrator would use the stored value
+    # anyway - so re-evaluating here would also mean the dashboard shows
+    # a regime the agent never actually decided on.
+    session = _state_service().get_session().as_dict()
+    regime_dict = {
+        "regime": session.get("market_regime") or "UNKNOWN",
+        "regime_confidence": session.get("market_regime_confidence") or 0.0,
+        "risk_posture": session.get("risk_posture") or "NO_NEW_TRADES",
+        "market_session": session.get("market_session") or "UNKNOWN",
+        "regime_updated_at": session.get("regime_updated_at"),
+    }
+
+    catalyst = None
+    try:
+        catalyst = _evidence_service().collect(symbol).as_dict()
+    except Exception:                                     # noqa: BLE001
+        # Evidence unavailable is distinct from evidence absent, and the
+        # hypothesis engine already distinguishes them. Leaving this as
+        # None means "not collected", which is the honest value.
+        catalyst = None
+
+    hypothesis = generate_hypothesis(symbol, signal_dict, catalyst,
+                                     regime_dict)
+    return hypothesis, signal_dict, catalyst, regime_dict
+
+
+def handle_hypothesis(event) -> Dict:
+    symbol = _query(event).get("symbol")
+    if not symbol:
+        return _response(400, {"error": "symbol is required"})
+    try:
+        hypothesis, _signal, _catalyst, _regime = _hypothesis_for(
+            symbol.upper())
+    except (ProviderError, SymbolNotFound) as exc:
+        return _response(502, {"error": "provider unavailable",
+                               "detail": str(exc)[:200]})
+    return _response(200, hypothesis.as_dict())
+
+
+def handle_risk_preview(event) -> Dict:
+    """What the governor WOULD decide. Places nothing."""
+    symbol = _query(event).get("symbol")
+    if not symbol:
+        return _response(400, {"error": "symbol is required"})
+    symbol = symbol.upper()
+    try:
+        hypothesis, signal, _catalyst, _regime = _hypothesis_for(symbol)
+    except (ProviderError, SymbolNotFound) as exc:
+        return _response(502, {"error": "provider unavailable",
+                               "detail": str(exc)[:200]})
+
+    raw_provider, _cached = _provider()
+    session = MarketSessionService(raw_provider).current()
+    quality = signal.get("data_quality") or {}
+    context = RiskContext(
+        session_date=today_market_date(),
+        market_session=str(getattr(session, "session", "UNKNOWN")),
+        minutes_to_close=getattr(session, "minutes_to_close", None),
+        # Both switches are read from the environment and both default
+        # to false, so a preview on an unconfigured deployment correctly
+        # shows a refusal rather than an approval.
+        trading_enabled=_switch("AGENT_TRADING_ENABLED"),
+        execution_available=_switch("AGENT_EXECUTION_AVAILABLE"),
+        price=signal.get("price"),
+        quote_age_seconds=quality.get("age_seconds"),
+    )
+    decision = evaluate_risk(hypothesis, context)
+    return _response(200, {
+        "decision": decision.as_dict(),
+        "hypothesis_id": hypothesis.hypothesis_id,
+        "note": ("A preview only. This Lambda has no broker adapter and "
+                 "cannot submit an order."),
+    })
+
+
+def handle_positions(event) -> Dict:
+    """Open positions.
+
+    Returns an explicit empty state rather than an empty list with no
+    explanation, because "no positions" and "position store not wired"
+    look identical otherwise.
+    """
+    return _response(200, {
+        "positions": [],
+        "open_count": 0,
+        "total_open_risk": None,
+        "source": "none",
+        "detail": ("No position store is wired into this Lambda. Positions "
+                   "exist only inside a running orchestrator, and nothing "
+                   "is scheduled yet, so there is nothing to report - "
+                   "which is different from reporting zero positions."),
+    })
+
+
+def handle_journal(event) -> Dict:
+    session_date = _query(event).get("date") or today_market_date()
+    try:
+        trades = _journal().list_trades(session_date=session_date)
+    except Exception as exc:                              # noqa: BLE001
+        return _response(200, {
+            "trades": [], "count": 0, "session_date": session_date,
+            "source": "unavailable",
+            "detail": f"journal unreadable: {str(exc)[:200]}",
+        })
+    return _response(200, {
+        "trades": [t.as_dict() for t in trades],
+        "count": len(trades),
+        "session_date": session_date,
+        "source": "dynamodb",
+    })
+
+
+def handle_performance(event) -> Dict:
+    """Metrics WITH their sample adequacy.
+
+    The verdict field is the one to read. It reports
+    NO_EDGE_DEMONSTRATED for any sample too small to support a claim,
+    whichever way the numbers happen to point.
+    """
+    session_date = _query(event).get("date") or today_market_date()
+    try:
+        trades = _journal().list_trades(session_date=session_date)
+    except Exception as exc:                              # noqa: BLE001
+        return _response(200, {
+            "verdict": "UNAVAILABLE",
+            "detail": f"journal unreadable: {str(exc)[:200]}",
+            "trades_counted": 0,
+        })
+    return _response(200, describe_perf(trades))
+
+
+def handle_pipeline(event) -> Dict:
+    """Every stage for one symbol, kept separate.
+
+    This is the endpoint the dashboard uses. It deliberately returns the
+    stages side by side rather than a composite score: a single number
+    would hide which stage drove the outcome, and the whole point of the
+    decomposition is to be able to distrust one stage without
+    distrusting all of them.
+    """
+    symbol = _query(event).get("symbol")
+    if not symbol:
+        return _response(400, {"error": "symbol is required"})
+    symbol = symbol.upper()
+
+    stages: Dict[str, Dict] = {}
+    try:
+        hypothesis, signal, catalyst, regime = _hypothesis_for(symbol)
+    except (ProviderError, SymbolNotFound) as exc:
+        return _response(502, {"error": "provider unavailable",
+                               "detail": str(exc)[:200]})
+
+    stages["quantitative"] = {
+        "direction": signal.get("direction"),
+        "signal_agreement": signal.get("signal_agreement"),
+        "signal_magnitude": signal.get("signal_magnitude"),
+        "regime_adjusted_magnitude": signal.get(
+            "regime_adjusted_magnitude"),
+        "strength_band": signal.get("strength_band"),
+        "buy_groups": signal.get("buy_groups"),
+        "sell_groups": signal.get("sell_groups"),
+        "freshness": (signal.get("data_quality") or {}).get("freshness"),
+    }
+    stages["evidence"] = ({
+        "collected": False,
+        "detail": ("evidence was not collected; this is distinct from "
+                   "having looked and found nothing"),
+    } if not catalyst else {
+        "collected": True,
+        "has_active_catalyst": catalyst.get("has_active_catalyst"),
+        "direction": catalyst.get("direction"),
+        "materiality": (catalyst.get("primary_catalyst") or {}).get(
+            "materiality"),
+        "novelty": (catalyst.get("primary_catalyst") or {}).get("novelty"),
+        "independent_sources": catalyst.get("independent_source_count"),
+        "primary_sources": catalyst.get("primary_source_count"),
+        "conflicting": catalyst.get("conflicting_evidence"),
+    })
+    stages["regime"] = {
+        "regime": regime.get("regime"),
+        "confidence": regime.get("regime_confidence"),
+        "risk_posture": regime.get("risk_posture"),
+    }
+    stages["hypothesis"] = hypothesis.as_dict()
+
+    raw_provider, _cached = _provider()
+    session = MarketSessionService(raw_provider).current()
+    quality = signal.get("data_quality") or {}
+    decision = evaluate_risk(hypothesis, RiskContext(
+        session_date=today_market_date(),
+        market_session=str(getattr(session, "session", "UNKNOWN")),
+        minutes_to_close=getattr(session, "minutes_to_close", None),
+        trading_enabled=_switch("AGENT_TRADING_ENABLED"),
+        execution_available=_switch("AGENT_EXECUTION_AVAILABLE"),
+        price=signal.get("price"),
+        quote_age_seconds=quality.get("age_seconds")))
+    stages["risk"] = decision.as_dict()
+
+    return _response(200, {
+        "symbol": symbol,
+        "stages": stages,
+        "composite_score": None,
+        "composite_score_detail": (
+            "Deliberately absent. Each stage is reported separately so it "
+            "is visible WHICH stage drove the outcome; a single blended "
+            "number would hide that and make the pipeline impossible to "
+            "debug or to distrust selectively."),
+        "can_place_orders": False,
+    })
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
@@ -757,6 +1073,15 @@ ROUTES = {
     ("GET", "/agent/evidence/latest"): handle_evidence_latest,
     ("GET", "/agent/catalysts"): handle_catalysts,
     ("GET", "/agent/scanner/evidence"): handle_scanner_evidence,
+    # Milestone 14
+    ("GET", "/agent/switches"): handle_switches,
+    ("GET", "/agent/risk/limits"): handle_risk_limits,
+    ("GET", "/agent/risk/preview"): handle_risk_preview,
+    ("GET", "/agent/hypothesis"): handle_hypothesis,
+    ("GET", "/agent/positions"): handle_positions,
+    ("GET", "/agent/journal"): handle_journal,
+    ("GET", "/agent/performance"): handle_performance,
+    ("GET", "/agent/pipeline"): handle_pipeline,
 }
 
 
