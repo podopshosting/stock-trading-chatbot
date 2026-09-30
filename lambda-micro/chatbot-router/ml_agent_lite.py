@@ -222,6 +222,10 @@ class MLTradingAgent:
                 'counted': 0 if group_direction == 'hold' else 1,
                 'signals_fired': len(bucket['signals']),
                 'signal_names': [s['name'] for s in bucket['signals']],
+                # Per-signal direction, so a consumer can show WHICH
+                # members of a group disagreed instead of leaving the
+                # reader to infer it from `net`.
+                'members': list(bucket['signals']),
                 'net': round(net, 4),
                 'internal_agreement': internal_agreement,
                 'confidence': round(group_confidence, 4),

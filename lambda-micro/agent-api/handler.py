@@ -25,7 +25,10 @@ from typing import Dict, Optional, Tuple
 from agent.config import AgentConfig
 from agent.market import MarketRegimeService, MarketSessionService
 from agent.observability import log_event
+from ml_agent_lite import MLTradingAgent
 from agent.providers import AlpacaProvider, CachedProvider, MemoryCache
+from agent.providers.base import ProviderError, SymbolNotFound
+from agent.analysis import build_analysis
 from agent.scanner import DynamoDBScannerStore
 from agent.state import (
     AgentState, AgentStateService, DynamoDBStateStore, MarketSession,
@@ -382,6 +385,91 @@ def handle_candidate_symbol(event) -> Dict:
     })
 
 
+def handle_analysis(event) -> Dict:
+    """Structured per-symbol analysis for the review UI.
+
+    Uses the same ml_agent_lite engine as production /chatbot; this route
+    only reshapes the result into named fields so the frontend never has
+    to parse prose to recover a number.
+    """
+    params = _query(event)
+    symbol = (params.get("symbol")
+              or (event.get("pathParameters") or {}).get("symbol")
+              or "").strip().upper()
+    if not symbol:
+        return _response(400, {"error": "symbol required"})
+    if not symbol.isalpha() or len(symbol) > 6:
+        return _response(400, {"error": "invalid symbol", "symbol": symbol})
+
+    _raw, cached = _provider()
+    cfg = _config()
+
+    try:
+        quote = cached.get_quote(symbol)
+    except SymbolNotFound:
+        return _response(404, {"error": "symbol not found", "symbol": symbol})
+    except ProviderError as e:
+        return _response(503, {"error": "market data unavailable",
+                               "detail": type(e).__name__})
+
+    try:
+        bars = cached.get_bars(symbol, "1day", limit=220)
+    except ProviderError as e:
+        return _response(503, {"error": "history unavailable",
+                               "detail": type(e).__name__})
+
+    closes = bars.closes()
+    if len(closes) < 50:
+        return _response(200, {
+            "symbol": symbol,
+            "price": quote.price,
+            "analysis_available": False,
+            "message": (f"only {len(closes)} daily closes available; the "
+                        f"engine needs at least 50"),
+            "execution_available": False,
+        })
+
+    agent = MLTradingAgent(symbol)
+    ml_result = agent.analyze_stock(closes)
+    bands = agent.calculate_bollinger_bands(closes, 20)
+
+    payload = build_analysis(symbol, quote, closes, ml_result, bollinger=bands)
+    payload["analysis_available"] = True
+
+    # Market context: the stock does not exist in isolation.
+    try:
+        state = _state_service().get_session()
+        detail = state.as_dict().get("regime_detail") or {}
+        payload["market_context"] = {
+            "regime": state.market_regime,
+            "regime_agreement": state.market_regime_confidence,
+            "risk_posture": state.risk_posture,
+            "trend": detail.get("trend"),
+            "volatility": detail.get("volatility"),
+            "breadth_proxy": detail.get("breadth_proxy"),
+            "market_session": str(state.market_status),
+            "updated_at": state.regime_updated_at,
+            "indices": {
+                sym: {
+                    "price": info.get("price"),
+                    "change_pct": (feat or {}).get("intraday_change_pct"),
+                }
+                for sym, info in (detail.get("inputs") or {}).items()
+                for feat in [(detail.get("features") or {}).get(sym)]
+            },
+            "agreement_meaning": (
+                "Regime agreement measures how well the index readings "
+                "agree and how fresh they are, not a probability."
+            ),
+        }
+    except Exception as e:
+        log_event("provider_error", operation="market_context",
+                  error=str(e)[:200])
+        payload["market_context"] = {"available": False}
+
+    return _response(200, payload)
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
@@ -390,6 +478,7 @@ ROUTES = {
     ("GET", "/agent/scanner/run"): handle_scanner_run,
     ("GET", "/agent/candidates"): handle_candidates,
     ("GET", "/agent/candidate"): handle_candidate_symbol,
+    ("GET", "/agent/analysis"): handle_analysis,
 }
 
 

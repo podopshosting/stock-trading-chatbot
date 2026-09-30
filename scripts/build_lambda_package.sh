@@ -37,10 +37,14 @@ ENTRY_MODULE="handler.py"
 # root. The flat *.py glob cannot reach a package, so a service importing
 # one must declare it here or the artifact will not import.
 REQUIRED_PACKAGES=()
+EXTRA_FILES=()
 case "$SERVICE_DIR" in
   *chatbot-router) REQUIRED_MODULES=("$ENTRY_MODULE" "ml_agent_lite.py") ;;
-  *agent-api)      REQUIRED_MODULES=("$ENTRY_MODULE")
-                   REQUIRED_PACKAGES=("agent") ;;
+  *agent-api)      REQUIRED_MODULES=("$ENTRY_MODULE" "ml_agent_lite.py")
+                   REQUIRED_PACKAGES=("agent")
+                   # The analysis route runs the same engine as production
+                   # /chatbot, so the artifact needs that module too.
+                   EXTRA_FILES=("lambda-micro/chatbot-router/ml_agent_lite.py") ;;
   *agent-scanner)  REQUIRED_MODULES=("$ENTRY_MODULE")
                    REQUIRED_PACKAGES=("agent") ;;
   *)               REQUIRED_MODULES=("$ENTRY_MODULE") ;;
@@ -80,6 +84,16 @@ if [[ "$copied" -eq 0 ]]; then
   echo "ERROR: no source modules copied from $SERVICE_DIR" >&2
   exit 1
 fi
+
+# --- 2a. extra single files from elsewhere in the repo -------------------
+for extra in "${EXTRA_FILES[@]+"${EXTRA_FILES[@]}"}"; do
+  if [[ ! -f "$extra" ]]; then
+    echo "ERROR: declared extra file not found: $extra" >&2
+    exit 1
+  fi
+  echo "    add extra: $extra"
+  cp "$extra" "$BUILD_DIR/$(basename "$extra")"
+done
 
 # --- 2b. shared packages ------------------------------------------------
 for pkg in "${REQUIRED_PACKAGES[@]+"${REQUIRED_PACKAGES[@]}"}"; do
