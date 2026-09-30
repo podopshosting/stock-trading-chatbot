@@ -92,6 +92,16 @@ def update_high_water(position: ManagedPosition,
     return position.high_water_price
 
 
+def update_low_water(position: ManagedPosition,
+                     price: Optional[float]) -> Optional[float]:
+    """Track the worst price seen. Monotonic; never improves."""
+    if price is None:
+        return position.low_water_price
+    if position.low_water_price is None or price < position.low_water_price:
+        position.low_water_price = price
+    return position.low_water_price
+
+
 def trailing_stop_price(position: ManagedPosition) -> Optional[float]:
     """Where the trailing stop currently sits, or None if inactive.
 
@@ -174,6 +184,7 @@ def evaluate(position: ManagedPosition,
             + (f" (quote {context.quote_age_seconds}s old)" if stale else ""))
     else:
         update_high_water(position, price)
+        update_low_water(position, price)
         apply_trailing_stop(position)
         position.current_price = price
 

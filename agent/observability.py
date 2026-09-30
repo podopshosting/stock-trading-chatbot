@@ -97,6 +97,9 @@ EVENTS = frozenset({
     "flatten_all",
     "reconciliation",
     "position_manager_halted",
+    # journal
+    "trade_recorded",
+    "stop_breach_recorded",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")

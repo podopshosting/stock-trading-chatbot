@@ -9,7 +9,7 @@ exit. The two are not the same kind of caution.
 from .exits import (
     CONFIG_VERSION, MAX_QUOTE_AGE_SECONDS, TRAILING_ACTIVATION_PCT,
     ExitContext, apply_trailing_stop, evaluate, stop_gap_disclosure,
-    trailing_stop_price, update_high_water,
+    trailing_stop_price, update_high_water, update_low_water,
 )
 from .manager import PositionManager, PositionManagerError
 from .models import (
@@ -25,5 +25,5 @@ __all__ = [
     "PositionManager", "PositionManagerError", "PositionState",
     "ReconciliationResult", "StopMechanism", "StopWidened",
     "apply_trailing_stop", "evaluate", "stop_gap_disclosure",
-    "trailing_stop_price", "update_high_water",
+    "trailing_stop_price", "update_high_water", "update_low_water",
 ]

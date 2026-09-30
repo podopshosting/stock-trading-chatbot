@@ -57,11 +57,16 @@ POS_MODELS = REPO / "agent" / "positions" / "models.py"
 POS_EXITS = REPO / "agent" / "positions" / "exits.py"
 POS_MANAGER = REPO / "agent" / "positions" / "manager.py"
 
+JNL_MODELS = REPO / "agent" / "journal" / "models.py"
+JNL_METRICS = REPO / "agent" / "journal" / "metrics.py"
+JNL_STORE = REPO / "agent" / "journal" / "store.py"
+JNL_RECORDER = REPO / "agent" / "journal" / "recorder.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
           "tests.test_risk", "tests.test_broker",
-          "tests.test_positions"]
+          "tests.test_positions", "tests.test_journal"]
 
 
 @dataclass
@@ -614,6 +619,124 @@ MUTATIONS = [
         old="        if plan.stop_price >= price:",
         new="        if False:  # MUTATION",
         expect=["stop", "entry", "below"],
+    ),
+    # --- Milestone 11: journal and metrics -------------------------------
+    Mutation(
+        name="count-scratches-as-wins",
+        description="inflate the win rate by treating noise as a result",
+        path=JNL_MODELS,
+        old="        if abs(r) < SCRATCH_THRESHOLD_R:\n"
+            "            return TradeOutcome.SCRATCH",
+        new="        pass  # MUTATION",
+        expect=["scratch", "win_rate", "noise"],
+    ),
+    Mutation(
+        name="include-scratches-in-the-win-rate",
+        description="dilute losses by counting scratches in the denominator",
+        path=JNL_METRICS,
+        old="    return [t for t in _counted(trades)\n"
+            "            if t.outcome in (TradeOutcome.WIN, TradeOutcome.LOSS)]",
+        new="    return _counted(trades)  # MUTATION",
+        expect=["scratch", "denominator", "win_rate"],
+    ),
+    Mutation(
+        name="count-unknown-outcomes-as-neutral",
+        description="treat a trade whose result is unknown as data",
+        path=JNL_METRICS,
+        old="    return [t for t in trades if t.outcome is not TradeOutcome.UNKNOWN]",
+        new="    return _all_with_money(trades)  # MUTATION",
+        expect=["unknown", "denominator", "exclud"],
+    ),
+    Mutation(
+        name="declare-evidence-without-a-sample",
+        description="call a metric evidence regardless of sample size",
+        path=JNL_METRICS,
+        old="        return (self.adequacy is Adequacy.DEMONSTRATED\n"
+            "                and self.excludes_null is True)",
+        new="        return True  # MUTATION",
+        expect=["evidence", "sample", "demonstrat", "edge"],
+    ),
+    Mutation(
+        name="ignore-the-confidence-interval",
+        description="call a metric evidence even when the interval spans the null",
+        path=JNL_METRICS,
+        old="        return self.ci_low > self.null_value or self.ci_high < self.null_value",
+        new="        return True  # MUTATION",
+        expect=["null", "interval", "evidence"],
+    ),
+    Mutation(
+        name="lower-the-claim-threshold-to-nothing",
+        description="let a handful of trades demonstrate an edge",
+        path=JNL_METRICS,
+        old="MIN_SAMPLE_FOR_CLAIM = 100",
+        new="MIN_SAMPLE_FOR_CLAIM = 1  # MUTATION",
+        expect=["sample", "threshold", "demonstrat", "edge"],
+    ),
+    Mutation(
+        name="use-the-normal-approximation",
+        description="replace the Wilson interval with the normal one",
+        path=JNL_METRICS,
+        old="    denom = 1.0 + z * z / n",
+        new="    denom = 1.0  # MUTATION",
+        expect=["wilson", "interval", "published"],
+    ),
+    Mutation(
+        name="compare-groups-of-any-size",
+        description="present a three-trade group as comparable",
+        path=JNL_METRICS,
+        old='            "comparable": n >= MIN_SAMPLE_PER_GROUP,',
+        new='            "comparable": True,  # MUTATION',
+        expect=["comparable", "group"],
+    ),
+    Mutation(
+        name="report-infinite-profit-factor",
+        description="divide by zero losses and call it quality",
+        path=JNL_METRICS,
+        old="    value = None if losses <= 0 else wins / losses",
+        new="    value = float('inf') if losses <= 0 else wins / losses  # MUTATION",
+        expect=["profit_factor", "losses", "sample"],
+    ),
+    Mutation(
+        name="measure-r-against-the-trailed-stop",
+        description="rewrite history so trailing exits look like scratches",
+        path=JNL_RECORDER,
+        old="        if move.get(\"from\") is not None:\n"
+            "            planned_stop = move[\"from\"]\n"
+            "            break",
+        new="        pass  # MUTATION",
+        expect=["planned_stop", "entry", "trail"],
+    ),
+    Mutation(
+        name="journal-an-exit-with-no-fill-price",
+        description="record a trade whose result is unknown",
+        path=JNL_RECORDER,
+        old='    if not exit_order or not exit_order.get("average_fill_price"):',
+        new="    if False:  # MUTATION",
+        expect=["fill price", "unknown", "journal"],
+    ),
+    Mutation(
+        name="allow-the-journal-to-be-rewritten",
+        description="let a trade record be overwritten",
+        path=JNL_STORE,
+        old="        if trade.trade_id in self._trades:",
+        new="        if False:  # MUTATION",
+        expect=["append", "already", "revis"],
+    ),
+    Mutation(
+        name="trust-derived-values-from-storage",
+        description="restore a stored r_multiple instead of recomputing it",
+        path=JNL_STORE,
+        old="        planned_stop=data[\"planned_stop\"],",
+        new="        planned_stop=data.get(\"planned_stop_OVERRIDDEN\", 0.0),  # MUTATION",
+        expect=["derived", "recompute", "round trip", "r_multiple"],
+    ),
+    Mutation(
+        name="hide-stop-breaches",
+        description="stop flagging losses worse than the planned risk",
+        path=JNL_MODELS,
+        old="        return r < -1.0",
+        new="        return False  # MUTATION",
+        expect=["breach", "stop", "planned risk", "1R"],
     ),
 ]
 

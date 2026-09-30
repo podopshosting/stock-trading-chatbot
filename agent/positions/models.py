@@ -154,6 +154,11 @@ class ManagedPosition:
 
     state: PositionState = PositionState.OPEN
     high_water_price: Optional[float] = None
+    # The worst price seen while open. A winner that spent time well
+    # below its stop level did not win because the plan worked - it
+    # won because the stop was not enforced, and that needs to be
+    # visible in the journal rather than inferred.
+    low_water_price: Optional[float] = None
     current_price: Optional[float] = None
     last_evaluated_at: Optional[str] = None
 
@@ -243,6 +248,7 @@ class ManagedPosition:
             "entry_price": _round(self.entry_price),
             "current_price": _round(self.current_price),
             "high_water_price": _round(self.high_water_price),
+            "low_water_price": _round(self.low_water_price),
             "cost_basis": _round(self.cost_basis, 2),
             "market_value": _round(self.market_value, 2),
             "unrealized_pnl": _round(self.unrealized_pnl, 2),
