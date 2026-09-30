@@ -8,6 +8,7 @@ from .cache import (
     cache_key, ttl_for,
 )
 from .alpha_vantage import AlphaVantageProvider
+from .alpaca import AlpacaProvider
 
 __all__ = [
     "Bar", "BarSet", "DataUnavailable", "EntitlementRequired",
@@ -15,4 +16,5 @@ __all__ = [
     "Provenance", "ProviderError", "Quote", "RateLimited", "SymbolNotFound",
     "CachedProvider", "CacheBackend", "DynamoDBCache", "MemoryCache",
     "TieredCache", "cache_key", "ttl_for", "AlphaVantageProvider",
+    "AlpacaProvider",
 ]
