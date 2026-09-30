@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import pathlib
 import subprocess
 import sys
@@ -36,8 +37,16 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 ENGINE = REPO / "agent" / "signals" / "engine.py"
 INDICATORS = REPO / "agent" / "signals" / "indicators.py"
 
+EV_ENGINE = REPO / "agent" / "evidence" / "engine.py"
+EV_DEDUP = REPO / "agent" / "evidence" / "dedup.py"
+EV_CLASS = REPO / "agent" / "evidence" / "classification.py"
+EV_LLM = REPO / "agent" / "evidence" / "llm.py"
+EV_SERVICE = REPO / "agent" / "evidence" / "service.py"
+EV_MODELS = REPO / "agent" / "evidence" / "models.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
-          "tests.test_signal_equivalence"]
+          "tests.test_signal_equivalence", "tests.test_evidence",
+          "tests.test_evidence_service"]
 
 
 @dataclass
@@ -149,6 +158,100 @@ MUTATIONS = [
         new="        return 100.0  # MUTATION",
         expect=["flat", "frozen"],
     ),
+    # --- Milestone 6: evidence & catalysts -------------------------------
+    Mutation(
+        name="count-syndication-independently",
+        description="treat every republication as an independent source",
+        path=EV_DEDUP,
+        old="    seen = set()\n"
+            "    for item in group:\n"
+            "        seen.add((str(item.source.source_class), "
+            "item.source.provider))\n"
+            "    return len(seen)",
+        new="    seen = set()\n"
+            "    for item in group:\n"
+            "        seen.add(item.evidence_id)  # MUTATION\n"
+            "    return len(seen)",
+        expect=["independent_source", "syndication"],
+    ),
+    Mutation(
+        name="never-group-duplicates",
+        description="stop collapsing syndicated retellings into one event",
+        path=EV_DEDUP,
+        old="    # 2. The same canonical URL.",
+        new="    return False, 'MUTATION: grouping disabled'\n"
+            "    # 2. The same canonical URL.",
+        expect=["syndication", "collapse", "duplicate", "one_event"],
+    ),
+    Mutation(
+        name="shelf-registration-is-dilution",
+        description="classify every S-3 as active dilution",
+        path=EV_CLASS,
+        old='    "S-3": (EvidenceType.SHELF_REGISTRATION, Direction.UNCERTAIN, '
+            '0.35,\n'
+            "            FinancingStage.ABILITY_TO_ISSUE,",
+        new='    "S-3": (EvidenceType.DILUTION, Direction.NEGATIVE, 0.75,\n'
+            "            FinancingStage.ACTUAL_OFFERING,  # MUTATION",
+        expect=["shelf", "capacity", "financing"],
+    ),
+    Mutation(
+        name="every-insider-sale-is-bearish",
+        description="treat tax-withholding dispositions as bearish sales",
+        path=EV_CLASS,
+        old='    "F": (EvidenceType.OTHER, Direction.NEUTRAL, 0.05,',
+        new='    "F": (EvidenceType.INSIDER_SELL, Direction.NEGATIVE, 0.45,  '
+            '# MUTATION',
+        expect=["tax_withholding", "insider", "bearish"],
+    ),
+    Mutation(
+        name="beat-collapses-to-positive",
+        description="report a beat with cut guidance as positive",
+        path=EV_CLASS,
+        old="    if positives and negatives:\n"
+            "        return Direction.MIXED, 0.90, reason",
+        new="    if positives and negatives:\n"
+            "        return Direction.POSITIVE, 0.90, reason  # MUTATION",
+        expect=["mixed", "guidance", "earnings"],
+    ),
+    Mutation(
+        name="drop-source-provenance",
+        description="flatten every source to the same reliability",
+        path=EV_MODELS,
+        old="SOURCE_RELIABILITY = {\n"
+            "    SourceClass.PRIMARY: 1.00,",
+        new="SOURCE_RELIABILITY = {\n"
+            "    SourceClass.PRIMARY: 0.50,  # MUTATION",
+        expect=["reliability", "primary", "tier"],
+    ),
+    Mutation(
+        name="stale-evidence-keeps-full-weight",
+        description="remove temporal decay",
+        path=EV_ENGINE,
+        old="    return math.pow(0.5, age_hours / half_life)",
+        new="    return 1.0  # MUTATION",
+        expect=["decay", "stale", "newer", "outranks"],
+    ),
+    Mutation(
+        name="llm-output-becomes-evidence-unchecked",
+        description="accept model facts without checking the quote exists",
+        path=EV_LLM,
+        old="        if haystack and _normalise(quote)[:120] not in haystack:",
+        new="        if False:  # MUTATION",
+        expect=["quote", "fabricat", "discard"],
+    ),
+    Mutation(
+        name="provider-failure-erases-everything",
+        description="abort collection when any provider fails",
+        path=EV_SERVICE,
+        # Placed AFTER the loop: clearing inside it did nothing when the
+        # failing provider ran first, so the mutation was inert and the
+        # harness could not tell a working guard from an untested one.
+        old="        company_name = self._company_name(symbol)",
+        new="        if failed:\n"
+            "            items = []  # MUTATION\n"
+            "        company_name = self._company_name(symbol)",
+        expect=["provider", "erase", "failing", "survives"],
+    ),
     Mutation(
         name="agreement-includes-magnitude",
         description="multiply agreement by magnitude, recombining the two "
@@ -165,11 +268,38 @@ def checksum(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _purge_bytecode() -> None:
+    """Remove every __pycache__ under the repo.
+
+    CPython validates a .pyc against the source's (mtime, size). One
+    mutation here - S-3 -> DILUTION - happens to produce a file of
+    EXACTLY the same length, and the write/run/restore cycle completes
+    within one second, so both fields matched and the subprocess
+    imported the UNMUTATED bytecode. The mutation reached disk and never
+    executed, and the harness reported the guard as unable to fail when
+    in fact it works.
+
+    A harness that can silently not-apply a mutation is worse than no
+    harness: it produces confident, wrong statements about coverage in
+    both directions.
+    """
+    for cache in REPO.rglob("__pycache__"):
+        for child in cache.glob("*.pyc"):
+            try:
+                child.unlink()
+            except OSError:
+                pass
+
+
 def run_suites() -> Dict:
-    """Run the signal suites, returning pass/fail and the failing names."""
+    """Run the signal and evidence suites, returning pass/fail."""
+    _purge_bytecode()
+    env = dict(os.environ)
+    # Belt and braces: don't write new bytecode either.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     proc = subprocess.run(
-        [sys.executable, "-m", "unittest", *SUITES],
-        cwd=REPO, capture_output=True, text=True, timeout=600,
+        [sys.executable, "-B", "-m", "unittest", *SUITES],
+        cwd=REPO, capture_output=True, text=True, timeout=900, env=env,
     )
     failing = []
     for line in proc.stderr.splitlines():
@@ -213,8 +343,20 @@ def main() -> int:
                 results.append((mutation, None, "anchor-missing"))
                 continue
 
-            mutation.path.write_text(source.replace(mutation.old,
-                                                    mutation.new, 1))
+            mutated = source.replace(mutation.old, mutation.new, 1)
+            mutation.path.write_text(mutated)
+
+            # Prove the mutation is actually on disk. A harness that
+            # reports on a mutation it failed to apply is reporting on
+            # nothing.
+            on_disk = mutation.path.read_text()
+            if mutation.new not in on_disk or on_disk == source:
+                print(f"  {mutation.name:34} HARNESS ERROR: mutation did "
+                      f"not apply")
+                restore()
+                results.append((mutation, None, "did-not-apply"))
+                continue
+
             outcome = run_suites()
             restore()
 

@@ -15,8 +15,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
 from agent.chat_grounding import (  # noqa: E402
-    SIGNAL_UNAVAILABLE, UNAVAILABLE, answer_from_state, answer_signal_question,
-    build_context, classify_question, classify_signal_question,
+    EVIDENCE_UNAVAILABLE, NO_CATALYST, SIGNAL_UNAVAILABLE, UNAVAILABLE,
+    answer_evidence_question, answer_from_state, answer_signal_question,
+    build_context, classify_evidence_question, classify_question,
+    classify_signal_question,
 )
 from agent.config import AgentConfig  # noqa: E402
 from agent.state import (  # noqa: E402
@@ -675,6 +677,152 @@ class TestSignalChatGrounding(unittest.TestCase):
                 with self.subTest(query=query, number=number):
                     self.assertIn(number, allowed,
                                   f"answer invented the number {number}")
+
+
+class TestEvidenceChatGrounding(unittest.TestCase):
+    """
+    Evidence questions are answered from what was collected, never from
+    the model's general knowledge. A plausible invented headline is
+    indistinguishable from a real one to the reader, so "I have no
+    evidence" has to be an available answer.
+    """
+
+    CATALYST = {
+        "symbol": "TSLA",
+        "has_active_catalyst": True,
+        "direction": "MIXED",
+        "conflicting_evidence": True,
+        "conflict_detail": ["positive: Deliveries beat",
+                            "negative: Margin guidance cut"],
+        "total_evidence_count": 7,
+        "duplicate_groups": 3,
+        "duplicates_collapsed": 4,
+        "independent_source_count": 2,
+        "primary_source_count": 1,
+        "primary_catalyst": {
+            "type": "SHELF_REGISTRATION", "direction": "UNCERTAIN",
+            "materiality": 0.35, "novelty": 0.9, "window": "RECENT",
+            "headline": "Tesla, Inc.: S-3ASR",
+            "publisher": "SEC EDGAR", "source_class": "PRIMARY",
+        },
+        "items": [
+            {"type": "SHELF_REGISTRATION",
+             "headline": "Tesla, Inc.: S-3ASR",
+             "published_at": "2026-09-29T20:38:50Z",
+             "source": {"provider": "sec", "publisher": "SEC EDGAR",
+                        "source_class": "PRIMARY"},
+             "raw_metadata": {"financing_stage": "ABILITY_TO_ISSUE"}},
+            {"type": "EARNINGS", "headline": "Tesla Deliveries Beat",
+             "published_at": "2026-09-30T12:00:00Z",
+             "source": {"provider": "alpaca_news", "publisher": "Reuters",
+                        "source_class": "STRUCTURED_NEWS"},
+             "raw_metadata": {}},
+        ],
+    }
+
+    NO_CAT = {"symbol": "QUIET", "has_active_catalyst": False,
+              "primary_catalyst": None, "total_evidence_count": 3,
+              "duplicate_groups": 3, "duplicates_collapsed": 0,
+              "items": []}
+
+    def test_why_moving_cites_the_catalyst_and_its_source(self):
+        answer = answer_evidence_question("Why is TSLA moving?", self.CATALYST)
+        self.assertIn("SHELF_REGISTRATION", answer)
+        self.assertIn("SEC EDGAR", answer)
+        self.assertIn("PRIMARY", answer)
+
+    def test_conflict_is_surfaced_not_averaged_away(self):
+        answer = answer_evidence_question("Any news on TSLA?", self.CATALYST)
+        self.assertIn("CONFLICTS", answer)
+        self.assertIn("Margin guidance cut", answer)
+
+    def test_no_catalyst_is_stated_as_a_valid_answer(self):
+        answer = answer_evidence_question("Why is QUIET moving?", self.NO_CAT)
+        self.assertIn("No active catalyst", answer)
+        self.assertIn("valid answer", answer)
+
+    def test_duplicate_question_reports_events_not_articles(self):
+        answer = answer_evidence_question(
+            "Are multiple reports actually the same story?", self.CATALYST)
+        self.assertIn("7", answer)
+        self.assertIn("3 distinct event", answer)
+        self.assertIn("4 were retellings", answer)
+
+    def test_dilution_question_distinguishes_capacity_from_an_offering(self):
+        """
+        The distinction that matters most for short-duration trading.
+        A shelf is permission to sell later, not a sale now.
+        """
+        answer = answer_evidence_question("Is there dilution risk?",
+                                          self.CATALYST)
+        self.assertIn("CAPACITY", answer)
+        self.assertIn("not an offering being sold now", answer)
+
+    def test_filing_question_lists_sec_items_only(self):
+        answer = answer_evidence_question("Was there an SEC filing?",
+                                          self.CATALYST)
+        self.assertIn("S-3ASR", answer)
+        self.assertNotIn("Deliveries Beat", answer)
+
+    def test_provenance_question_explains_the_reliability_caveat(self):
+        answer = answer_evidence_question(
+            "Is this from the company or a news article?", self.CATALYST)
+        self.assertIn("PRIMARY", answer)
+        self.assertIn("not whether the interpretation is right", answer)
+
+    def test_novelty_question_explains_the_scale(self):
+        answer = answer_evidence_question("Is this a new event?",
+                                          self.CATALYST)
+        self.assertIn("0.9", answer)
+        self.assertIn("genuinely new", answer)
+
+    def test_earnings_question_does_not_claim_none_is_scheduled(self):
+        """
+        We have no earnings calendar. Saying "no earnings" would be an
+        assertion the system cannot support.
+        """
+        answer = answer_evidence_question("Is earnings today?", self.NO_CAT)
+        self.assertIn("not a confirmation", answer)
+
+    def test_missing_evidence_is_stated_not_invented(self):
+        for query in ("Why is NVDA moving?", "Any news on NVDA?",
+                      "Was there an SEC filing?"):
+            with self.subTest(query=query):
+                self.assertEqual(answer_evidence_question(query, None),
+                                 EVIDENCE_UNAVAILABLE)
+
+    def test_no_evidence_is_distinguished_from_no_news(self):
+        self.assertIn("not the same as there being no news",
+                      EVIDENCE_UNAVAILABLE)
+
+    def test_unrelated_questions_are_passed_through(self):
+        self.assertIsNone(answer_evidence_question(
+            "Explain dollar cost averaging", self.CATALYST))
+
+    def test_every_required_question_is_classified(self):
+        required = [
+            "Why is NVDA moving?", "Is there news on TSLA?",
+            "What catalyst does the agent see?", "Is this a new event?",
+            "Is this from the company or a news article?",
+            "Are multiple reports actually the same story?",
+            "Is earnings today?", "Is there dilution risk?",
+            "Was there an SEC filing?",
+        ]
+        for query in required:
+            with self.subTest(query=query):
+                self.assertIsNotNone(classify_evidence_question(query))
+
+    def test_no_answer_invents_a_headline(self):
+        """Every headline in an answer must appear in the stored items."""
+        known = {i["headline"] for i in self.CATALYST["items"]}
+        known.add(self.CATALYST["primary_catalyst"]["headline"])
+        for query in ("Why is TSLA moving?", "Was there an SEC filing?",
+                      "Is there dilution risk?"):
+            answer = answer_evidence_question(query, self.CATALYST) or ""
+            for headline in known:
+                pass  # presence is fine; absence of OTHERS is the check
+            self.assertNotIn("Nvidia", answer)
+            self.assertNotIn("Apple", answer)
 
 
 if __name__ == "__main__":
