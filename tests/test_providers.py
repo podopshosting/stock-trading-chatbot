@@ -411,3 +411,52 @@ class TestProvenanceAging(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+PREMIUM = {
+    "Information": (
+        "Thank you for using Alpha Vantage! This is a premium endpoint. You "
+        "may subscribe to any of the premium plans at "
+        "https://www.alphavantage.co/premium/ to instantly unlock all premium "
+        "endpoints"
+    )
+}
+
+
+class TestEntitlement(unittest.TestCase):
+    """Verified live on 2026-09-30: TIME_SERIES_INTRADAY is a premium
+    endpoint. A paywall is permanent, not transient, so it must be
+    distinguishable from a rate limit and must never be retried."""
+
+    def setUp(self):
+        self.http = FakeHTTP()
+
+    def test_premium_endpoint_raises_entitlement_error(self):
+        from agent.providers import EntitlementRequired
+        self.http.queue("TIME_SERIES_INTRADAY", PREMIUM)
+        with self.assertRaises(EntitlementRequired):
+            make_provider(self.http).get_bars("AAPL", "5min")
+
+    def test_entitlement_error_is_not_a_rate_limit(self):
+        from agent.providers import EntitlementRequired
+        self.assertFalse(issubclass(EntitlementRequired, RateLimited))
+
+    def test_paywall_is_not_retried(self):
+        """Retrying a paywall burns the daily budget for nothing."""
+        for _ in range(5):
+            self.http.queue("TIME_SERIES_INTRADAY", PREMIUM)
+        p = make_provider(self.http)
+        with self.assertRaises(Exception):
+            p.get_bars("AAPL", "5min")
+        self.assertEqual(len(self.http.calls), 1,
+                         f"paywall must not be retried, got {self.http.calls}")
+
+    def test_free_tier_does_not_claim_intraday(self):
+        """capabilities() must not advertise what the tier cannot deliver."""
+        caps = make_provider(self.http).capabilities()
+        self.assertFalse(caps["intraday"],
+                         "free tier must not claim intraday support")
+
+    def test_premium_tier_claims_intraday(self):
+        caps = make_provider(self.http, tier="premium").capabilities()
+        self.assertTrue(caps["intraday"])

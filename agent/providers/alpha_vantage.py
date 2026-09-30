@@ -16,6 +16,7 @@ from .base import (
     Bar,
     BarSet,
     DataUnavailable,
+    EntitlementRequired,
     MarketDataProvider,
     Provenance,
     Quote,
@@ -29,6 +30,11 @@ _THROTTLE_MARKERS = (
     "per second", "sparingly", "rate limit", "requests per day",
     "call frequency", "higher api call",
 )
+
+# Entitlement refusals arrive the same way as throttles (HTTP 200 with an
+# "Information" key) but mean something permanent. Verified live 2026-09-30:
+# TIME_SERIES_INTRADAY answers "This is a premium endpoint" on a free key.
+_ENTITLEMENT_MARKERS = ("premium endpoint", "premium plan")
 
 _TIMEFRAME_TO_FUNCTION = {
     "1day": ("TIME_SERIES_DAILY", "Time Series (Daily)", {}),
@@ -52,7 +58,7 @@ class AlphaVantageProvider(MarketDataProvider):
 
     def __init__(self, api_key: str, http=None, clock=time.monotonic,
                  sleep=time.sleep, min_interval: Optional[float] = None,
-                 wall_clock=time.time):
+                 wall_clock=time.time, tier: str = "free"):
         """`clock` paces requests (monotonic); `wall_clock` stamps provenance.
 
         They are separate because elapsed-time pacing must not be affected
@@ -62,6 +68,7 @@ class AlphaVantageProvider(MarketDataProvider):
         if not api_key:
             raise ValueError("AlphaVantageProvider requires an api_key")
         self._api_key = api_key
+        self.tier = tier
         self._http = http
         self._clock = clock
         self._wall_clock = wall_clock
@@ -77,17 +84,30 @@ class AlphaVantageProvider(MarketDataProvider):
         return self._http
 
     @staticmethod
-    def _is_throttled(data) -> bool:
+    def _messages(data) -> List[str]:
         if not isinstance(data, dict):
-            return False
+            return []
+        out = []
         for key in ("Note", "Information"):
             message = data.get(key)
-            if not message:
-                continue
-            text = str(message).lower()
-            if any(marker in text for marker in _THROTTLE_MARKERS):
-                return True
-        return False
+            if message:
+                out.append(str(message).lower())
+        return out
+
+    @classmethod
+    def _is_throttled(cls, data) -> bool:
+        return any(
+            marker in text
+            for text in cls._messages(data)
+            for marker in _THROTTLE_MARKERS
+        )
+
+    @classmethod
+    def _entitlement_message(cls, data) -> Optional[str]:
+        for text in cls._messages(data):
+            if any(marker in text for marker in _ENTITLEMENT_MARKERS):
+                return text
+        return None
 
     def _request(self, params: Dict, timeout: int = 15) -> Dict:
         attempt = 0
@@ -112,6 +132,15 @@ class AlphaVantageProvider(MarketDataProvider):
                 self._last_call = self._clock()
 
             self.request_count += 1
+
+            # Check entitlement before throttling: a paywall must not be
+            # retried, or each attempt spends another of 25 daily requests
+            # on an answer that cannot change.
+            paywall = self._entitlement_message(data)
+            if paywall:
+                raise EntitlementRequired(
+                    self.name, str(params.get("function", "?")), paywall[:160]
+                )
 
             if not self._is_throttled(data):
                 if isinstance(data, dict) and data.get("Error Message"):
@@ -215,9 +244,15 @@ class AlphaVantageProvider(MarketDataProvider):
         )
 
     def capabilities(self) -> Dict[str, object]:
+        # Intraday (TIME_SERIES_INTRADAY) is a PREMIUM endpoint, verified
+        # live on 2026-09-30. Claiming it on a free key would have the
+        # scanner plan around bars that can never arrive, so the default
+        # is the conservative truth.
+        premium = self.tier != "free"
         return {
             "name": self.name,
-            "intraday": True,
+            "tier": self.tier,
+            "intraday": premium,
             "bid_ask": False,          # GLOBAL_QUOTE carries no bid/ask
             "streaming": False,
             "batch_quotes": False,     # one request per symbol

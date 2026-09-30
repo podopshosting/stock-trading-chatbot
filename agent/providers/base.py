@@ -49,6 +49,24 @@ class DataUnavailable(ProviderError):
     """Provider reachable but the requested data could not be produced."""
 
 
+class EntitlementRequired(DataUnavailable):
+    """The endpoint exists but this plan cannot access it.
+
+    Deliberately NOT a RateLimited: a paywall is permanent, so retrying
+    only spends the request budget. Callers should stop asking for this
+    data on this provider rather than back off and try again.
+    """
+
+    def __init__(self, provider: str, endpoint: str, detail: str = ""):
+        super().__init__(
+            f"{provider}: {endpoint} requires a paid plan"
+            + (f" ({detail})" if detail else "")
+        )
+        self.provider = provider
+        self.endpoint = endpoint
+        self.detail = detail
+
+
 # --- value types ----------------------------------------------------------
 
 @dataclass(frozen=True)
