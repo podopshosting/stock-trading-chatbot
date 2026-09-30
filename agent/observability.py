@@ -29,6 +29,18 @@ EVENTS = frozenset({
     "emergency_stop_triggered",
     "emergency_stop_cleared",
     "daily_risk_lock_set",
+    # scanner
+    "scanner_started",
+    "scanner_completed",
+    "scanner_failed",
+    "universe_loaded",
+    "symbol_rejected",
+    "snapshot_missing",
+    "snapshot_stale",
+    "candidate_created",
+    "candidate_ranked",
+    "regime_gate_applied",
+    "provider_batch_completed",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")

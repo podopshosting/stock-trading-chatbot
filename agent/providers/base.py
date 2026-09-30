@@ -101,6 +101,10 @@ class Quote:
     latest_trading_day: Optional[str] = None
     bid: Optional[float] = None
     ask: Optional[float] = None
+    # Session volume-weighted average price, when the provider supplies
+    # one. Alpaca's snapshot dailyBar carries `vw`, which is the real
+    # session VWAP - so it does not have to be recomputed from bars.
+    vwap: Optional[float] = None
     provenance: Optional[Provenance] = None
 
     @property

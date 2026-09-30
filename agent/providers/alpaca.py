@@ -97,7 +97,7 @@ class AlpacaProvider(MarketDataProvider):
                  quote_feed: str = "delayed_sip", bar_feed: str = "sip",
                  data_base: str = DATA_BASE,
                  trading_base: str = PAPER_TRADING_BASE,
-                 max_symbols_per_request: int = 100,
+                 max_symbols_per_request: int = 1000,
                  wall_clock=time.time, sleep=time.sleep):
         if not api_key_id or not api_secret_key:
             raise ValueError(
@@ -206,6 +206,12 @@ class AlpacaProvider(MarketDataProvider):
         cutoff = self._wall_clock() - SIP_DELAY_SECONDS - 60
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(cutoff))
 
+    def _start_from_lookback(self, lookback_seconds: float) -> str:
+        """An explicit window, for batched intraday requests."""
+        start = (self._wall_clock() - SIP_DELAY_SECONDS - 60
+                 - max(60.0, lookback_seconds))
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start))
+
     def _window_start(self, timeframe: str, limit: int) -> str:
         """How far back to ask, to actually receive `limit` bars.
 
@@ -260,6 +266,7 @@ class AlpacaProvider(MarketDataProvider):
             latest_trading_day=(today.get("t") or "")[:10] or None,
             bid=nbbo.get("bp"),
             ask=nbbo.get("ap"),
+            vwap=today.get("vw"),
             provenance=provenance,
         )
 
@@ -277,8 +284,13 @@ class AlpacaProvider(MarketDataProvider):
     def get_snapshot(self, symbols: List[str]) -> Dict[str, Quote]:
         """Batched: many symbols per request.
 
-        Verified live at 10 symbols in one request. This is what takes
-        request budget out of the design.
+        Verified live at 2,000 symbols in a single request (~0.9s); the
+        default chunk is 1,000 to leave headroom.
+
+        The chunk size is load-bearing, not cosmetic. It was 100 while
+        only a 10-symbol batch had been measured, which quietly re-split
+        every 1,000-symbol scanner batch into 10 requests and turned a
+        13-request universe snapshot into 125.
         """
         out: Dict[str, Quote] = {}
         upper = [s.upper() for s in symbols]
@@ -363,6 +375,98 @@ class AlpacaProvider(MarketDataProvider):
         )
 
     # -- market status ----------------------------------------------------
+
+    def get_assets(self, status: str = "active",
+                   asset_class: str = "us_equity") -> List[Dict]:
+        """Reference data for tradable assets.
+
+        Measured 2026-09-30: 14,388 active us_equity assets in ONE request
+        (~3s). Carries exchange, tradable, fractionable, shortable, status,
+        name and attributes - but no price or volume, so liquidity is a
+        market-data question.
+        """
+        body = self._get(self.trading_base, "/v2/assets",
+                         {"status": status, "asset_class": asset_class},
+                         timeout=60)
+        return body if isinstance(body, list) else []
+
+    def get_bars_multi(self, symbols: List[str], timeframe: str = "1day",
+                       limit: int = 100,
+                       lookback_seconds: Optional[float] = None,
+                       max_pages: int = 12) -> Dict[str, List[Bar]]:
+        """Bars for several symbols per request, following pagination.
+
+        Unlike snapshots, this endpoint paginates: a 500-symbol daily
+        request returned 243 symbols with a next_page_token.
+
+        `lookback_seconds` bounds the window explicitly, and for intraday
+        batches it matters enormously. Deriving the window from
+        limit x slack (as the single-symbol path does) asked for ~5.5 days
+        of 5-minute bars across 300 symbols - roughly 150,000 bars, far
+        past the page cap, so most symbols came back with no recent bars
+        at all and their short-window returns were silently absent.
+        """
+        if timeframe.lower() not in _TIMEFRAMES:
+            raise DataUnavailable(
+                f"alpaca has no timeframe {timeframe!r}; "
+                f"supported: {sorted(_TIMEFRAMES)}"
+            )
+        symbols = [s.upper() for s in symbols if s]
+        if not symbols:
+            # An empty list would be sent as symbols= and 400. Spending a
+            # request to be told nothing was asked for is pure waste.
+            self.last_page_count = 0
+            return {}
+
+        out: Dict[str, List[Bar]] = {}
+        page_token = None
+        pages = 0
+
+        while True:
+            params = {
+                "symbols": ",".join(symbols),
+                "timeframe": _TIMEFRAMES[timeframe.lower()],
+                "limit": 10000,
+                "feed": self.bar_feed,
+                "adjustment": "split",
+                "start": (self._window_start(timeframe, limit)
+                          if lookback_seconds is None
+                          else self._start_from_lookback(lookback_seconds)),
+                "end": self._delay_bounded_end(),
+                "sort": "desc",
+            }
+            if page_token:
+                params["page_token"] = page_token
+
+            body = self._get(self.data_base, "/v2/stocks/bars", params,
+                             timeout=90)
+            for symbol, rows in (body.get("bars") or {}).items():
+                bucket = out.setdefault(symbol, [])
+                for row in rows:
+                    try:
+                        bucket.append(Bar(
+                            timestamp=row["t"],
+                            open=float(row["o"]), high=float(row["h"]),
+                            low=float(row["l"]), close=float(row["c"]),
+                            volume=int(row.get("v") or 0),
+                        ))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+
+            page_token = body.get("next_page_token")
+            pages += 1
+            # Bounded so a pathological response cannot loop forever.
+            if not page_token or pages >= max_pages:
+                break
+
+        self.last_page_count = pages
+
+        # Requested newest-first; indicators want oldest-first.
+        for symbol in out:
+            out[symbol].sort(key=lambda b: b.timestamp)
+            if limit and len(out[symbol]) > limit:
+                out[symbol] = out[symbol][-limit:]
+        return out
 
     def get_clock(self) -> Dict:
         """Raw broker clock.

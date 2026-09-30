@@ -44,6 +44,7 @@ DEFAULT_TTLS: Dict[str, float] = {
     "bars:1day": 6 * 3600,  # daily bars change once per session
     "bars:intraday": 120.0,
     "market_status": 300.0,
+    "assets": 6 * 3600,     # reference data changes at most daily
 }
 
 
@@ -392,6 +393,27 @@ class CachedProvider(MarketDataProvider):
 
     def get_market_status(self):
         return self.inner.get_market_status()
+
+    def get_assets(self, status: str = "active",
+                   asset_class: str = "us_equity"):
+        """Cached: reference data changes at most daily, and it is the
+        single largest response the scanner fetches."""
+        key = cache_key(self.inner.name, "assets", "ALL",
+                        status=status, cls=asset_class)
+        hit = self.backend.get(key)
+        if hit is not None and isinstance(hit.get("rows"), list):
+            self.backend_hit_assets = True
+            return hit["rows"]
+        rows = self.inner.get_assets(status=status, asset_class=asset_class)
+        self.provider_calls += 1
+        self.backend.put(key, {"rows": rows, "_kind": "assets"},
+                         ttl_for("assets", self.ttls))
+        return rows
+
+    def get_bars_multi(self, symbols, timeframe: str = "1day",
+                       limit: int = 100, **kwargs):
+        return self.inner.get_bars_multi(symbols, timeframe, limit=limit,
+                                         **kwargs)
 
     def get_clock(self):
         return self.inner.get_clock()
