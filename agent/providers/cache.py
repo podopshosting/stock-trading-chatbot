@@ -353,8 +353,51 @@ class CachedProvider(MarketDataProvider):
             return replace(bs, bars=bs.bars[-limit:])
         return bs
 
+    def get_snapshot(self, symbols) -> Dict[str, Quote]:
+        """Serve what is cached, then batch-fetch only the rest.
+
+        The base class's sequential loop would call get_quote per symbol
+        and throw away the inner provider's batch endpoint - measured as 3
+        requests instead of 1 for a three-index evaluation. Batching is
+        the reason request budget stopped being a constraint, so it has to
+        survive being wrapped.
+        """
+        out: Dict[str, Quote] = {}
+        missing = []
+
+        for symbol in symbols:
+            sym = symbol.upper()
+            hit = self.backend.get(cache_key(self.inner.name, "quote", sym))
+            if hit is None:
+                missing.append(sym)
+                continue
+            quote = quote_from_dict(hit)
+            if quote.provenance is not None:
+                quote = replace(quote, provenance=replace(
+                    quote.provenance, cache_hit=True))
+            out[sym] = quote
+
+        if missing:
+            fetched = self.inner.get_snapshot(missing)
+            self.provider_calls += 1
+            ttl = ttl_for("quote", self.ttls)
+            for sym, quote in fetched.items():
+                payload = to_dict(quote)
+                payload["_kind"] = "quote"
+                self.backend.put(cache_key(self.inner.name, "quote", sym),
+                                 payload, ttl)
+                out[sym] = quote
+
+        return out
+
     def get_market_status(self):
         return self.inner.get_market_status()
+
+    def get_clock(self):
+        return self.inner.get_clock()
+
+    def get_calendar(self, start: str, end: str):
+        return self.inner.get_calendar(start, end)
 
     def capabilities(self) -> Dict[str, object]:
         caps = dict(self.inner.capabilities())

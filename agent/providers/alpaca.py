@@ -138,7 +138,7 @@ class AlpacaProvider(MarketDataProvider):
         }
 
     def _get(self, base: str, path: str, params: Optional[Dict] = None,
-             timeout: int = 20) -> Dict:
+             timeout: int = 20):
         url = f"{base}{path}"
         try:
             resp = self._requests().get(
@@ -157,7 +157,12 @@ class AlpacaProvider(MarketDataProvider):
             body = {}
 
         if status == 200:
-            return body if isinstance(body, dict) else {}
+            # Most endpoints return an object, but /v2/calendar returns an
+            # array. Normalising that to {} would silently discard the
+            # whole calendar, so lists are passed through.
+            if isinstance(body, (dict, list)):
+                return body
+            return {}
 
         message = ""
         if isinstance(body, dict):
@@ -358,6 +363,27 @@ class AlpacaProvider(MarketDataProvider):
         )
 
     # -- market status ----------------------------------------------------
+
+    def get_clock(self) -> Dict:
+        """Raw broker clock.
+
+        `is_open` refers to the REGULAR session only; it is false during
+        pre-market and after-hours, so it cannot distinguish those on its
+        own. MarketSessionService combines it with the calendar.
+        """
+        return self._get(self.trading_base, "/v2/clock")
+
+    def get_calendar(self, start: str, end: str) -> List[Dict]:
+        """Trading calendar rows for [start, end], dates as YYYY-MM-DD.
+
+        Non-trading days are ABSENT rather than flagged: Thanksgiving
+        2026-11-26 has no row between 11-25 and 11-27. Early closes appear
+        as a shorter `close` (13:00 on 2026-11-27), with `session_open` /
+        `session_close` giving the extended-hours window.
+        """
+        body = self._get(self.trading_base, "/v2/calendar",
+                         {"start": start, "end": end})
+        return body if isinstance(body, list) else []
 
     def get_market_status(self) -> MarketStatus:
         body = self._get(self.trading_base, "/v2/clock")

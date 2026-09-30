@@ -15,7 +15,7 @@ from agent.providers import (  # noqa: E402
     AlphaVantageProvider, BarSet, CachedProvider, DataUnavailable, MemoryCache,
     Provenance, Quote, RateLimited, SymbolNotFound, TieredCache, cache_key,
 )
-from agent.providers.base import Bar, MarketDataProvider  # noqa: E402
+from agent.providers.base import Bar, MarketDataProvider  # noqa: E402  # noqa: E402
 
 
 THROTTLE = {
@@ -460,3 +460,69 @@ class TestEntitlement(unittest.TestCase):
     def test_premium_tier_claims_intraday(self):
         caps = make_provider(self.http, tier="premium").capabilities()
         self.assertTrue(caps["intraday"])
+
+
+class TestCachedSnapshotBatching(unittest.TestCase):
+    """CachedProvider must not lose the inner provider's batch endpoint.
+
+    Measured live: a 3-symbol regime evaluation issued 3 separate quote
+    requests instead of 1, because CachedProvider inherited the base
+    class's sequential get_snapshot loop. Batching is the whole reason the
+    quota problem went away, so the wrapper has to preserve it.
+    """
+
+    class BatchProvider(AlphaVantageProvider):
+        """Stands in for a provider with a native batch endpoint."""
+        name = "batch"
+
+        def __init__(self):
+            self.snapshot_calls = 0
+            self.quote_calls = 0
+
+        def get_quote(self, symbol):
+            self.quote_calls += 1
+            return Quote(symbol=symbol.upper(), price=100.0,
+                         provenance=Provenance(provider=self.name,
+                                               retrieved_at=time.time()))
+
+        def get_snapshot(self, symbols):
+            self.snapshot_calls += 1
+            return {s.upper(): self.get_quote(s) for s in symbols}
+
+        def get_bars(self, symbol, timeframe="1day", limit=100):
+            raise NotImplementedError
+
+        def capabilities(self):
+            return {"name": self.name, "batch_quotes": True}
+
+    def test_snapshot_uses_one_batch_call_not_a_loop(self):
+        inner = self.BatchProvider()
+        p = CachedProvider(inner)
+        p.get_snapshot(["SPY", "QQQ", "IWM"])
+        self.assertEqual(inner.snapshot_calls, 1,
+                         "must delegate to the batch endpoint")
+
+    def test_cached_symbols_are_not_refetched(self):
+        inner = self.BatchProvider()
+        p = CachedProvider(inner)
+        p.get_snapshot(["SPY", "QQQ", "IWM"])
+        snap = p.get_snapshot(["SPY", "QQQ", "IWM"])
+        self.assertEqual(inner.snapshot_calls, 1, "second call should be cached")
+        self.assertTrue(all(q.provenance.cache_hit for q in snap.values()))
+
+    def test_only_the_missing_symbols_are_fetched(self):
+        inner = self.BatchProvider()
+        p = CachedProvider(inner)
+        p.get_quote("SPY")
+        inner.quote_calls = 0
+        p.get_snapshot(["SPY", "QQQ", "IWM"])
+        self.assertEqual(inner.quote_calls, 2,
+                         "SPY was cached; only QQQ and IWM need fetching")
+
+    def test_a_fully_cached_snapshot_makes_no_provider_call(self):
+        inner = self.BatchProvider()
+        p = CachedProvider(inner)
+        p.get_snapshot(["SPY", "QQQ"])
+        inner.snapshot_calls = 0
+        p.get_snapshot(["SPY", "QQQ"])
+        self.assertEqual(inner.snapshot_calls, 0)
