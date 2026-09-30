@@ -41,6 +41,16 @@ EVENTS = frozenset({
     "candidate_ranked",
     "regime_gate_applied",
     "provider_batch_completed",
+    # signal engine
+    "signal_engine_started",
+    "signal_engine_completed",
+    "signal_engine_failed",
+    "indicator_no_signal",
+    "indicator_error",
+    "group_disagreement",
+    "signal_direction_changed",
+    "signal_result_persisted",
+    "regime_adjustment_applied",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")
