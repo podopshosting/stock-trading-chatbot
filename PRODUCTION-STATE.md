@@ -157,7 +157,11 @@ dates.
   and is present in pushed git history (commits `9a075ed`, `96ade16`,
   `4586d28`). The working tree has been redacted, **but history rewriting does
   not un-publish a pushed secret.**
-  **→ That key must be treated as compromised and rotated.** See follow-ups.
+  **The key was rotated on 2026-09-30** and production verified on the new
+  one; the previous value is retained as `AWSPREVIOUS`. The exposed key was
+  confirmed still active, and Alpha Vantage offers no self-service revoke, so
+  one step remains: ask their support to revoke it. See
+  `docs/SECURITY_ACTION_REQUIRED.md`.
 
 ---
 
@@ -182,8 +186,8 @@ deployed Lambda imports them.
 
 Not blocking; none of these prevent the application from working.
 
-1. **Rotate the Alpha Vantage key** (security — requires access to the Alpha
-   Vantage account) and update the `stock-chatbot/alphavantage-api-key` secret.
+1. ~~Rotate the Alpha Vantage key~~ **done 2026-09-30.** One step remains:
+   ask Alpha Vantage support to revoke the exposed key, which is still live.
    Decide separately whether to rewrite git history.
 2. **Cache market data.** At 25 requests/day the app supports ~12 stock queries
    daily. A short-lived cache (per-symbol, a few minutes) would cut Alpha
