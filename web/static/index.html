@@ -658,6 +658,16 @@ I analyze ANY stock with real-time data:
             renderWatchlist(watchlist);
         }
 
+        // Format a dollar change with its sign preserved: +$1.50 / -$9.00.
+        // Returns 'N/A' for values that are not finite numbers, so a missing
+        // change is never rendered as "$0.00".
+        function formatSignedCurrency(value) {
+            const n = parseFloat(value);
+            if (!Number.isFinite(n)) return 'N/A';
+            const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+            return `${sign}$${Math.abs(n).toFixed(2)}`;
+        }
+
         // Stock Details Modal
         async function showStockDetails(symbol) {
             const modal = document.getElementById('stockModal');
@@ -680,9 +690,14 @@ I analyze ANY stock with real-time data:
                 
                 if (data.data) {
                     const stockData = data.data;
+                    // formatSignedCurrency keeps the sign: Math.abs() alone
+                    // rendered -9.00 as "$9.00", dropping the minus on a
+                    // financial figure while the percentage stayed negative.
                     const priceChange = parseFloat(stockData.change);
-                    const changeClass = priceChange >= 0 ? 'var(--success)' : 'var(--danger)';
-                    const changeSymbol = priceChange >= 0 ? '+' : '';
+                    const changeClass = !Number.isFinite(priceChange)
+                        ? 'var(--text-secondary)'
+                        : (priceChange >= 0 ? 'var(--success)' : 'var(--danger)');
+                    const changeDisplay = formatSignedCurrency(stockData.change);
 
                     modalBody.innerHTML = `
                         <h3 style="margin-bottom: 20px;">${symbol} - ${stockData.price ? '$' + stockData.price : 'N/A'}</h3>
@@ -695,7 +710,7 @@ I analyze ANY stock with real-time data:
                             <div class="info-item">
                                 <div class="info-label">Change</div>
                                 <div class="info-value" style="color: ${changeClass}">
-                                    ${changeSymbol}$${Math.abs(stockData.change || 0).toFixed(2)} (${stockData.change_percent || 'N/A'})
+                                    ${changeDisplay} (${stockData.change_percent || 'N/A'})
                                 </div>
                             </div>
                             <div class="info-item">
