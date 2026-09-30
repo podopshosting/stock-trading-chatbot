@@ -1,7 +1,21 @@
 name: Deploy to AWS
 
+# Manual dispatch only: production deploys are deliberate, not a side effect
+# of pushing to main.
 on:
-  workflow_dispatch:  # Manual trigger only (disable auto-deploy to avoid failures)
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Which service to deploy'
+        required: true
+        default: 'chatbot-router'
+        type: choice
+        options:
+          - chatbot-router
+          - stock-data
+          - news-fetcher
+          - prediction-tracker
+          - all
 
 env:
   AWS_REGION: us-east-2
@@ -13,61 +27,93 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # boto3 is provided by the Lambda runtime, but the packaging script's
+      # import check needs it locally to verify the artifact loads.
+      - name: Install verification dependencies
+        run: python3 -m pip install --quiet boto3
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
-
+      # Every artifact is built by scripts/build_lambda_package.sh, which
+      # builds in a clean temp dir, ships all required modules, and fails the
+      # build if the package does not import. Local deploys use the same
+      # script, so the two paths cannot drift.
       - name: Deploy Chatbot Router
+        if: ${{ inputs.service == 'chatbot-router' || inputs.service == 'all' }}
         run: |
-          cd lambda-micro/chatbot-router
-          mkdir -p package
-          pip install -r requirements.txt -t package/ --quiet
-          cd package && zip -r ../../../chatbot.zip . && cd ..
-          zip -g ../../chatbot.zip handler.py
+          ./scripts/build_lambda_package.sh lambda-micro/chatbot-router dist/chatbot.zip
           aws lambda update-function-code \
             --function-name stock-chatbot-router \
-            --zip-file fileb://../../chatbot.zip \
+            --zip-file fileb://dist/chatbot.zip \
+            --region ${{ env.AWS_REGION }}
+          aws lambda wait function-updated \
+            --function-name stock-chatbot-router \
             --region ${{ env.AWS_REGION }}
 
       - name: Deploy Stock Data Service
+        if: ${{ inputs.service == 'stock-data' || inputs.service == 'all' }}
         run: |
-          cd lambda-micro/stock-data
-          zip -r ../../stock-data.zip handler.py
+          ./scripts/build_lambda_package.sh lambda-micro/stock-data dist/stock-data.zip
           aws lambda update-function-code \
             --function-name stock-data-service \
-            --zip-file fileb://../../stock-data.zip \
+            --zip-file fileb://dist/stock-data.zip \
+            --region ${{ env.AWS_REGION }}
+          aws lambda wait function-updated \
+            --function-name stock-data-service \
             --region ${{ env.AWS_REGION }}
 
       - name: Deploy News Service
+        if: ${{ inputs.service == 'news-fetcher' || inputs.service == 'all' }}
         run: |
-          cd lambda-micro/news-fetcher
-          zip -r ../../news.zip handler.py
+          ./scripts/build_lambda_package.sh lambda-micro/news-fetcher dist/news.zip
           aws lambda update-function-code \
             --function-name stock-news-service \
-            --zip-file fileb://../../news.zip \
+            --zip-file fileb://dist/news.zip \
+            --region ${{ env.AWS_REGION }}
+          aws lambda wait function-updated \
+            --function-name stock-news-service \
             --region ${{ env.AWS_REGION }}
 
       - name: Deploy Prediction Service
+        if: ${{ inputs.service == 'prediction-tracker' || inputs.service == 'all' }}
         run: |
-          cd lambda-micro/prediction-tracker
-          zip -r ../../predictions.zip handler.py
+          ./scripts/build_lambda_package.sh lambda-micro/prediction-tracker dist/predictions.zip
           aws lambda update-function-code \
             --function-name stock-prediction-service \
-            --zip-file fileb://../../predictions.zip \
+            --zip-file fileb://dist/predictions.zip \
+            --region ${{ env.AWS_REGION }}
+          aws lambda wait function-updated \
+            --function-name stock-prediction-service \
             --region ${{ env.AWS_REGION }}
 
-      - name: Deployment Summary
+      - name: Smoke test chatbot API
+        if: ${{ inputs.service == 'chatbot-router' || inputs.service == 'all' }}
         run: |
-          echo "✅ All Lambda functions updated successfully!"
-          echo "Region: ${{ env.AWS_REGION }}"
-          echo "Timestamp: $(date)"
+          aws lambda invoke \
+            --function-name stock-chatbot-router \
+            --payload "$(printf '%s' '{"query":"Explain diversification"}' | base64)" \
+            --region ${{ env.AWS_REGION }} \
+            /tmp/out.json > /dev/null
+          python3 -c "
+          import json, sys
+          r = json.load(open('/tmp/out.json'))
+          assert r.get('statusCode') == 200, r
+          body = json.loads(r['body'])
+          assert body.get('response'), body
+          print('Smoke test OK')
+          "

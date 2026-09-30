@@ -11,6 +11,7 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 # Colors
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 # Create deployment directory
@@ -24,24 +25,17 @@ deploy_microservice() {
 
     echo -e "${BLUE}Deploying: $SERVICE_NAME${NC}"
 
-    cd "lambda-micro/$SERVICE_DIR"
-
-    # Create deployment package
-    mkdir -p ../../deployments
-    zip -r ../../deployments/${SERVICE_NAME}.zip handler.py > /dev/null 2>&1
-
-    # Install dependencies if requirements.txt exists and has content
-    if [ -f requirements.txt ] && grep -v '^#' requirements.txt | grep -v '^$' > /dev/null 2>&1; then
-        echo "  Installing dependencies..."
-        mkdir -p package
-        pip3 install -r requirements.txt -t package/ --quiet --break-system-packages 2>/dev/null || pip3 install -r requirements.txt -t package/ --quiet
-        if [ -d package ] && [ "$(ls -A package)" ]; then
-            cd package && zip -r ../../../deployments/${SERVICE_NAME}.zip . > /dev/null 2>&1 && cd ..
-        fi
-        rm -rf package
+    # Build via the shared packaging script so this path and the GitHub
+    # Actions workflow produce identical artifacts. The script builds in a
+    # clean temp dir and refuses to emit a package that is missing a required
+    # module or that does not import.
+    mkdir -p deployments
+    if ! ./scripts/build_lambda_package.sh \
+            "lambda-micro/$SERVICE_DIR" \
+            "deployments/${SERVICE_NAME}.zip"; then
+        echo -e "${RED}  Package build/verification failed for $SERVICE_NAME - not deploying${NC}"
+        return 1
     fi
-
-    cd ../..
 
     # Check if function exists
     if aws lambda get-function --function-name $SERVICE_NAME --region $REGION > /dev/null 2>&1; then
