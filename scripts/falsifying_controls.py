@@ -67,12 +67,16 @@ RPL_DATA = REPO / "agent" / "replay" / "data.py"
 RPL_BROKER = REPO / "agent" / "replay" / "broker.py"
 RPL_ENGINE = REPO / "agent" / "replay" / "engine.py"
 
+ORC_MODELS = REPO / "agent" / "orchestration" / "models.py"
+ORC_DAY = REPO / "agent" / "orchestration" / "day.py"
+ORC_LOCK = REPO / "agent" / "orchestration" / "lock.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
           "tests.test_risk", "tests.test_broker",
           "tests.test_positions", "tests.test_journal",
-          "tests.test_replay"]
+          "tests.test_replay", "tests.test_orchestration"]
 
 
 @dataclass
@@ -859,6 +863,163 @@ MUTATIONS = [
         old="        _flatten_at_end(manager, series, journal, entry_orders, config, stats)",
         new="        pass  # MUTATION",
         expect=["end of data", "survive", "exits_filled", "open"],
+    ),
+    # --- Milestone 13: orchestration -------------------------------------
+    Mutation(
+        name="enter-outside-intraday",
+        description="open positions in the opening minutes and pre-close",
+        path=ORC_MODELS,
+        old="        return self is CyclePhase.INTRADAY",
+        new="        return self is not CyclePhase.CLOSED  # MUTATION",
+        expect=["INTRADAY", "exposure", "phase"],
+    ),
+    Mutation(
+        name="block-exits-when-halted",
+        description="stop closing positions while a halt is in force",
+        path=ORC_MODELS,
+        old="        return self in (CyclePhase.OPENING, CyclePhase.INTRADAY,\n"
+            "                        CyclePhase.PRE_CLOSE)",
+        new="        return self is CyclePhase.INTRADAY  # MUTATION",
+        expect=["exit", "halt", "pre_close", "PRE_CLOSE"],
+    ),
+    Mutation(
+        name="permit-exposure-despite-halts",
+        description="ignore the halt list when deciding on new exposure",
+        path=ORC_MODELS,
+        old="        return self.phase.permits_new_exposure and not self.halt_reasons",
+        new="        return self.phase.permits_new_exposure  # MUTATION",
+        expect=["halt", "exposure", "entries"],
+    ),
+    Mutation(
+        name="treat-unknown-market-status-as-open",
+        description="assume the market is trading when the provider is silent",
+        path=ORC_DAY,
+        old='    if status != "OPEN":\n        return CyclePhase.UNKNOWN',
+        new='    if False:  # MUTATION\n        return CyclePhase.UNKNOWN',
+        expect=["UNKNOWN", "open", "assume"],
+    ),
+    Mutation(
+        name="enter-without-knowing-the-time-to-close",
+        description="allow entries when the flatten window cannot be respected",
+        path=ORC_DAY,
+        old="    if minutes_to_close is None:\n"
+            "        # Open but we cannot tell how long is left. Exits are safe;\n"
+            "        # entries are not, because the flatten window cannot be\n"
+            "        # respected.\n"
+            "        return CyclePhase.PRE_CLOSE",
+        new="    if minutes_to_close is None:\n"
+            "        return CyclePhase.INTRADAY  # MUTATION",
+        expect=["to_close", "flatten", "entries"],
+    ),
+    Mutation(
+        name="run-entries-before-exits",
+        description="add risk before managing the risk already held",
+        path=ORC_DAY,
+        old="            self._manage_exits(result, phase, quote_for, minutes_to_close,\n"
+            "                               session_date)",
+        new="            pass  # MUTATION",
+        expect=["exit", "order", "manage"],
+    ),
+    Mutation(
+        name="skip-reconciliation",
+        description="act on a position set that may disagree with the broker",
+        path=ORC_DAY,
+        old="            self._reconcile(result)",
+        new="            pass  # MUTATION",
+        expect=["reconcil", "diverg", "fiction"],
+    ),
+    Mutation(
+        name="ignore-the-trading-switch",
+        description="trade with trading_enabled false",
+        path=ORC_DAY,
+        old="        if not self.trading_enabled:",
+        new="        if False:  # MUTATION",
+        expect=["trading_enabled", "TRADING_DISABLED"],
+    ),
+    Mutation(
+        name="ignore-the-execution-switch",
+        description="trade with execution_available false",
+        path=ORC_DAY,
+        old="        if not self.execution_available:\n"
+            "            result.halt(HaltReason.EXECUTION_UNAVAILABLE,",
+        new="        if False:  # MUTATION\n"
+            "            result.halt(HaltReason.EXECUTION_UNAVAILABLE,",
+        expect=["execution_available", "EXECUTION_UNAVAILABLE"],
+    ),
+    Mutation(
+        name="assume-not-halted-when-the-store-fails",
+        description="treat an unreadable halt state as permission to trade",
+        path=ORC_DAY,
+        old="            result.halt(HaltReason.HALT_STATE_UNREADABLE, str(exc))",
+        new="            pass  # MUTATION",
+        expect=["HALT_STATE_UNREADABLE", "unreadable"],
+    ),
+    Mutation(
+        name="proceed-without-the-cycle-lock",
+        description="run a second cycle alongside the first",
+        path=ORC_DAY,
+        old="        if not self._acquire_lock(result):",
+        new="        if False:  # MUTATION",
+        expect=["duplicate", "concurrent", "lock"],
+    ),
+    Mutation(
+        name="continue-when-the-lock-is-unreadable",
+        description="assume no other cycle is running when the lock cannot be read",
+        path=ORC_DAY,
+        old="            result.add_step(\"acquire_lock\", ok=False,\n"
+            "                            detail=f\"lock unreadable: {exc}\")\n"
+            "            return False",
+        new="            return True  # MUTATION",
+        expect=["lock", "duplicate", "concurrent"],
+    ),
+    Mutation(
+        name="let-an-impostor-release-the-lock",
+        description="allow a cycle to release a lock it does not hold",
+        path=ORC_LOCK,
+        old="        if self._holder == cycle_id:",
+        new="        if True:  # MUTATION",
+        expect=["holder", "release", "impostor"],
+    ),
+    Mutation(
+        name="let-a-cycle-raise-into-the-scheduler",
+        description="propagate an unhandled error so the retry reruns everything",
+        path=ORC_DAY,
+        old="        except Exception as exc:                          # noqa: BLE001\n"
+            "            # An unhandled error must not leave the agent believing it\n"
+            "            # may trade. Exits above have already run.\n"
+            "            result.halt(HaltReason.UNHANDLED_ERROR, str(exc))",
+        new="        except Exception as exc:  # MUTATION\n"
+            "            raise\n"
+            "            result.halt(HaltReason.UNHANDLED_ERROR, str(exc))",
+        expect=["abort", "unhandled", "raise"],
+    ),
+    Mutation(
+        name="let-a-provider-error-abort-the-cycle",
+        description="stop the exits when a data provider raises",
+        path=ORC_DAY,
+        old="    try:\n        return fn(*args)\n"
+            "    except Exception:                                     # noqa: BLE001\n"
+            "        return None",
+        new="    return fn(*args)  # MUTATION",
+        expect=["provider", "exit", "abort"],
+    ),
+    Mutation(
+        name="skip-the-pre-close-flatten",
+        description="carry positions overnight when no exit rule fires",
+        path=ORC_DAY,
+        old="        if phase.requires_flatten and not intents:",
+        new="        if False:  # MUTATION",
+        expect=["flatten", "pre_close", "overnight", "PRE_CLOSE"],
+    ),
+    Mutation(
+        name="count-a-journal-failure-as-an-exit-failure",
+        description="report a closed position as still at risk",
+        path=ORC_DAY,
+        old="            result.errors.append(\n"
+            "                f\"journal failed for {position.symbol} (the position is \"\n"
+            "                f\"closed; only the record is missing): {exc}\")",
+        new="            result.exits_failed += 1  # MUTATION",
+        expect=["record is missing", "journal"],
     ),
 ]
 
