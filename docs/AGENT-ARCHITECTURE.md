@@ -513,3 +513,88 @@ tests: a 100-symbol provider chunk that inflated 13 requests into 125, a
 accounting counted per symbol, an intraday bar window that silently lost
 5m/15m/30m returns for 24 of 25 candidates, and an inverse ETF
 (ProShares Short Russell2000) reaching the top 5 of a long-only funnel.
+
+## 16. Milestone 5 as built — the canonical signal engine
+
+The scanner answers *which securities deserve a closer look*. This
+milestone answers *what the quantitative evidence actually says about
+them* — and, critically, stops that answer being a single percentage.
+
+Full specification: [QUANTITATIVE-SIGNAL-ENGINE.md](QUANTITATIVE-SIGNAL-ENGINE.md).
+
+### One engine, not three
+
+Before this milestone the interpretation of an indicator existed in two
+places. `ml_agent_lite` decided directions; `agent/analysis.py`
+re-derived the RSI zones, the Bollinger vote and the MACD crossover with
+its own copies of the cutoffs. They agreed only because the same person
+wrote both — nothing enforced it, and the first edit to either would
+have produced a UI quietly disagreeing with the system it displayed.
+Duplicated *interpretation* is worse than duplicated arithmetic: the
+disagreement is a matter of meaning, and no equality check catches it.
+
+Now:
+
+```
+agent/signals/          the canonical engine          <- all thresholds
+agent/analysis.py       presentation only             <- no thresholds
+web/review/             renders; recomputes nothing
+agent/chat_grounding.py answers from stored results
+```
+
+`ml_agent_lite` remains as production `/chatbot`'s engine, pinned to the
+canonical arithmetic by `tests/test_signal_equivalence.py` on randomised
+inputs. Rebuilding that Lambda is a production change this milestone was
+not authorised to make.
+
+### Direction, agreement and magnitude are three things
+
+The old model multiplied the strength of the winning signals by the
+share of groups that agreed and reported one number. A result that was
+unanimous but unemphatic and one that was emphatic but contested were
+indistinguishable.
+
+They are now separate, and neither contains the other:
+
+- `signal_agreement` — structural. Cannot rise because a reading got
+  bigger.
+- `signal_magnitude` — size. Cannot rise because more groups concurred.
+
+Observed live on 2026-09-30: GOOG at agreement 1.00 / magnitude 0.51,
+IOVA at agreement 0.50 / magnitude 0.88. Both were previously one
+middling figure.
+
+### Magnitude exists at all
+
+Every signal strength used to be a hardcoded constant — RSI fired at
+0.85 whether it read 71 or 95; MACD at 0.70 whether the histogram was
+−0.01 or −8.00. A "strength" that cannot vary is not a strength. All
+magnitudes are now normalised ratios, volatility-adjusted where the
+indicator is not already scale-free.
+
+### Defects found and fixed
+
+| Defect | Effect |
+|---|---|
+| RSI returned 100 for a series that never moved | a halted security cast an overbought SELL vote |
+| MACD compared `line > signal` when both were exactly 0.0 | the absence of a crossover read as a bearish one |
+| SQQQ/TQQQ classified `equity`, escaping the leverage filter | a 3× **inverse** ETF reached the top 8 of a long-only funnel |
+| `InMemorySignalStore` returned the live object on read | a caller mutating a result corrupted the store |
+| `_session_service()` referenced but never defined | two routes would have raised NameError on first request |
+
+The first two are the same bug class: a short-circuit that treated "no
+movement" as an extreme. Both are fixed in the canonical engine *and* in
+`ml_agent_lite`, so the copies stay pinned.
+
+### Regime as context, never as a signal source
+
+The regime scales magnitude only. It cannot create, remove or reverse a
+direction, and it does not touch agreement. `UNKNOWN` is discounted like
+a hostile regime — not knowing the market is not the same as a calm one.
+
+### What it still cannot do
+
+Produce a trade. There is no entry, target, stop, size or expected
+return in the output, no broker adapter, and `execution_available` is
+`false` in every response. Trade hypotheses belong behind the Risk
+Governor.
