@@ -32,8 +32,15 @@ ENTRY_MODULE="handler.py"
 
 # Extra modules imported at runtime, per service. Keep in sync with imports;
 # the import check below fails the build if anything is missed.
+#
+# REQUIRED_PACKAGES are shared package directories copied from the repo
+# root. The flat *.py glob cannot reach a package, so a service importing
+# one must declare it here or the artifact will not import.
+REQUIRED_PACKAGES=()
 case "$SERVICE_DIR" in
   *chatbot-router) REQUIRED_MODULES=("$ENTRY_MODULE" "ml_agent_lite.py") ;;
+  *agent-api)      REQUIRED_MODULES=("$ENTRY_MODULE")
+                   REQUIRED_PACKAGES=("agent") ;;
   *)               REQUIRED_MODULES=("$ENTRY_MODULE") ;;
 esac
 
@@ -72,6 +79,24 @@ if [[ "$copied" -eq 0 ]]; then
   exit 1
 fi
 
+# --- 2b. shared packages ------------------------------------------------
+for pkg in "${REQUIRED_PACKAGES[@]+"${REQUIRED_PACKAGES[@]}"}"; do
+  if [[ ! -d "$pkg" ]]; then
+    echo "ERROR: declared package not found at repo root: $pkg" >&2
+    exit 1
+  fi
+  if [[ ! -f "$pkg/__init__.py" ]]; then
+    echo "ERROR: $pkg is not an importable package (no __init__.py)" >&2
+    exit 1
+  fi
+  echo "    add package: $pkg/"
+  # -L so a symlinked package is materialised rather than shipped as a
+  # dangling link that only resolves on this machine.
+  cp -RL "$pkg" "$BUILD_DIR/$pkg"
+  find "$BUILD_DIR/$pkg" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  find "$BUILD_DIR/$pkg" -name '*.pyc' -delete 2>/dev/null || true
+done
+
 find "$BUILD_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$BUILD_DIR" -name '*.pyc' -delete 2>/dev/null || true
 
@@ -88,6 +113,16 @@ echo "==> Verifying artifact contents"
 ZIP_ENTRIES="$(unzip -Z1 "$ABS_ZIP")"
 
 missing=0
+for pkg in "${REQUIRED_PACKAGES[@]+"${REQUIRED_PACKAGES[@]}"}"; do
+  if printf '%s\n' "$ZIP_ENTRIES" | /usr/bin/grep -q "^$pkg/__init__.py$"; then
+    count=$(printf '%s\n' "$ZIP_ENTRIES" | /usr/bin/grep -c "^$pkg/.*\.py$" || true)
+    echo "    OK      $pkg/ ($count modules)"
+  else
+    echo "    MISSING $pkg/__init__.py" >&2
+    missing=$((missing + 1))
+  fi
+done
+
 for module in "${REQUIRED_MODULES[@]}"; do
   if printf '%s\n' "$ZIP_ENTRIES" | /usr/bin/grep -Fxq -- "$module"; then
     echo "    OK      $module"
@@ -104,10 +139,25 @@ fi
 
 # --- 5. verify it actually imports --------------------------------------
 # Catches *any* missing module, not only the ones listed above.
+#
+# This MUST run from inside the extracted artifact. Python puts the
+# working directory on sys.path, so running it from the repo root let
+# `import agent` resolve out of the repo instead of out of the zip - the
+# check passed on an artifact with the package missing entirely, which is
+# a guard that cannot fail. Running with cwd = the extraction directory
+# means the only importable source is the artifact itself.
 echo "==> Verifying artifact imports"
 unzip -q "$ABS_ZIP" -d "$VERIFY_DIR"
-if PYTHONPATH="$VERIFY_DIR" python3 - <<'PY'
-import importlib, sys
+if ( cd "$VERIFY_DIR" && python3 - <<'PY'
+import importlib, os, sys
+
+# Drop anything that is not the extracted artifact or the stdlib, so a
+# module present on this machine cannot stand in for one the artifact
+# should have shipped.
+here = os.getcwd()
+sys.path = [p for p in sys.path
+            if p in ("", here) or "site-packages" in p or "lib/python" in p]
+
 try:
     m = importlib.import_module("handler")
 except Exception as e:
@@ -116,9 +166,26 @@ except Exception as e:
 if not hasattr(m, "lambda_handler"):
     print("    handler.lambda_handler not found", file=sys.stderr)
     sys.exit(1)
+
+# Confirm each first-party module really came from the artifact.
+for name, mod in list(sys.modules.items()):
+    origin = getattr(getattr(mod, "__spec__", None), "origin", None) or ""
+    # Skip the interpreter's own modules and anything installed: only
+    # first-party source is expected to come from the artifact.
+    if origin in ("", "built-in", "frozen"):
+        continue
+    if "site-packages" in origin or "lib/python" in origin \
+            or "lib-dynload" in origin:
+        continue
+    if origin.startswith(here):
+        continue
+    print(f"    IMPORT LEAKED: {name} loaded from {origin}, not the artifact",
+          file=sys.stderr)
+    sys.exit(1)
+
 print("    OK      handler imports and exposes lambda_handler")
 PY
-then
+) then
   :
 else
   echo "ERROR: artifact does not import cleanly - refusing to deploy" >&2

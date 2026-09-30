@@ -209,7 +209,7 @@ table.
 | Table | PK / SK | Purpose | TTL |
 |---|---|---|---|
 | `stock-agent-dev-cache` | `cache_key` | provider response cache | `expires_at` |
-| `stock-agent-dev-state` | `agent_id` / `session_date` | agent state, regime, kill switches | — |
+| `stock-agent-dev-state` | `session_date` | agent state, regime, kill switches (**created**, optimistic concurrency on `revision`) | — |
 | `stock-agent-dev-candidates` | `session_date` / `ts#symbol` | scanner output | 30d |
 | `stock-agent-dev-evidence` | `symbol` / `ts#source#id` | evidence with provenance | 180d |
 | `stock-agent-dev-decisions` | `session_date` / `ts#id` | hypotheses + risk verdicts, **including rejections** | — |
@@ -363,7 +363,7 @@ record and reviewed before any live phase.
 |---|---|---|---|---|
 | 1 | Recovery baseline preserved | — | existing suite | ✅ pushed + tagged `recovery-2026-09-30` |
 | 2 | Provider abstraction + cache | 1 | 33 offline tests | ✅ quota reduction demonstrated |
-| 3 | Agent state + market regime | 2 | regime classification is deterministic | regime computed from real data, stored |
+| 3 | Agent state + market regime | 2 | 89 tests: state machine, session, regime, API | ✅ regime computed from live data and persisted; `/agent/status` + `/agent/market-regime` live |
 | 4 | Universe + scanner | 3 | illiquid rejected; missing data safe; stale recognised | ranked candidates on a schedule |
 | 5 | Signal engine | 4 | known-value indicator tests; no lookahead; correlation groups honoured | deterministic signal set per candidate |
 | 6 | Evidence model + SEC/news connectors | 4 | provenance retained; duplicates collapsed; source outage graceful | evidence attached to candidates |
@@ -398,3 +398,46 @@ The existing `POST /chatbot` is unchanged.
 
 No control endpoint ships publicly without authentication. `emergency-stop`
 is the one endpoint that must remain reachable when the rest is degraded.
+
+
+---
+
+## 14. Milestone 3 as built
+
+Deviations from the design above, and why.
+
+**State table key is `session_date` alone**, not `agent_id / session_date`.
+There is one agent. A composite key would have added a partition dimension
+with a single value in it.
+
+**`MarketSessionService` is separate from `AlpacaProvider.get_market_status()`.**
+The provider method reports only open/closed, because `/v2/clock`'s
+`is_open` covers the regular session only. Pre-market and after-hours need
+the calendar's `session_open` / `session_close`, and holidays are detected
+by a date being *absent* from the calendar. The service combines both.
+
+**Volatility carries no directional weight.** Stated in the design; worth
+repeating because it is the most likely thing for a later change to get
+wrong. It is a confidence penalty and a label override.
+
+**`breadth_proxy`, not `breadth`.** Real breadth needs advance/decline
+data. This compares QQQ against IWM and is named so it cannot be mistaken
+for the real measure.
+
+**The admin evaluate endpoint is closed by default.** It spends provider
+quota and the API has no authentication, so it is gated behind
+`AGENT_ADMIN_ENABLED`. The dev Lambda has no Function URL and no API
+Gateway route: it is reachable only with AWS credentials.
+
+**Chat grounding is built and tested but not wired into production.**
+`agent/chat_grounding.py` answers state questions deterministically and
+builds a context block that forbids invention. Wiring it into the live
+`/chatbot` handler is deliberately deferred, so Milestone 3 changes no
+production behaviour.
+
+**Two defects were found only by running against the live API**, and both
+are recorded in `MARKET-REGIME-ENGINE.md`: `CachedProvider` was discarding
+the batch snapshot endpoint, and "at VWAP" was being scored as "above
+VWAP". A third — the packaging import check passing on an artifact with
+the `agent` package missing entirely — was found by a falsifying control
+and is described in this file's §3 companion, `PRODUCTION-STATE.md` §3.
