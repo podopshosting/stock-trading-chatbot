@@ -1,3 +1,8 @@
+> **⚠️ SUPERSEDED — historical record.**
+> This document does not describe what is deployed. See
+> [PRODUCTION-STATE.md](PRODUCTION-STATE.md) for the current architecture,
+> deployment procedure and known constraints.
+
 # 📋 Stock Trading Chatbot - Quick Reference
 
 ## 🌐 Live URLs
@@ -13,7 +18,7 @@
 | Secret Name | Value | Purpose |
 |------------|-------|---------|
 | `stock-chatbot/openai-api-key` | `sk-proj-8qLm...` | OpenAI GPT-4o-mini |
-| `stock-chatbot/alphavantage-api-key` | `CP1US9BQHABIKPYG` | Alpha Vantage real-time data |
+| `stock-chatbot/alphavantage-api-key` | `<REDACTED - retrieve from AWS Secrets Manager>` | Alpha Vantage real-time data |
 
 ---
 

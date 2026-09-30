@@ -1,3 +1,8 @@
+> **⚠️ SUPERSEDED — historical record.**
+> This document does not describe what is deployed. See
+> [PRODUCTION-STATE.md](PRODUCTION-STATE.md) for the current architecture,
+> deployment procedure and known constraints.
+
 # 📊 Alpha Vantage Integration - Real-Time Stock Data
 
 ## ✅ Integration Complete
@@ -212,7 +217,7 @@ else:
 
 **API Key Storage:** AWS Secrets Manager
 - Secret name: `stock-chatbot/alphavantage-api-key`
-- Value: `CP1US9BQHABIKPYG`
+- Value: `<REDACTED - retrieve from AWS Secrets Manager>`
 - Access: Lambda execution role only
 
 **Secret Retrieval:**

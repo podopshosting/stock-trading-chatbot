@@ -1,3 +1,8 @@
+> **⚠️ SUPERSEDED — historical record.**
+> This document does not describe what is deployed. See
+> [PRODUCTION-STATE.md](PRODUCTION-STATE.md) for the current architecture,
+> deployment procedure and known constraints.
+
 # 🎉 Alpha Vantage Integration - Enhancement Complete!
 
 ## Summary
@@ -9,7 +14,7 @@ Successfully integrated **Alpha Vantage API** to provide real-time stock market 
 ## ✅ What Was Accomplished
 
 ### 1. **API Key Management**
-- ✅ Stored Alpha Vantage API key (`CP1US9BQHABIKPYG`) in AWS Secrets Manager
+- ✅ Stored Alpha Vantage API key (`<REDACTED - retrieve from AWS Secrets Manager>`) in AWS Secrets Manager
 - ✅ Secret name: `stock-chatbot/alphavantage-api-key`
 - ✅ Secure retrieval via Lambda execution role
 
@@ -294,7 +299,7 @@ else:
 ```json
 {
   "Name": "stock-chatbot/alphavantage-api-key",
-  "Value": "CP1US9BQHABIKPYG",
+  "Value": "<REDACTED - retrieve from AWS Secrets Manager>",
   "Region": "us-east-2",
   "ARN": "arn:aws:secretsmanager:us-east-2:899383035514:secret:stock-chatbot/alphavantage-api-key-l1dYyq"
 }
@@ -349,8 +354,8 @@ else:
 ### Alpha Vantage Resources
 
 - **API Documentation:** https://www.alphavantage.co/documentation/
-- **API Key:** CP1US9BQHABIKPYG
-- **Free Tier:** 25 requests/day, 5 requests/minute
+- **API Key:** <REDACTED - retrieve from AWS Secrets Manager>
+- **Free Tier:** 25 requests/day, ~1 request/second burst (the '5 requests/minute' figure was incorrect)
 - **Support:** support@alphavantage.co
 
 ---
