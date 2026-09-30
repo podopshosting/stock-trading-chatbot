@@ -470,6 +470,10 @@ const DIR = {
   SELL:      { cls: "dir-sell", g: "▼", word: "Sell",    grp: "g-sell"  },
   HOLD:      { cls: "dir-hold", g: "■", word: "Hold",    grp: ""        },
   NEUTRAL:   { cls: "dir-hold", g: "■", word: "Neutral", grp: ""        },
+  // A group whose own members oppose each other exactly. Distinct from
+  // NEUTRAL (members agreed there is no direction) and from NO_SIGNAL
+  // (nothing could be computed) - three different claims.
+  MIXED:     { cls: "dir-hold", g: "◆", word: "Mixed",   grp: "g-mixed" },
   NO_SIGNAL: { cls: "dir-hold", g: "—", word: "No signal", grp: ""      },
 };
 function dirOf(d) { return DIR[d] || DIR.NEUTRAL; }
@@ -494,25 +498,52 @@ function saveWatchlist(list) {
 
 /* ---------------- rendering ---------------- */
 
-function agreementBlock(a) {
-  const strengthColour = a.recommendation === "BUY" ? "var(--up)"
-    : a.recommendation === "SELL" ? "var(--down)" : "var(--flat)";
-  const width = Math.round((a.signal_agreement || 0) * 100);
+function meter(label, value, colour, ariaWord) {
+  const width = Math.round((value || 0) * 100);
   return `
-  <div class="agree">
     <div class="agree-top">
-      <span class="agree-label">Signal agreement</span>
-      <span class="agree-val" style="color:${strengthColour}">${a.signal_strength}</span>
-      <span class="agree-val" style="color:var(--text-faint)">(${(a.signal_agreement ?? 0).toFixed(2)})</span>
+      <span class="agree-label">${esc(label)}</span>
+      <span class="agree-val" style="color:${colour}">${(value ?? 0).toFixed(2)}</span>
+      ${ariaWord ? `<span class="agree-val" style="color:var(--text-faint)">${esc(ariaWord)}</span>` : ""}
     </div>
     <div class="bar" role="img"
-         aria-label="Signal agreement ${(a.signal_agreement ?? 0).toFixed(2)} of 1.0, described as ${esc(a.signal_strength)}">
-      <span style="width:${width}%;background:${strengthColour}"></span>
-    </div>
+         aria-label="${esc(label)} ${(value ?? 0).toFixed(2)} of 1.0${ariaWord ? ", described as " + esc(ariaWord) : ""}">
+      <span style="width:${width}%;background:${colour}"></span>
+    </div>`;
+}
+
+// Agreement and magnitude are DIFFERENT quantities and are drawn as two
+// meters. A single bar was the old model's whole problem: a result that
+// is unanimous but unemphatic, and one that is emphatic but contested,
+// are different evidence and used to render identically.
+function agreementBlock(a) {
+  const colour = a.recommendation === "BUY" ? "var(--up)"
+    : a.recommendation === "SELL" ? "var(--down)" : "var(--flat)";
+  const adj = a.regime_adjusted_magnitude;
+  const discounted = (a.regime_adjustment ?? 1) !== 1 && adj != null;
+  return `
+  <div class="agree">
+    ${meter("Signal agreement", a.signal_agreement, colour, a.signal_strength)}
     <details class="info">
       <summary>What does signal agreement mean?</summary>
       <div>${esc(a.agreement_meaning)}</div>
     </details>
+    <div style="margin-top:12px">
+      ${meter("Signal magnitude", a.signal_magnitude, colour, null)}
+      <details class="info">
+        <summary>How is magnitude different from agreement?</summary>
+        <div>${esc(a.magnitude_meaning || "")}
+          <br><br><strong>Agreement</strong> is how many independent groups
+          concur. <strong>Magnitude</strong> is how far the readings sit
+          beyond their thresholds. A result can have one without the other,
+          and neither is a probability.</div>
+      </details>
+      ${discounted ? `<div class="note" style="margin-top:6px">
+        Adjusted to <strong>${adj.toFixed(2)}</strong> for the
+        ${esc(a.market_regime || "UNKNOWN")} market regime
+        (×${(a.regime_adjustment).toFixed(2)}). The regime scales magnitude
+        only — it never creates or reverses a direction.</div>` : ""}
+    </div>
   </div>`;
 }
 
@@ -542,19 +573,20 @@ function groupCard(g) {
   const m = dirOf(g.direction);
   const cls = g.internal_disagreement ? "g-mixed" : m.grp;
   const members = (g.members || []).map(x => `
-    <div class="member">
+    <div class="member" title="${esc(x.reason || "")}">
       <span class="mn">${esc(x.label)}</span>
       <span class="mv" style="color:${x.direction === "BUY" ? "var(--up)"
         : x.direction === "SELL" ? "var(--down)" : "var(--flat)"}">
         <span class="glyph" aria-hidden="true">${dirOf(x.direction).g}</span>
-        ${esc(dirOf(x.direction).word)}
+        ${esc(dirOf(x.direction).word)}${
+          (x.strength ?? 0) > 0 ? ` <span style="color:var(--text-faint)">${x.strength.toFixed(2)}</span>` : ""}
       </span>
     </div>`).join("");
   return `
   <div class="group ${cls}">
     <div class="group-head">
       <span class="group-name">${esc(g.label)}</span>
-      ${badge(g.internal_disagreement ? "NEUTRAL" : g.direction)}
+      ${badge(g.direction)}
     </div>
     <div class="group-desc">${esc(g.description)}</div>
     ${g.internal_disagreement ? `<div class="badge" style="color:var(--warn);border-color:var(--warn);margin-top:8px;display:inline-block">MIXED</div>` : ""}
@@ -562,6 +594,8 @@ function groupCard(g) {
     ${members ? `<div class="members">${members}</div>` : ""}
     ${g.internal_disagreement
       ? `<div class="conflict">Signals inside this group disagree — its influence is halved.</div>` : ""}
+    ${g.direction === "MIXED"
+      ? `<div class="note">Members oppose each other with equal strength, so this group casts no vote.</div>` : ""}
     ${g.direction === "NO_SIGNAL"
       ? `<div class="note">Not counted. "No signal" is not the same as neutral.</div>` : ""}
   </div>`;
@@ -766,13 +800,24 @@ function renderAnalysis(a) {
       ${maCard(a.indicators?.moving_averages)}
       ${bbCard(a.indicators?.bollinger)}
       <div class="ind">
-        <h4>Other</h4>
+        <h4>Momentum &amp; regime</h4>
         <div class="kv"><span class="k">10-day momentum</span><span class="v">${pct(a.indicators?.momentum_10d)}</span></div>
-        <div class="kv"><span class="k">Volatility</span><span class="v">${num(a.indicators?.volatility_pct)}%</span></div>
-        <div class="kv"><span class="k">Risk level</span><span class="v">${esc(a.risk_level || "—")}</span></div>
+        <div class="kv"><span class="k">Golden/death cross</span><span class="v">${esc(a.indicators?.golden_cross?.available ? a.indicators.golden_cross.direction : "N/A")}</span></div>
+        <div class="kv"><span class="k">Signal magnitude</span><span class="v">${num(a.signal_magnitude)}</span></div>
+        <div class="kv"><span class="k">Regime adjustment</span><span class="v">×${num(a.regime_adjustment)}</span></div>
+        <div class="kv"><span class="k">Adjusted magnitude</span><span class="v">${num(a.regime_adjusted_magnitude)}</span></div>
+        <div class="note">${esc(a.regime_note || "")}</div>
       </div>
     </div>
   </div>
+
+  ${(a.warnings || []).length ? `
+  <div class="card">
+    <h2>Warnings</h2>
+    <ul style="margin:0;padding-left:18px;color:var(--warn);font-size:13px">
+      ${a.warnings.map(w => `<li>${esc(w)}</li>`).join("")}
+    </ul>
+  </div>` : ""}
 
   ${marketContextCard(a.market_context)}
   ${dataQualityBlock(a.data_quality)}

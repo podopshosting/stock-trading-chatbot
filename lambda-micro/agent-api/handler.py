@@ -1,9 +1,13 @@
 """
 Agent API - development read endpoints for Milestone 3.
 
-    GET  /agent/status           current agent + market + regime state
-    GET  /agent/market-regime    detailed quantitative regime data
-    POST /agent/regime/evaluate  force a fresh evaluation (ADMIN ONLY)
+    GET  /agent/status             agent + market + regime state
+    GET  /agent/market-regime      detailed quantitative regime data
+    POST /agent/regime/evaluate    force a fresh evaluation (ADMIN ONLY)
+    GET  /agent/analysis           per-symbol analysis, shaped for the UI
+    GET  /agent/signals            canonical signal result for a symbol
+    GET  /agent/signals/latest     the most recent stored signal run
+    GET  /agent/scanner/signals    signals for a scanner run's candidates
 
 Separate from the production chatbot Lambda on purpose: the live
 `/chatbot` route keeps working regardless of anything here.
@@ -25,14 +29,15 @@ from typing import Dict, Optional, Tuple
 from agent.config import AgentConfig
 from agent.market import MarketRegimeService, MarketSessionService
 from agent.observability import log_event
-from ml_agent_lite import MLTradingAgent
 from agent.providers import AlpacaProvider, CachedProvider, MemoryCache
 from agent.providers.base import ProviderError, SymbolNotFound
 from agent.analysis import build_analysis
 from agent.scanner import DynamoDBScannerStore
+from agent.signals import DynamoDBSignalStore, SignalService
 from agent.state import (
     AgentState, AgentStateService, DynamoDBStateStore, MarketSession,
 )
+from agent.state.store import today_market_date
 
 CORS_HEADERS = {
     "Content-Type": "application/json",
@@ -90,6 +95,43 @@ def _state_service() -> AgentStateService:
         table_name=cfg.storage.state_table, region=cfg.storage.region
     )
     return AgentStateService(store, cfg)
+
+
+def _session_date() -> str:
+    """Today's session date in MARKET time.
+
+    Reuses the scanner's and state store's existing helper rather than
+    deriving a second answer: a run started at 01:00 UTC belongs to the
+    previous US trading session, and two functions disagreeing about
+    which day it is would file runs under days the market was shut.
+    """
+    return today_market_date(_config().market_timezone)
+
+
+def _signal_store():
+    """None rather than a raising stub when no table is configured.
+
+    A read route can then say "storage unavailable" instead of
+    returning a 500 that looks like a bug in the engine.
+    """
+    cfg = _config()
+    table = os.environ.get("AGENT_SIGNAL_TABLE",
+                           getattr(cfg.storage, "signal_table", "") or "")
+    if not table:
+        return None
+    return DynamoDBSignalStore(table_name=table, region=cfg.storage.region)
+
+
+def _signal_service() -> SignalService:
+    """The canonical engine, over the CACHED provider.
+
+    Cached specifically: `/agent/analysis` fetches a quote for the
+    presentation fields and the service then asks for the same one, so
+    without the cache a single page view would cost two identical
+    provider calls.
+    """
+    _raw, cached = _provider()
+    return SignalService(cached, store=_signal_store(), config=_config())
 
 
 def _response(status: int, body: Dict) -> Dict:
@@ -385,25 +427,50 @@ def handle_candidate_symbol(event) -> Dict:
     })
 
 
-def handle_analysis(event) -> Dict:
-    """Structured per-symbol analysis for the review UI.
+def _symbol_from(event) -> Tuple[Optional[str], Optional[Dict]]:
+    """Validated ticker, or the refusal to return.
 
-    Uses the same ml_agent_lite engine as production /chatbot; this route
-    only reshapes the result into named fields so the frontend never has
-    to parse prose to recover a number.
+    Validation runs before any provider call so a malformed symbol
+    cannot spend quota.
     """
     params = _query(event)
     symbol = (params.get("symbol")
               or (event.get("pathParameters") or {}).get("symbol")
               or "").strip().upper()
     if not symbol:
-        return _response(400, {"error": "symbol required"})
+        return None, _response(400, {"error": "symbol required"})
     if not symbol.isalpha() or len(symbol) > 6:
-        return _response(400, {"error": "invalid symbol", "symbol": symbol})
+        return None, _response(400, {"error": "invalid symbol",
+                                     "symbol": symbol})
+    return symbol, None
+
+
+def _current_regime() -> Tuple[str, float]:
+    """The regime to judge a symbol against. UNKNOWN when unavailable -
+    never a cheerful default, because "we do not know" and "calm" lead
+    to different amounts of caution."""
+    try:
+        state = _state_service().get_session()
+        return (state.market_regime or "UNKNOWN",
+                state.market_regime_confidence or 0.0)
+    except Exception as e:
+        log_event("provider_error", operation="current_regime",
+                  error=str(e)[:200])
+        return "UNKNOWN", 0.0
+
+
+def handle_analysis(event) -> Dict:
+    """Per-symbol analysis, shaped for the review UI.
+
+    Runs the canonical signal engine and renders it through
+    `agent.analysis`, which holds no thresholds of its own. The frontend
+    never parses prose to recover a number, and never recomputes one.
+    """
+    symbol, refusal = _symbol_from(event)
+    if refusal:
+        return refusal
 
     _raw, cached = _provider()
-    cfg = _config()
-
     try:
         quote = cached.get_quote(symbol)
     except SymbolNotFound:
@@ -412,35 +479,113 @@ def handle_analysis(event) -> Dict:
         return _response(503, {"error": "market data unavailable",
                                "detail": type(e).__name__})
 
-    try:
-        bars = cached.get_bars(symbol, "1day", limit=220)
-    except ProviderError as e:
-        return _response(503, {"error": "history unavailable",
-                               "detail": type(e).__name__})
+    regime, regime_confidence = _current_regime()
+    result = _signal_service().evaluate_symbol(symbol, regime,
+                                               regime_confidence)
 
-    closes = bars.closes()
-    if len(closes) < 50:
+    if not result.analysis_available:
         return _response(200, {
             "symbol": symbol,
-            "price": quote.price,
+            "price": getattr(quote, "price", None),
             "analysis_available": False,
-            "message": (f"only {len(closes)} daily closes available; the "
-                        f"engine needs at least 50"),
+            "message": (result.warnings[0] if result.warnings
+                        else "analysis unavailable"),
+            "warnings": list(result.warnings),
             "execution_available": False,
         })
 
-    agent = MLTradingAgent(symbol)
-    ml_result = agent.analyze_stock(closes)
-    bands = agent.calculate_bollinger_bands(closes, 20)
+    return _response(200, build_analysis(result, quote=quote,
+                                         market_context=_market_context()))
 
-    payload = build_analysis(symbol, quote, closes, ml_result, bollinger=bands)
-    payload["analysis_available"] = True
 
-    # Market context: the stock does not exist in isolation.
+def handle_signals(event) -> Dict:
+    """The canonical signal result for one symbol, unrendered.
+
+    This is the engine's own output rather than a UI shape: group
+    structure, per-indicator readings with their raw values and the
+    thresholds that were applied, the regime adjustment, and the
+    deterministic reasons.
+    """
+    symbol, refusal = _symbol_from(event)
+    if refusal:
+        return refusal
+
+    regime, regime_confidence = _current_regime()
+    try:
+        result = _signal_service().evaluate_symbol(symbol, regime,
+                                                   regime_confidence)
+    except SymbolNotFound:
+        return _response(404, {"error": "symbol not found", "symbol": symbol})
+
+    payload = result.as_dict()
+    payload["market_context"] = _market_context()
+    return _response(200, payload)
+
+
+def handle_signals_latest(event) -> Dict:
+    """The most recent STORED signal run.
+
+    Reads persistence only - it never triggers an evaluation, so a
+    public GET cannot be used to spend provider quota.
+    """
+    params = _query(event)
+    symbol = (params.get("symbol") or "").strip().upper()
+    store = _signal_store()
+    if store is None:
+        return _response(503, {"error": "signal store unavailable"})
+
+    if symbol:
+        row = store.latest_for_symbol(symbol)
+        if not row:
+            return _response(404, {"found": False, "symbol": symbol,
+                                   "message": "no stored signal for this "
+                                              "symbol"})
+        return _response(200, {"found": True, "result": row})
+
+    session_date = (params.get("session_date")
+                    or _session_date())
+    run = store.latest_run(session_date)
+    if not run:
+        return _response(404, {"found": False, "session_date": session_date,
+                               "message": "no signal run recorded for this "
+                                          "session"})
+    return _response(200, {"found": True, "run": run})
+
+
+def handle_scanner_signals(event) -> Dict:
+    """Signals for the candidates of one scanner run, from storage."""
+    params = _query(event)
+    scanner_run_id = (params.get("scanner_run_id")
+                      or params.get("run_id") or "").strip()
+    store = _signal_store()
+    if store is None:
+        return _response(503, {"error": "signal store unavailable"})
+
+    session_date = (params.get("session_date")
+                    or _session_date())
+    run = store.latest_run(session_date)
+    if not run:
+        return _response(404, {"found": False,
+                               "message": "no signal run recorded"})
+    if scanner_run_id and run.get("scanner_run_id") != scanner_run_id:
+        return _response(404, {
+            "found": False, "scanner_run_id": scanner_run_id,
+            "message": "no signal run stored for that scanner run",
+        })
+    return _response(200, {"found": True, "run": run})
+
+
+def _market_context() -> Dict:
+    """Regime context for a single-symbol view.
+
+    A stock does not move in isolation, and a reading presented without
+    the market it was taken in invites being read as more decisive than
+    it is.
+    """
     try:
         state = _state_service().get_session()
         detail = state.as_dict().get("regime_detail") or {}
-        payload["market_context"] = {
+        return {
             "regime": state.market_regime,
             "regime_agreement": state.market_regime_confidence,
             "risk_posture": state.risk_posture,
@@ -465,9 +610,7 @@ def handle_analysis(event) -> Dict:
     except Exception as e:
         log_event("provider_error", operation="market_context",
                   error=str(e)[:200])
-        payload["market_context"] = {"available": False}
-
-    return _response(200, payload)
+        return {"available": False}
 
 
 ROUTES = {
@@ -479,6 +622,9 @@ ROUTES = {
     ("GET", "/agent/candidates"): handle_candidates,
     ("GET", "/agent/candidate"): handle_candidate_symbol,
     ("GET", "/agent/analysis"): handle_analysis,
+    ("GET", "/agent/signals"): handle_signals,
+    ("GET", "/agent/signals/latest"): handle_signals_latest,
+    ("GET", "/agent/scanner/signals"): handle_scanner_signals,
 }
 
 

@@ -40,11 +40,13 @@ REQUIRED_PACKAGES=()
 EXTRA_FILES=()
 case "$SERVICE_DIR" in
   *chatbot-router) REQUIRED_MODULES=("$ENTRY_MODULE" "ml_agent_lite.py") ;;
-  *agent-api)      REQUIRED_MODULES=("$ENTRY_MODULE" "ml_agent_lite.py")
-                   REQUIRED_PACKAGES=("agent")
-                   # The analysis route runs the same engine as production
-                   # /chatbot, so the artifact needs that module too.
-                   EXTRA_FILES=("lambda-micro/chatbot-router/ml_agent_lite.py") ;;
+  *agent-api)      REQUIRED_MODULES=("$ENTRY_MODULE")
+                   # agent-api now runs the canonical engine in
+                   # agent/signals and no longer needs ml_agent_lite.
+                   # Shipping it anyway would put a second, unreachable
+                   # copy of the maths in the artifact - the kind of
+                   # thing that later gets edited and appears to work.
+                   REQUIRED_PACKAGES=("agent") ;;
   *agent-scanner)  REQUIRED_MODULES=("$ENTRY_MODULE")
                    REQUIRED_PACKAGES=("agent") ;;
   *)               REQUIRED_MODULES=("$ENTRY_MODULE") ;;
@@ -111,6 +113,8 @@ for pkg in "${REQUIRED_PACKAGES[@]+"${REQUIRED_PACKAGES[@]}"}"; do
   cp -RL "$pkg" "$BUILD_DIR/$pkg"
   find "$BUILD_DIR/$pkg" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   find "$BUILD_DIR/$pkg" -name '*.pyc' -delete 2>/dev/null || true
+  # macOS sprinkles these through any directory Finder has touched.
+  find "$BUILD_DIR/$pkg" -name '.DS_Store' -delete 2>/dev/null || true
 done
 
 find "$BUILD_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true

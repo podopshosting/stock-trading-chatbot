@@ -1,449 +1,364 @@
 """
-Structured per-symbol analysis for the review UI.
+Presentation layer over the canonical quantitative signal engine.
 
-Exists because the production `/chatbot` response embeds most of the
-reasoning in prose. A frontend that wants to show *which* independent
-groups agreed would otherwise have to parse English out of an LLM
-paragraph, which is not a data contract.
+This module holds NO analysis. It has no thresholds, no formulas and no
+opinion about what a reading means: every number and every verdict comes
+from `agent.signals`, and this file only renames and arranges them for a
+UI.
 
-This module adds no analysis of its own. It calls the same
-`ml_agent_lite` engine the production handler uses and reshapes the
-result into named fields, so the UI consumes structure rather than text.
-Nothing here changes the maths.
+That constraint is the point. An earlier version of this file re-derived
+the RSI zones, the Bollinger vote and the MACD crossover with its own
+copies of the cutoffs. They agreed with the engine only because the same
+person wrote both in the same afternoon; nothing enforced it, and the
+first edit to either would have produced a UI that quietly disagreed
+with the system it was displaying. Duplicated interpretation is worse
+than duplicated arithmetic, because the disagreement is a matter of
+meaning and no equality check catches it.
 
-A deliberate distinction runs through the output: a group that produced
-**no opinion** is not the same as a group that is **neutral**. The
-Bollinger/mean-reversion group only fires at band extremes, so most of
-the time it is absent — and the UI must say "no signal", not "neutral",
-because those are different claims.
+If something here needs a threshold, it belongs in the engine.
 """
 from __future__ import annotations
 
-import time
 from typing import Dict, List, Optional
 
-# Human-readable names for the engine's internal signal ids.
-SIGNAL_LABELS = {
-    "rsi": "RSI",
-    "macd": "MACD",
-    "momentum_10d": "10-day momentum",
-    "ma_crossover": "MA crossover (20/50)",
-    "golden_cross": "Golden/death cross (50/200)",
-    "bollinger": "Bollinger Bands",
-}
-
-GROUP_LABELS = {
-    "trend": "Trend",
-    "momentum": "Momentum",
-    "mean_reversion": "Mean Reversion",
-}
-
-GROUP_DESCRIPTIONS = {
-    "trend": "Where price sits relative to its moving averages",
-    "momentum": "Rate and direction of recent price change",
-    "mean_reversion": "Whether price is stretched from its recent range",
-}
-
-ALL_GROUPS = ("trend", "momentum", "mean_reversion")
-
-# The wording the UI shows instead of a bare percentage. Signal agreement
-# is not a probability, and the label has to make that hard to misread.
-AGREEMENT_MEANING = (
-    "Signal agreement reflects how strongly independent analysis groups "
-    "agree with each other, and how strong the signals within them are. "
-    "It is NOT the probability of a price move, a forecast, or the chance "
-    "of a profitable trade."
+from .signals import QuantitativeSignalResult
+from .signals.models import (
+    AGREEMENT_MEANING, ALL_GROUPS, DISCLAIMER, GROUP_DESCRIPTIONS,
+    GROUP_LABELS, MAGNITUDE_MEANING, GroupDirection, SignalDirection,
+    StrengthBand,
 )
 
-DISCLAIMER = (
-    "This is technical analysis of past price data, not investment advice. "
-    "It does not predict future prices. No orders can be placed from this "
-    "system."
-)
+# Words a reader can act on. The engine's band is the source of truth;
+# this only translates it, and the mapping is one-to-one so a new band
+# cannot silently fall through to a friendly-sounding default.
+STRENGTH_WORDS = {
+    StrengthBand.STRONG: "Strong",
+    StrengthBand.MODERATE: "Moderate",
+    StrengthBand.WEAK: "Weak",
+    StrengthBand.MIXED: "Mixed",
+    StrengthBand.NONE: "No directional signal",
+}
+
+# The UI says HOLD where the engine says NEUTRAL. Same state, different
+# audience: "neutral" describes a measurement, "hold" describes what the
+# reader is being told the evidence supports doing about it.
+UI_DIRECTION = {
+    SignalDirection.BUY: "BUY",
+    SignalDirection.SELL: "SELL",
+    SignalDirection.NEUTRAL: "HOLD",
+    SignalDirection.NO_SIGNAL: "HOLD",
+}
+
+GROUP_UI_DIRECTION = {
+    GroupDirection.BUY: "BUY",
+    GroupDirection.SELL: "SELL",
+    GroupDirection.NEUTRAL: "NEUTRAL",
+    GroupDirection.MIXED: "MIXED",
+    GroupDirection.NO_SIGNAL: "NO_SIGNAL",
+}
 
 
-def _strength_label(recommendation: str, agreement: float,
-                    supporting: int, opposing: int) -> str:
-    """Words first, number second.
+def _fmt(value: Optional[float], digits: int = 2) -> Optional[float]:
+    return None if value is None else round(value, digits)
 
-    "Strong" / "Mixed" is what a reader can act on; 0.72 is not, and a
-    bare percentage next to a direction invites being read as a
-    probability.
+
+def _group_summary(group) -> str:
+    if group.internal_disagreement:
+        return "Signals inside this group disagree, which reduces its influence"
+    if group.direction is GroupDirection.BUY:
+        return "Supports upward direction"
+    if group.direction is GroupDirection.SELL:
+        return "Supports downward direction"
+    if group.direction is GroupDirection.MIXED:
+        return "Members oppose each other exactly, so this group casts no vote"
+    if group.direction is GroupDirection.NO_SIGNAL:
+        return "No signal from this group"
+    return "Measured, but nothing crossed a threshold"
+
+
+def build_group_view(result: QuantitativeSignalResult) -> List[Dict]:
+    """One row per correlation group, including the silent ones.
+
+    Showing all three - with the absent ones marked - is what stops a
+    reader counting six indicators as six independent opinions.
     """
-    if recommendation == "HOLD":
-        if supporting == 0 and opposing == 0:
-            return "No directional signal"
-        return "Mixed" if opposing else "Weak"
-    if opposing:
-        return "Contested"
-    if agreement >= 0.70 and supporting >= 2:
-        return "Strong"
-    if agreement >= 0.55:
-        return "Moderate"
-    return "Weak"
+    out: List[Dict] = []
+    for group_enum in ALL_GROUPS:
+        group = result.group(group_enum)
+        key = str(group_enum)
+        if group is None:
+            out.append({
+                "group": key, "label": GROUP_LABELS[key],
+                "description": GROUP_DESCRIPTIONS[key],
+                "direction": "NO_SIGNAL", "counted": 0, "weight": 0.0,
+                "magnitude": 0.0, "internal_disagreement": False,
+                "signals_fired": 0, "members": [],
+                "summary": "No signal from this group",
+            })
+            continue
+
+        out.append({
+            "group": key,
+            "label": group.label,
+            "description": GROUP_DESCRIPTIONS.get(key, ""),
+            "direction": GROUP_UI_DIRECTION[group.direction],
+            "counted": group.counted,
+            "weight": _fmt(group.weight, 4),
+            "magnitude": _fmt(group.magnitude, 4),
+            "net": _fmt(group.net, 4),
+            "internal_agreement": group.internal_agreement,
+            "internal_disagreement": group.internal_disagreement,
+            "signals_fired": group.opinionated_members,
+            "buy_votes": group.buy_votes,
+            "sell_votes": group.sell_votes,
+            "members": [
+                {
+                    "signal": m.indicator,
+                    "label": m.label,
+                    "direction": str(m.direction),
+                    "strength": _fmt(m.strength, 4),
+                    "reason": m.reason,
+                }
+                for m in group.members
+            ],
+            "summary": _group_summary(group),
+        })
+    return out
 
 
-def _macd_state(macd: Optional[float], signal: Optional[float],
-                histogram: Optional[float]) -> Dict:
-    """The crossover IS the indicator, so report it, not just the line."""
-    if macd is None or signal is None:
-        return {"available": False,
-                "note": "needs 34 closes for a 9-period signal line"}
-    bullish = histogram is not None and histogram > 0
+def _indicator_block(result: QuantitativeSignalResult, name: str) -> Dict:
+    """Generic passthrough of one indicator's own reading.
+
+    Everything shown is what the engine recorded: its direction, its
+    strength, the raw values it used and the thresholds it applied.
+    """
+    sig = result.indicator(name)
+    if sig is None:
+        return {"available": False}
+    available = sig.direction is not SignalDirection.NO_SIGNAL
     return {
-        "available": True,
-        "macd_line": macd,
-        "signal_line": signal,
-        "histogram": histogram,
-        "relation": "MACD > Signal" if bullish else "MACD < Signal",
-        "crossover": "bullish" if bullish else "bearish",
-        "interpretation": ("Bullish crossover - MACD above its signal line"
-                           if bullish else
-                           "Bearish crossover - MACD below its signal line"),
-        # Stated because a positive MACD line with a negative histogram is
-        # the case the old implementation could never report.
+        "available": available,
+        "direction": str(sig.direction),
+        "engine_vote": (str(sig.direction).lower()
+                        if sig.direction.is_directional else "none"),
+        "strength": _fmt(sig.strength, 4),
+        "reason": sig.reason,
+        "raw_values": sig.raw_values,
+        "thresholds": sig.thresholds,
+        "note": "" if available else sig.reason,
+    }
+
+
+def _macd_block(result: QuantitativeSignalResult) -> Dict:
+    block = _indicator_block(result, "macd")
+    if not block.get("available"):
+        return {"available": False,
+                "note": block.get("note")
+                or "needs 34 closes for a 9-period signal line"}
+    raw = block["raw_values"]
+    hist = raw.get("histogram")
+    bullish = str(block["direction"]) == "BUY"
+    return {
+        **block,
+        "macd_line": _fmt(raw.get("macd"), 4),
+        "signal_line": _fmt(raw.get("signal"), 4),
+        "histogram": _fmt(hist, 4),
+        "relation": ("MACD > Signal" if bullish else
+                     "MACD < Signal" if str(block["direction"]) == "SELL"
+                     else "MACD ≈ Signal"),
+        "crossover": ("bullish" if bullish else
+                      "bearish" if str(block["direction"]) == "SELL"
+                      else "none"),
+        "interpretation": block["reason"],
         "note": ("The signal line is a 9-period EMA of the MACD line. A "
                  "positive MACD line can still be a bearish crossover if it "
                  "is falling below that average."),
     }
 
 
-def _rsi_state(rsi: Optional[float]) -> Dict:
-    """Bands as the engine actually uses them: it votes only below 30 or
-    above 70, and treats 40-60 as a hold. Describing RSI 60 as a buy
-    would misrepresent the engine."""
-    if rsi is None:
-        return {"available": False}
-    if rsi < 30:
-        zone, reading, engine = "oversold", "Oversold", "buy"
-    elif rsi > 70:
-        zone, reading, engine = "overbought", "Overbought", "sell"
-    elif 40 <= rsi <= 60:
-        zone, reading, engine = "neutral", "Neutral", "hold"
+def _rsi_block(result: QuantitativeSignalResult) -> Dict:
+    block = _indicator_block(result, "rsi")
+    if not block.get("available"):
+        return {"available": False, "note": block.get("note", "")}
+    sig = result.indicator("rsi")
+    value = sig.raw_values.get("rsi")
+    th = sig.thresholds
+    # Zone naming is presentation. The cutoffs come from the engine.
+    if value is None:
+        zone, reading = "unknown", "Unknown"
+    elif value < th.get("oversold", 30):
+        zone, reading = "oversold", "Oversold"
+    elif value > th.get("overbought", 70):
+        zone, reading = "overbought", "Overbought"
+    elif th.get("neutral_low", 40) <= value <= th.get("neutral_high", 60):
+        zone, reading = "neutral", "Neutral"
     else:
-        zone, reading, engine = "leaning", (
-            "Moderately strong" if rsi > 60 else "Moderately weak"), "none"
+        zone = "leaning"
+        reading = ("Moderately strong" if value > th.get("neutral_high", 60)
+                   else "Moderately weak")
     return {
-        "available": True, "value": rsi, "zone": zone, "reading": reading,
-        "engine_vote": engine,
-        "note": ("The engine only votes on RSI below 30 or above 70, and "
-                 "treats 40-60 as neutral. A reading above 50 is not "
-                 "itself a buy signal."),
+        **block,
+        "value": _fmt(value, 1),
+        "zone": zone,
+        "reading": reading,
+        "note": (f"The engine only votes on RSI below "
+                 f"{th.get('oversold', 30):.0f} or above "
+                 f"{th.get('overbought', 70):.0f}, and treats "
+                 f"{th.get('neutral_low', 40):.0f}-"
+                 f"{th.get('neutral_high', 60):.0f} as neutral. A reading "
+                 f"above 50 is not itself a buy signal."),
     }
 
 
-def _moving_averages(price: Optional[float], sma20: Optional[float],
-                     sma50: Optional[float]) -> Dict:
-    if not (price and sma20 and sma50):
-        return {"available": False}
-    ordered = []
-    for label, value in (("Price", price), ("SMA 20", sma20),
-                         ("SMA 50", sma50)):
-        ordered.append((label, value))
-    ordered.sort(key=lambda kv: -kv[1])
-    structure = " > ".join(label for label, _v in ordered)
-    bullish = price > sma20 > sma50
-    bearish = price < sma20 < sma50
+def _moving_average_block(result: QuantitativeSignalResult) -> Dict:
+    block = _indicator_block(result, "ma_crossover")
+    if not block.get("available"):
+        return {"available": False, "note": block.get("note", "")}
+    raw = block["raw_values"]
+    price, sma20, sma50 = (raw.get("price"), raw.get("sma_20"),
+                           raw.get("sma_50"))
+    ordered = sorted((("Price", price), ("SMA 20", sma20), ("SMA 50", sma50)),
+                     key=lambda kv: -(kv[1] or 0))
+    bullish = price and sma20 and sma50 and price > sma20 > sma50
+    bearish = price and sma20 and sma50 and price < sma20 < sma50
     return {
-        "available": True,
-        "price": price, "sma_20": sma20, "sma_50": sma50,
-        "structure": structure,
+        **block,
+        "price": _fmt(price), "sma_20": _fmt(sma20), "sma_50": _fmt(sma50),
+        "structure": " > ".join(label for label, _v in ordered),
         "reading": ("Bullish structure" if bullish else
                     "Bearish structure" if bearish else "Mixed structure"),
     }
 
 
-def _bollinger(price: Optional[float], bands: Optional[Dict]) -> Dict:
-    if not bands or price is None:
+def _bollinger_block(result: QuantitativeSignalResult) -> Dict:
+    block = _indicator_block(result, "bollinger")
+    if not block.get("available"):
         return {"available": False,
-                "note": "Bollinger Bands only produce a vote at the band "
-                        "extremes, so most of the time this group is silent."}
-    upper, middle, lower = bands.get("upper"), bands.get("middle"), bands.get("lower")
-    if not (upper and middle and lower) or upper <= lower:
-        return {"available": False}
-    position = (price - lower) / (upper - lower)
-    if price > upper:
-        where, vote = "Above upper band", "sell"
-    elif price < lower:
-        where, vote = "Below lower band", "buy"
-    elif position >= 0.75:
-        where, vote = "Near upper band", "none"
-    elif position <= 0.25:
-        where, vote = "Near lower band", "none"
+                "note": block.get("note")
+                or ("Bollinger Bands only vote at the band extremes, so this "
+                    "group is silent most of the time.")}
+    raw = block["raw_values"]
+    position = raw.get("position_in_band")
+    price, upper, lower = raw.get("price"), raw.get("upper"), raw.get("lower")
+    if price is not None and upper is not None and price > upper:
+        where = "Above upper band"
+    elif price is not None and lower is not None and price < lower:
+        where = "Below lower band"
+    elif position is not None and position >= 0.75:
+        where = "Near upper band"
+    elif position is not None and position <= 0.25:
+        where = "Near lower band"
     else:
-        where, vote = "Mid-range", "none"
+        where = "Mid-range"
     return {
-        "available": True,
-        "upper": upper, "middle": middle, "lower": lower, "price": price,
-        "position_pct": round(position * 100, 1),
-        "where": where, "engine_vote": vote,
+        **block,
+        "upper": _fmt(upper), "middle": _fmt(raw.get("middle")),
+        "lower": _fmt(lower), "price": _fmt(price),
+        "position_pct": None if position is None else round(position * 100, 1),
+        "where": where,
         "note": ("Being near a band is not itself a signal. The engine only "
                  "votes when price closes outside a band."),
     }
 
 
-def build_group_view(groups: Dict) -> List[Dict]:
-    """One row per correlation group, including groups that stayed silent.
-
-    Showing all three, with absent ones marked "no signal", is what stops
-    a reader counting six indicators as six independent opinions.
-    """
-    out = []
-    for name in ALL_GROUPS:
-        detail = groups.get(name)
-        if not detail:
-            out.append({
-                "group": name,
-                "label": GROUP_LABELS[name],
-                "description": GROUP_DESCRIPTIONS[name],
-                "direction": "NO_SIGNAL",
-                "counted": 0,
-                "weight": 0.0,
-                "internal_disagreement": False,
-                "signals_fired": 0,
-                "members": [],
-                "summary": "No signal from this group",
-            })
-            continue
-
-        members = [
-            {
-                "signal": m.get("name"),
-                "label": SIGNAL_LABELS.get(m.get("name"), m.get("name")),
-                "direction": (m.get("direction") or "hold").upper(),
-                "confidence": m.get("confidence"),
-            }
-            for m in (detail.get("members") or [])
-        ]
-        directions = {m["direction"] for m in members
-                      if m["direction"] in ("BUY", "SELL")}
-        internal_disagreement = len(directions) > 1
-
-        direction = (detail.get("direction") or "hold").upper()
-        if direction == "HOLD":
-            direction = "NEUTRAL"
-
-        if internal_disagreement:
-            summary = ("Signals inside this group disagree, which reduces "
-                       "its influence")
-        elif direction == "BUY":
-            summary = "Supports upward direction"
-        elif direction == "SELL":
-            summary = "Supports downward direction"
-        else:
-            summary = "No actionable reading"
-
-        out.append({
-            "group": name,
-            "label": GROUP_LABELS[name],
-            "description": GROUP_DESCRIPTIONS[name],
-            "direction": direction,
-            "counted": detail.get("counted", 0),
-            "weight": detail.get("confidence"),
-            "net": detail.get("net"),
-            "internal_agreement": detail.get("internal_agreement"),
-            "internal_disagreement": internal_disagreement,
-            "signals_fired": detail.get("signals_fired", 0),
-            "members": members,
-            "summary": summary,
-        })
-    return out
-
-
-def explain(recommendation: str, group_view: List[Dict]) -> Dict:
-    """Deterministic explanation of the vote.
-
-    Built from the structured result, not generated by a model: a language
-    model has no business explaining arithmetic it did not perform, and an
-    explanation that can drift from the numbers is worse than none.
-    """
-    supporting = [g for g in group_view
-                  if g["direction"] == recommendation and g["counted"]]
-    opposing = [g for g in group_view
-                if g["direction"] in ("BUY", "SELL")
-                and g["direction"] != recommendation and g["counted"]]
-    silent = [g for g in group_view if g["direction"] == "NO_SIGNAL"]
-    conflicted = [g for g in group_view if g["internal_disagreement"]]
-
-    lines: List[str] = []
-    if recommendation == "HOLD":
-        directional = [g for g in group_view
-                       if g["direction"] in ("BUY", "SELL") and g["counted"]]
-        if not directional:
-            headline = "Why HOLD?"
-            lines.append("No independent group produced a directional signal.")
-        else:
-            headline = "Why HOLD?"
-            names = {g["direction"]: g["label"] for g in directional}
-            lines.append(
-                f"{' and '.join(sorted(g['label'] for g in directional))} "
-                f"point in different directions."
-            )
-            lines.append(
-                "Because the independent groups conflict, there is not "
-                "enough agreement for a directional call."
-            )
-    else:
-        headline = f"Why {recommendation}?"
-        if len(supporting) >= 2:
-            lines.append(
-                f"{' and '.join(g['label'] for g in supporting)} "
-                f"independently support the same direction."
-            )
-            lines.append(
-                "Agreement across independent groups increases signal "
-                "strength."
-            )
-        elif supporting:
-            lines.append(
-                f"Only {supporting[0]['label']} supports this direction."
-            )
-            lines.append(
-                "A single group is weaker evidence than agreement across "
-                "groups."
-            )
-        if opposing:
-            lines.append(
-                f"{' and '.join(g['label'] for g in opposing)} "
-                f"argue the other way, which lowers signal agreement."
-            )
-
-    for group in conflicted:
-        lines.append(
-            f"Inside {group['label']}, "
-            + " and ".join(
-                f"{m['label']} is {m['direction'].lower()}"
-                for m in group["members"] if m["direction"] in ("BUY", "SELL")
-            )
-            + " - that internal disagreement halves the group's weight."
-        )
-
-    if silent:
-        lines.append(
-            f"{' and '.join(g['label'] for g in silent)} produced no signal, "
-            f"so {'it was' if len(silent) == 1 else 'they were'} not counted."
-        )
-
+def build_explanation(result: QuantitativeSignalResult,
+                      recommendation: str) -> Dict:
+    """The engine's deterministic reasons, with a headline for the UI."""
+    groups = result.group_results
+    supporting = [g.label for g in groups
+                  if g.direction.is_directional
+                  and GROUP_UI_DIRECTION[g.direction] == recommendation]
+    opposing = [g.label for g in groups
+                if g.direction.is_directional
+                and GROUP_UI_DIRECTION[g.direction] != recommendation]
+    silent = [g.label for g in groups
+              if g.direction is GroupDirection.NO_SIGNAL]
     return {
-        "headline": headline,
-        "lines": lines,
-        "supporting_groups": [g["label"] for g in supporting],
-        "opposing_groups": [g["label"] for g in opposing],
-        "silent_groups": [g["label"] for g in silent],
+        "headline": f"Why {recommendation}?",
+        "lines": list(result.reasons),
+        "supporting_groups": supporting,
+        "opposing_groups": opposing,
+        "silent_groups": silent,
     }
 
 
-def build_analysis(symbol: str, quote, daily_closes: List[float],
-                   ml_result: Dict, bollinger: Optional[Dict] = None,
-                   now: Optional[float] = None) -> Dict:
-    """Assemble the structured analysis the review UI consumes."""
-    now = now if now is not None else time.time()
-    indicators = ml_result.get("indicators") or {}
-    groups = (ml_result.get("signals") or {}).get("groups") or {}
-    group_view = build_group_view(groups)
+def build_analysis(result: QuantitativeSignalResult,
+                   quote=None,
+                   market_context: Optional[Dict] = None) -> Dict:
+    """Assemble the payload the review UI consumes.
 
-    recommendation = (ml_result.get("recommendation") or "HOLD").upper()
-    agreement = float(ml_result.get("confidence") or 0.0)
+    `quote` is optional and supplies only presentation fields the engine
+    has no opinion about - the session change and volume. Nothing
+    analytical is taken from it.
+    """
+    recommendation = UI_DIRECTION[result.direction]
+    group_view = build_group_view(result)
 
-    supporting = sum(1 for g in group_view
-                     if g["direction"] == recommendation and g["counted"])
-    opposing = sum(1 for g in group_view
-                   if g["direction"] in ("BUY", "SELL")
-                   and g["direction"] != recommendation and g["counted"])
-    neutral = sum(1 for g in group_view
-                  if g["direction"] in ("NEUTRAL", "NO_SIGNAL"))
-    buy_groups = sum(1 for g in group_view
-                     if g["direction"] == "BUY" and g["counted"])
-    sell_groups = sum(1 for g in group_view
-                      if g["direction"] == "SELL" and g["counted"])
+    buy_groups = result.buy_groups
+    sell_groups = result.sell_groups
+    neutral_or_silent = (result.neutral_groups + result.no_signal_groups
+                         + sum(1 for g in result.group_results
+                               if g.direction is GroupDirection.MIXED))
 
-    provenance = getattr(quote, "provenance", None)
-    age = None
-    if provenance is not None and provenance.retrieved_at is not None:
-        age = max(0.0, now - provenance.retrieved_at)
-
-    if age is None:
-        freshness = "UNKNOWN"
-    elif age <= 300:
-        freshness = "FRESH"
-    elif age <= 1800:
-        freshness = "STALE"
+    if buy_groups == 0 and sell_groups == 0:
+        verdict = "No strong directional signal"
+    elif buy_groups and sell_groups:
+        verdict = "Signals disagree"
+    elif max(buy_groups, sell_groups) >= 2:
+        verdict = "Independent groups agree"
     else:
-        freshness = "MISSING"
+        verdict = "Single group only"
 
     return {
-        "symbol": symbol.upper(),
-        "price": getattr(quote, "price", None),
+        "symbol": result.symbol,
+        "price": _fmt(result.price),
         "change": getattr(quote, "change", None),
         "change_percent": getattr(quote, "change_percent", None),
         "volume": getattr(quote, "volume", None),
         "previous_close": getattr(quote, "previous_close", None),
 
         "recommendation": recommendation,
-        "signal_agreement": round(agreement, 4),
-        "signal_strength": _strength_label(recommendation, agreement,
-                                           supporting, opposing),
+        "signal_agreement": _fmt(result.signal_agreement, 4),
+        "signal_magnitude": _fmt(result.signal_magnitude, 4),
+        "signal_strength": STRENGTH_WORDS[result.strength_band],
         "agreement_meaning": AGREEMENT_MEANING,
+        "magnitude_meaning": MAGNITUDE_MEANING,
 
-        # Counted by DIRECTION, not by "agrees with the recommendation".
-        # On a HOLD, "0 supporting / 2 opposing" is technically true and
-        # useless; what a reader needs is "1 group says BUY, 1 says SELL".
         "agreement_summary": {
             "buy_groups": buy_groups,
             "sell_groups": sell_groups,
-            "neutral_or_silent": neutral,
-            "supporting": supporting,
-            "opposing": opposing,
-            "groups_with_opinion": (ml_result.get("signals") or {}).get("total", 0),
-            "groups_total": len(ALL_GROUPS),
-            "raw_signals_fired": (ml_result.get("signals") or {})
-                                 .get("signals_fired", 0),
-            "verdict": (
-                "No strong directional signal"
-                if buy_groups == 0 and sell_groups == 0
-                else "Signals disagree"
-                if buy_groups and sell_groups
-                else "Independent groups agree"
-                if max(buy_groups, sell_groups) >= 2
-                else "Single group only"
-            ),
+            "neutral_or_silent": neutral_or_silent,
+            "groups_with_opinion": result.opinionated_groups,
+            "groups_total": result.groups_total,
+            "raw_signals_fired": result.indicators_directional,
+            "indicators_evaluated": result.indicators_evaluated,
+            "verdict": verdict,
         },
 
         "groups": group_view,
-        "explanation": explain(recommendation, group_view),
+        "explanation": build_explanation(result, recommendation),
 
         "indicators": {
-            "rsi": _rsi_state(indicators.get("rsi")),
-            "macd": _macd_state(indicators.get("macd"),
-                                indicators.get("macd_signal"),
-                                indicators.get("macd_histogram")),
-            "moving_averages": _moving_averages(
-                getattr(quote, "price", None), indicators.get("sma_20"),
-                indicators.get("sma_50")),
-            "bollinger": _bollinger(getattr(quote, "price", None), bollinger),
-            "momentum_10d": indicators.get("momentum_10d"),
-            "volatility_pct": indicators.get("volatility_pct"),
+            "macd": _macd_block(result),
+            "rsi": _rsi_block(result),
+            "moving_averages": _moving_average_block(result),
+            "bollinger": _bollinger_block(result),
+            "golden_cross": _indicator_block(result, "golden_cross"),
+            "momentum_10d": (result.indicator("momentum_10d").raw_values
+                             .get("momentum_10d_pct")
+                             if result.indicator("momentum_10d") else None),
+            "volatility_pct": None,
         },
 
-        "risk_level": ml_result.get("risk_level"),
+        "market_regime": result.market_regime,
+        "regime_adjustment": _fmt(result.regime_adjustment, 4),
+        "regime_adjusted_magnitude": _fmt(result.regime_adjusted_magnitude, 4),
+        "regime_note": result.regime_note,
+        "market_context": market_context or {},
 
-        "data_quality": {
-            "price_source": (provenance.provider if provenance else "unknown"),
-            "price_as_of": (provenance.as_of if provenance else None),
-            "age_seconds": (None if age is None else round(age, 1)),
-            "freshness": freshness,
-            "is_delayed": (provenance.is_delayed if provenance else None),
-            "feed_note": (provenance.note if provenance else ""),
-            "history_bars": len(daily_closes),
-            # Named separately so the UI never implies one source for
-            # everything.
-            "sources": {
-                "price_and_bars": (provenance.provider if provenance
-                                   else "unknown"),
-                "fundamentals": "alphavantage (not used in this analysis)",
-            },
-        },
-
+        "data_quality": dict(result.data_quality),
+        "warnings": list(result.warnings),
+        "analysis_available": result.analysis_available,
         "execution_available": False,
         "disclaimer": DISCLAIMER,
     }

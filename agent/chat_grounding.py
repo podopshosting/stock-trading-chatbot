@@ -286,6 +286,139 @@ def answer_scanner_question(query: str, run_dict: Optional[Dict]
     return None
 
 
+SIGNAL_UNAVAILABLE = (
+    "I don't have a signal reading for that symbol - the engine has not "
+    "recorded one."
+)
+
+# Ordered most specific first. A generic "why <TICKER>" must be tried
+# LAST or it swallows every other question.
+#
+# `case_sensitive` matters: the ticker pattern is [A-Z]{1,5}, and under
+# IGNORECASE it matched the "is" in "Why is agreement lower?" - so every
+# signal question classified as why_direction and the specific handlers
+# were unreachable.
+_SIGNAL_PATTERNS = [
+    ("macd", r"\bmacd\b", False),
+    ("rsi", r"\brsi\b", False),
+    ("magnitude", r"\bmagnitude\b|\bhow strong\b", False),
+    ("agreement", r"\bagreement\b", False),
+    ("market_support", r"\b(?:market|regime)\b.*\bsupport", False),
+    ("which_disagree",
+     r"\bwhich\s+signals?\b.*\bdisagree|\bwhat\s+disagrees?\b"
+     r"|\bdisagree(?:ment)?\b", False),
+    ("why_direction", r"\bwhy\s+(?:is|was)\b.*\b(buy|sell|hold|neutral)\b",
+     False),
+    # Only the TICKER is case-sensitive; the leading word is not.
+    ("why_direction", r"\b[Ww]hy\s+[A-Z]{2,5}\b", True),
+]
+
+
+def classify_signal_question(query: str) -> Optional[str]:
+    for topic, pattern, case_sensitive in _SIGNAL_PATTERNS:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if re.search(pattern, query or "", flags):
+            return topic
+    return None
+
+
+def answer_signal_question(query: str, result: Optional[Dict]
+                           ) -> Optional[str]:
+    """Answer from a stored signal result, or None to pass it on.
+
+    Deterministic. Every number here was computed by the engine and
+    recorded; routing the question through a model would let it invent a
+    reading, and a fabricated MACD value is indistinguishable from a real
+    one to the reader.
+    """
+    topic = classify_signal_question(query)
+    if topic is None:
+        return None
+    if not result:
+        return SIGNAL_UNAVAILABLE
+
+    symbol = result.get("symbol", "this symbol")
+    direction = result.get("direction", "UNKNOWN")
+    groups = {g.get("group"): g for g in result.get("group_results", [])}
+    indicators = {i.get("indicator"): i
+                  for i in result.get("indicator_results", [])}
+
+    def _group_line(g):
+        label = g.get("label", g.get("group"))
+        note = " (its own members disagree)" if g.get(
+            "internal_disagreement") else ""
+        return f"{label} says {g.get('direction')}{note}"
+
+    if topic == "why_direction":
+        reasons = result.get("reasons") or []
+        head = f"{symbol} is {direction}."
+        if reasons:
+            return head + " " + " ".join(reasons[:3])
+        return head + " No reasons were recorded."
+
+    if topic == "which_disagree":
+        directional = [g for g in groups.values()
+                       if g.get("direction") in ("BUY", "SELL")]
+        conflicted = [g for g in groups.values()
+                      if g.get("internal_disagreement")]
+        parts = []
+        if len({g["direction"] for g in directional}) > 1:
+            parts.append("Across groups: "
+                         + "; ".join(_group_line(g) for g in directional)
+                         + ".")
+        for g in conflicted:
+            members = [m for m in g.get("members", [])
+                       if m.get("direction") in ("BUY", "SELL")]
+            parts.append(
+                f"Inside {g.get('label')}: "
+                + ", ".join(f"{m.get('label')} is {m.get('direction')}"
+                            for m in members) + ".")
+        if not parts:
+            return f"Nothing disagrees for {symbol}: no group opposes another."
+        return " ".join(parts)
+
+    if topic in ("macd", "rsi"):
+        sig = indicators.get(topic)
+        if not sig:
+            return f"I don't have a {topic.upper()} reading for {symbol}."
+        raw = sig.get("raw_values") or {}
+        detail = ", ".join(f"{k}={v}" for k, v in raw.items() if v is not None)
+        return (f"{symbol} {sig.get('label', topic.upper())}: "
+                f"{sig.get('direction')} - {sig.get('reason')}."
+                + (f" Values: {detail}." if detail else ""))
+
+    if topic == "agreement":
+        return (
+            f"{symbol} signal agreement is "
+            f"{result.get('signal_agreement')}. That is how many independent "
+            f"groups concur ({result.get('buy_groups')} buy, "
+            f"{result.get('sell_groups')} sell, "
+            f"{result.get('opinionated_groups')} with an opinion of "
+            f"{result.get('groups_total')}), scaled by whether each group's "
+            f"own members agreed. It is not a probability."
+        )
+
+    if topic == "magnitude":
+        return (
+            f"{symbol} signal magnitude is "
+            f"{result.get('signal_magnitude')} - how far the readings sit "
+            f"beyond their thresholds, normalised for this security's own "
+            f"volatility. That is separate from agreement, and it is not a "
+            f"probability."
+        )
+
+    if topic == "market_support":
+        return (
+            f"The market regime is {result.get('market_regime')}, which "
+            f"scales {symbol}'s magnitude by "
+            f"{result.get('regime_adjustment')} to "
+            f"{result.get('regime_adjusted_magnitude')}. The regime never "
+            f"creates or reverses a direction."
+        )
+
+    return None
+
+
 def answer_from_state(query: str, session_dict: Optional[Dict]) -> Optional[str]:
     """Answer a state question directly, or return None to let chat handle it.
 
