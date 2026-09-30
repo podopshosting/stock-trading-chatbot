@@ -41,6 +41,8 @@ case "$SERVICE_DIR" in
   *chatbot-router) REQUIRED_MODULES=("$ENTRY_MODULE" "ml_agent_lite.py") ;;
   *agent-api)      REQUIRED_MODULES=("$ENTRY_MODULE")
                    REQUIRED_PACKAGES=("agent") ;;
+  *agent-scanner)  REQUIRED_MODULES=("$ENTRY_MODULE")
+                   REQUIRED_PACKAGES=("agent") ;;
   *)               REQUIRED_MODULES=("$ENTRY_MODULE") ;;
 esac
 

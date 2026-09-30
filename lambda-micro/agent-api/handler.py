@@ -26,6 +26,7 @@ from agent.config import AgentConfig
 from agent.market import MarketRegimeService, MarketSessionService
 from agent.observability import log_event
 from agent.providers import AlpacaProvider, CachedProvider, MemoryCache
+from agent.scanner import DynamoDBScannerStore
 from agent.state import (
     AgentState, AgentStateService, DynamoDBStateStore, MarketSession,
 )
@@ -72,6 +73,12 @@ def _provider():
         )
         _PROVIDER = (inner, CachedProvider(inner, backend=MemoryCache()))
     return _PROVIDER
+
+
+def _scanner_store():
+    cfg = _config()
+    return DynamoDBScannerStore(table_name=cfg.storage.scanner_table,
+                                region=cfg.storage.region)
 
 
 def _state_service() -> AgentStateService:
@@ -248,10 +255,141 @@ def handle_evaluate(event) -> Dict:
     })
 
 
+def _query(event) -> Dict[str, str]:
+    return dict(event.get("queryStringParameters") or {})
+
+
+def _int_param(params: Dict, name: str, default: int, cap: int) -> int:
+    try:
+        return max(1, min(cap, int(params.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_param(params: Dict, name: str) -> Optional[float]:
+    try:
+        return float(params[name])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _run_summary(run) -> Dict:
+    d = run.as_dict(include_candidates=False)
+    return {
+        **d,
+        "candidates": [c.as_dict() for c in run.candidates],
+    }
+
+
+def handle_scanner_latest(event) -> Dict:
+    """Most recent scan for the current session. Read-only: no quota."""
+    params = _query(event)
+    limit = _int_param(params, "limit", 10, 100)
+    store = _scanner_store()
+    try:
+        run = store.latest_run(params.get("session_date"))
+    except Exception as e:
+        return _response(503, {"error": "scanner store unavailable",
+                               "detail": type(e).__name__})
+    if run is None:
+        return _response(200, {
+            "found": False,
+            "message": ("no scanner run recorded yet for this session; the "
+                        "scheduled scanner runs during market hours"),
+        })
+    payload = _run_summary(run)
+    payload["candidates"] = payload["candidates"][:limit]
+    payload["found"] = True
+    return _response(200, payload)
+
+
+def handle_scanner_run(event) -> Dict:
+    run_id = (event.get("pathParameters") or {}).get("id") or \
+        _query(event).get("run_id")
+    if not run_id:
+        return _response(400, {"error": "run id required"})
+    try:
+        run = _scanner_store().get_run(run_id)
+    except Exception as e:
+        return _response(503, {"error": "scanner store unavailable",
+                               "detail": type(e).__name__})
+    if run is None:
+        return _response(404, {"error": "not found", "scanner_run_id": run_id})
+    return _response(200, _run_summary(run))
+
+
+def handle_candidates(event) -> Dict:
+    """Ranked candidates from the latest scan, optionally filtered.
+
+    These are research priorities. They are not recommendations, and the
+    response says so rather than leaving it to the caller to assume.
+    """
+    params = _query(event)
+    limit = _int_param(params, "limit", 25, 100)
+    min_score = _float_param(params, "min_score")
+    symbol = (params.get("symbol") or "").upper() or None
+
+    store = _scanner_store()
+    try:
+        run = (store.get_run(params["run_id"]) if params.get("run_id")
+               else store.latest_run())
+    except Exception as e:
+        return _response(503, {"error": "scanner store unavailable",
+                               "detail": type(e).__name__})
+    if run is None:
+        return _response(200, {"found": False, "candidates": []})
+
+    candidates = [c.as_dict() for c in run.candidates]
+    if symbol:
+        candidates = [c for c in candidates if c["symbol"] == symbol]
+    if min_score is not None:
+        candidates = [c for c in candidates
+                      if c["scanner_score"] >= min_score]
+
+    return _response(200, {
+        "found": True,
+        "scanner_run_id": run.scanner_run_id,
+        "session_date": run.session_date,
+        "market_regime": run.market_regime,
+        "regime_confidence": round(run.regime_confidence, 4),
+        "risk_posture": run.risk_posture,
+        "execution_available": False,
+        "score_meaning": (
+            "research priority only: which symbols merit a closer look. "
+            "NOT an expected return, a forecast, or a recommendation."
+        ),
+        "count": len(candidates[:limit]),
+        "candidates": candidates[:limit],
+    })
+
+
+def handle_candidate_symbol(event) -> Dict:
+    symbol = ((event.get("pathParameters") or {}).get("symbol")
+              or _query(event).get("symbol") or "").upper()
+    if not symbol:
+        return _response(400, {"error": "symbol required"})
+    limit = _int_param(_query(event), "limit", 20, 100)
+    try:
+        history = _scanner_store().candidates_for_symbol(symbol, limit=limit)
+    except Exception as e:
+        return _response(503, {"error": "scanner store unavailable",
+                               "detail": type(e).__name__})
+    return _response(200, {
+        "symbol": symbol,
+        "count": len(history),
+        "execution_available": False,
+        "history": history,
+    })
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
     ("POST", "/agent/regime/evaluate"): handle_evaluate,
+    ("GET", "/agent/scanner/latest"): handle_scanner_latest,
+    ("GET", "/agent/scanner/run"): handle_scanner_run,
+    ("GET", "/agent/candidates"): handle_candidates,
+    ("GET", "/agent/candidate"): handle_candidate_symbol,
 }
 
 

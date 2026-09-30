@@ -210,7 +210,7 @@ table.
 |---|---|---|---|
 | `stock-agent-dev-cache` | `cache_key` | provider response cache | `expires_at` |
 | `stock-agent-dev-state` | `session_date` | agent state, regime, kill switches (**created**, optimistic concurrency on `revision`) | — |
-| `stock-agent-dev-candidates` | `session_date` / `ts#symbol` | scanner output | 30d |
+| `stock-agent-dev-scanner` | `RUN#<id>` / `META` \| `CANDIDATE#<rank>#<sym>` | scanner runs + candidates (**created**) | — |
 | `stock-agent-dev-evidence` | `symbol` / `ts#source#id` | evidence with provenance | 180d |
 | `stock-agent-dev-decisions` | `session_date` / `ts#id` | hypotheses + risk verdicts, **including rejections** | — |
 | `stock-agent-dev-orders` | `order_id` | paper orders and fills | — |
@@ -364,7 +364,7 @@ record and reviewed before any live phase.
 | 1 | Recovery baseline preserved | — | existing suite | ✅ pushed + tagged `recovery-2026-09-30` |
 | 2 | Provider abstraction + cache | 1 | 33 offline tests | ✅ quota reduction demonstrated |
 | 3 | Agent state + market regime | 2 | 89 tests: state machine, session, regime, API | ✅ regime computed from live data and persisted; `/agent/status` + `/agent/market-regime` live |
-| 4 | Universe + scanner | 3 | illiquid rejected; missing data safe; stale recognised | ranked candidates on a schedule |
+| 4 | Universe + scanner | 3 | 93 tests + 9 negative controls | ✅ ranked candidates on a 5-min schedule; 14,388 assets -> 25 candidates in ~22 requests. See `MARKET-SCANNER.md` |
 | 5 | Signal engine | 4 | known-value indicator tests; no lookahead; correlation groups honoured | deterministic signal set per candidate |
 | 6 | Evidence model + SEC/news connectors | 4 | provenance retained; duplicates collapsed; source outage graceful | evidence attached to candidates |
 | 7 | Trade hypothesis | 5, 6 | hypothesis only when both signal and evidence qualify | hypotheses produced and journalled |
@@ -441,3 +441,52 @@ the batch snapshot endpoint, and "at VWAP" was being scored as "above
 VWAP". A third — the packaging import check passing on an artifact with
 the `agent` package missing entirely — was found by a falsifying control
 and is described in this file's §3 companion, `PRODUCTION-STATE.md` §3.
+
+
+---
+
+## 15. Milestone 4 as built
+
+The scanner sits between the regime engine and the future Signal Engine:
+
+```
+MarketSessionService ─┐
+                      ├─▶ ScanContext ─▶ MarketScannerService ─▶ ScannerRun
+MarketRegimeService ──┘                        │                    │
+                                               │                    ▼
+                          AlpacaUniverseProvider              DynamoDBScannerStore
+                                               │
+                                     static ─▶ snapshot ─▶ dynamic ─▶ shortlist
+                                     ─▶ features ─▶ score ─▶ regime gate ─▶ rank
+```
+
+**Candidates are not trade hypotheses.** A `Candidate` has no side, entry,
+target or stop; a test asserts that the serialised form carries none of
+them, and another asserts `agent/scanner/` never references
+`submit_order`, `BrokerAdapter`, `place_order`, `create_order` or
+`PaperBroker`. Milestone 4 ends strictly before the Signal Engine.
+
+Deviations worth recording:
+
+**One scanner table, not two.** Runs and candidates share
+`stock-agent-dev-scanner` under one partition per run, so a run and its
+ranking are read together and cannot diverge.
+
+**Manual scan triggering was not exposed.** `POST /agent/scanner/run` is
+absent rather than present-and-disabled: the scanner is reachable by its
+schedule or with AWS credentials, and an unauthenticated endpoint that
+spends market-data quota is an obvious way to drain the budget.
+
+**The regime gate tightens, never reverses.** Every regime including
+`STRONG_BEARISH` produces long-side research only, with a higher bar.
+`UNKNOWN` is treated as hostile rather than calm.
+
+**Relative volume states its denominator** instead of claiming a quantity
+it does not compute. See `MARKET-SCANNER.md` §5.
+
+Five defects were found by running against the live market, not by unit
+tests: a 100-symbol provider chunk that inflated 13 requests into 125, a
+`provider_calls` counter that reported 18 against 161 actual, cache
+accounting counted per symbol, an intraday bar window that silently lost
+5m/15m/30m returns for 24 of 25 candidates, and an inverse ETF
+(ProShares Short Russell2000) reaching the top 5 of a long-only funnel.

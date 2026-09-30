@@ -20,11 +20,34 @@ from typing import Dict, List, Optional
 UNAVAILABLE = "I don't have that yet - the agent has not recorded it."
 
 # Questions answerable from stored state alone, with no model call.
+#
+# Two things about this table are load-bearing:
+#
+# 1. **Order matters** - the first match wins. The specific scanner
+#    questions come first, because "what regime was used for the scan?"
+#    would otherwise be caught by the bare \bregime\b pattern and answered
+#    with current state instead of the scan's recorded gate.
+#
+# 2. **Every pattern is matched against LOWERCASED text**, so none may
+#    depend on capital letters. An earlier [A-Z]{1,5} ticker pattern could
+#    never fire for exactly that reason.
 _PATTERNS = [
+    # --- scanner (specific before general) ---
+    ("scan_regime", r"\bregime\b.*\b(used|scan)\b"),
+    ("scan_regime", r"\bscan\b.*\bregime\b"),
+    ("scan_counts", r"\bhow many\b.*\b(symbol|stock|securit|asset)"),
+    ("scan_counts", r"\b(scanned|scanner)\b.*\b(how many|count|universe)\b"),
+    ("why_rejected", r"\bwhy\b.*\b(rejected|excluded|filtered out|not eligible)\b"),
+    ("why_rejected", r"\b(was|were)\b.*\brejected\b"),
+    ("why_symbol", r"\bwhy\b.*\b(on the list|a candidate|in the scan|ranked|listed)\b"),
+    ("watching", r"\bwhat\b.*\bwatching\b"),
+    ("watching", r"\b(top|best)\b.*\bcandidates?\b"),
+    ("watching", r"\bcandidates?\b"),
+    # --- agent and market state ---
     ("market_open", r"\b(is|are)\b.*\bmarket\b.*\b(open|closed|trading)\b"),
     ("market_open", r"\bmarket\s+(open|closed|status|session)\b"),
+    ("regime_why", r"\bwhy\b.*\b(bullish|bearish|neutral|mixed|volatile)\b"),
     ("regime", r"\b(market\s+)?regime\b"),
-    ("regime_why", r"\bwhy\b.*\b(bullish|bearish|neutral|mixed|volatile|regime)\b"),
     ("agent_state", r"\bwhat\b.*\b(are you doing|agent.*doing|state)\b"),
     ("agent_state", r"\bagent\s+(state|status)\b"),
     ("freshness", r"\b(how\s+)?(fresh|stale|old|current)\b.*\bdata\b"),
@@ -120,6 +143,147 @@ def build_context(session_dict: Optional[Dict]) -> str:
         "as placing trades."
     )
     return "\n".join(lines)
+
+
+SCANNER_UNAVAILABLE = (
+    "I don't have a scanner run to describe yet - none has been recorded "
+    "for this session."
+)
+
+
+def _symbol_in(query: str) -> Optional[str]:
+    """Pull a plausible ticker out of the question."""
+    for token in re.findall(r"\b[A-Z]{1,5}\b", query or ""):
+        if token not in ("I", "A", "WHY", "WHAT", "IS", "WAS", "THE", "ON",
+                         "NOT", "HOW", "MANY", "AND", "OR", "DID", "DO"):
+            return token
+    return None
+
+
+def answer_scanner_question(query: str, run_dict: Optional[Dict]
+                            ) -> Optional[str]:
+    """Answer a scanner question from a stored run, or None to pass it on.
+
+    Deterministic: these are facts the scanner recorded. Routing them
+    through a model would add a fabrication risk and buy nothing.
+
+    Every answer states that a candidate is a research priority, because a
+    ranked list of tickers invites being read as a buy list.
+    """
+    topic = classify_question(query)
+    if topic not in ("watching", "why_symbol", "why_rejected", "scan_counts",
+                     "scan_regime"):
+        return None
+    if not run_dict:
+        return SCANNER_UNAVAILABLE
+
+    candidates = run_dict.get("candidates") or []
+    disclaimer = ("These are research priorities - symbols worth a closer "
+                  "look - not recommendations. This build cannot place "
+                  "orders.")
+
+    if topic == "watching":
+        if not candidates:
+            return (f"Nothing is on the list right now. The last scan "
+                    f"({run_dict.get('status')}) produced no candidates. "
+                    f"{disclaimer}")
+        lines = []
+        for cand in candidates[:10]:
+            feat = cand.get("features") or {}
+            change = feat.get("session_change_pct")
+            lines.append(
+                f"  {cand.get('rank')}. {cand.get('symbol')} "
+                f"${cand.get('price')} "
+                f"({change:+.2f}% today) score {cand.get('scanner_score')}"
+                if isinstance(change, (int, float)) else
+                f"  {cand.get('rank')}. {cand.get('symbol')} "
+                f"${cand.get('price')} score {cand.get('scanner_score')}"
+            )
+        return (
+            f"Watching {len(candidates)} symbols from the scan at "
+            f"{run_dict.get('completed_at')}, under regime "
+            f"{run_dict.get('market_regime')}:\n" + "\n".join(lines)
+            + f"\n{disclaimer}"
+        )
+
+    if topic == "why_symbol":
+        symbol = _symbol_in(query)
+        if not symbol:
+            return "Which symbol did you mean?"
+        match = next((c for c in candidates
+                      if c.get("symbol") == symbol), None)
+        if match is None:
+            rejected = [r for r in (run_dict.get("rejection_samples") or [])
+                        if r.get("symbol") == symbol]
+            if rejected:
+                return (f"{symbol} was not a candidate. It was rejected at "
+                        f"the {rejected[0].get('stage')} stage: "
+                        f"{', '.join(rejected[0].get('reasons', []))}.")
+            return (f"{symbol} was not in the last scan's candidates, and I "
+                    f"have no recorded rejection reason for it.")
+        feat = match.get("features") or {}
+        parts = [f"{symbol} ranked {match.get('rank')} with score "
+                 f"{match.get('scanner_score')} because:"]
+        for reason in match.get("reasons", []):
+            parts.append(f"  - {reason}")
+        parts.append(
+            f"  measured: spread {match.get('spread_pct')}%, "
+            f"session {feat.get('session_change_pct')}%, "
+            f"15m {feat.get('return_15m')}%, "
+            f"relative volume {feat.get('relative_volume')}, "
+            f"VWAP distance {feat.get('distance_from_vwap_pct')}%"
+        )
+        for warning in match.get("warnings", []):
+            parts.append(f"  warning: {warning}")
+        parts.append(disclaimer)
+        return "\n".join(parts)
+
+    if topic == "why_rejected":
+        symbol = _symbol_in(query)
+        samples = run_dict.get("rejection_samples") or []
+        if symbol:
+            match = next((r for r in samples
+                          if r.get("symbol") == symbol), None)
+            if match:
+                return (f"{symbol} was rejected at the "
+                        f"{match.get('stage')} stage: "
+                        f"{', '.join(match.get('reasons', []))}.")
+            return (f"I have no recorded rejection reason for {symbol}. Only "
+                    f"a bounded sample of rejections is kept per run, "
+                    f"alongside the full reason counts.")
+        counts = run_dict.get("rejection_reason_counts") or {}
+        if not counts:
+            return "No rejections were recorded in the last scan."
+        top = sorted(counts.items(), key=lambda kv: -kv[1])[:6]
+        body = "\n".join(f"  {count:,} x {reason}" for reason, count in top)
+        return (f"The last scan rejected "
+                f"{run_dict.get('rejected_count', 0):,} symbols. "
+                f"Most common reasons:\n{body}")
+
+    if topic == "scan_counts":
+        return (
+            f"The last scan looked at {run_dict.get('universe_count', 0):,} "
+            f"assets: {run_dict.get('static_eligible_count', 0):,} passed the "
+            f"static filters, {run_dict.get('dynamic_eligible_count', 0):,} "
+            f"passed the liquidity and freshness filters, "
+            f"{run_dict.get('shortlist_count', 0):,} reached the shortlist, "
+            f"and {run_dict.get('candidate_count', 0)} became candidates. "
+            f"It used {run_dict.get('provider_calls', 0)} provider requests "
+            f"in {run_dict.get('duration_seconds')}s."
+        )
+
+    if topic == "scan_regime":
+        gate = run_dict.get("regime_gate") or {}
+        return (
+            f"The scan ran under regime {run_dict.get('market_regime')} "
+            f"(confidence {run_dict.get('regime_confidence')}, posture "
+            f"{run_dict.get('risk_posture')}). That gate required a minimum "
+            f"score of {gate.get('min_score')} and applied a spread "
+            f"multiplier of {gate.get('spread_multiplier')}."
+            + (f" {gate.get('warning')}" if gate.get("warning") else "")
+        )
+
+    return None
 
 
 def answer_from_state(query: str, session_dict: Optional[Dict]) -> Optional[str]:
