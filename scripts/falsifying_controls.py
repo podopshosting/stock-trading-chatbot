@@ -53,10 +53,15 @@ BRK_PAPER = REPO / "agent" / "broker" / "paper.py"
 BRK_EXEC = REPO / "agent" / "broker" / "execution.py"
 BRK_MODELS = REPO / "agent" / "broker" / "models.py"
 
+POS_MODELS = REPO / "agent" / "positions" / "models.py"
+POS_EXITS = REPO / "agent" / "positions" / "exits.py"
+POS_MANAGER = REPO / "agent" / "positions" / "manager.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
-          "tests.test_risk", "tests.test_broker"]
+          "tests.test_risk", "tests.test_broker",
+          "tests.test_positions"]
 
 
 @dataclass
@@ -493,6 +498,122 @@ MUTATIONS = [
         old='    LIMIT = "LIMIT"',
         new='    MARKET = "MARKET"  # MUTATION\n    LIMIT = "LIMIT"',
         expect=["MARKET", "order_types"],
+    ),
+    # --- Milestone 10: positions and exits -------------------------------
+    Mutation(
+        name="allow-widening-a-stop",
+        description="let a stop be moved away from price to avoid a loss",
+        path=POS_MODELS,
+        old="        if new_stop < self.plan.stop_price:",
+        new="        if False:  # MUTATION",
+        expect=["widen", "stop"],
+    ),
+    Mutation(
+        name="hold-when-price-is-unknown",
+        description="hold an open position that cannot be priced",
+        path=POS_EXITS,
+        old="    if price is None or stale:",
+        new="    if False:  # MUTATION",
+        expect=["price", "stale", "exit", "hold"],
+    ),
+    Mutation(
+        name="trust-a-stale-quote",
+        description="evaluate a stop against a quote of any age",
+        path=POS_EXITS,
+        old="    stale = (context.quote_age_seconds is not None\n"
+            "             and context.quote_age_seconds > MAX_QUOTE_AGE_SECONDS)",
+        new="    stale = False  # MUTATION",
+        expect=["stale", "quote"],
+    ),
+    Mutation(
+        name="let-the-high-water-mark-retreat",
+        description="track the latest price instead of the best",
+        path=POS_EXITS,
+        old="    if position.high_water_price is None or price > position.high_water_price:",
+        new="    if True:  # MUTATION",
+        expect=["high_water", "retreat", "trail"],
+    ),
+    Mutation(
+        name="trail-from-the-first-tick",
+        description="remove the trailing activation threshold",
+        path=POS_EXITS,
+        old="    if gain_pct < TRAILING_ACTIVATION_PCT:",
+        new="    if False:  # MUTATION",
+        expect=["trail", "inactive", "earned", "activat"],
+    ),
+    Mutation(
+        name="let-the-trail-loosen-a-tighter-stop",
+        description="apply the trailing level even when it is wider",
+        path=POS_EXITS,
+        old="    if level is None or level <= position.plan.stop_price:",
+        new="    if level is None:  # MUTATION",
+        expect=["loosen", "tighter", "widen", "trail"],
+    ),
+    Mutation(
+        name="ignore-a-global-halt-for-open-positions",
+        description="keep positions open through a global halt",
+        path=POS_EXITS,
+        old="    if context.global_halt:",
+        new="    if False:  # MUTATION",
+        expect=["halt"],
+    ),
+    Mutation(
+        name="assume-not-halted-when-unreadable",
+        description="treat an unreadable halt state as safe",
+        path=POS_EXITS,
+        old="    elif not context.halt_state_readable:",
+        new="    elif False:  # MUTATION",
+        expect=["halt", "unreadable", "readable"],
+    ),
+    Mutation(
+        name="skip-the-end-of-day-flatten",
+        description="carry positions overnight",
+        path=POS_EXITS,
+        old="    if (flatten_at is not None and context.minutes_to_close is not None",
+        new="    if (False and flatten_at is not None  # MUTATION",
+        expect=["close", "END_OF_DAY", "overnight"],
+    ),
+    Mutation(
+        name="pick-an-arbitrary-primary-reason",
+        description="return the first reason found rather than the most protective",
+        path=POS_EXITS,
+        old="    for reason in EXIT_PRIORITY:\n"
+            "        if reason in reasons:\n"
+            "            return reason",
+        new="    return reasons[0]  # MUTATION",
+        expect=["primary", "protective", "priority"],
+    ),
+    Mutation(
+        name="reconcile-optimistically",
+        description="report a match whenever the broker can be read",
+        path=POS_MANAGER,
+        old="        matched = not (agent_only or broker_only or mismatches)",
+        new="        matched = True  # MUTATION",
+        expect=["match", "reconcil", "halt", "diverg"],
+    ),
+    Mutation(
+        name="leave-the-entry-remainder-working",
+        description="manage a partial entry without cancelling the rest",
+        path=POS_MANAGER,
+        old='        remaining = order.get("remaining_quantity") or 0.0',
+        new="        remaining = 0.0  # MUTATION",
+        expect=["remainder", "cancel", "partial"],
+    ),
+    Mutation(
+        name="submit-exits-with-execution-unavailable",
+        description="ignore the kill switch when closing a position",
+        path=POS_MANAGER,
+        old="        if not self.execution_available:",
+        new="        if False:  # MUTATION",
+        expect=["execution_available", "risk", "unavail"],
+    ),
+    Mutation(
+        name="manage-a-position-with-a-stop-above-entry",
+        description="accept a stop that is not below the entry price",
+        path=POS_MANAGER,
+        old="        if plan.stop_price >= price:",
+        new="        if False:  # MUTATION",
+        expect=["stop", "entry", "below"],
     ),
 ]
 

@@ -87,6 +87,16 @@ EVENTS = frozenset({
     "position_opened",
     "position_reduced",
     "position_closed",
+    # position management / exits
+    "entry_remainder_cancelled",
+    "stop_tightened",
+    "exit_intent",
+    "exit_submitted",
+    "exit_blocked_execution_unavailable",
+    "position_closed_managed",
+    "flatten_all",
+    "reconciliation",
+    "position_manager_halted",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")
