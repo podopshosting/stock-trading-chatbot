@@ -1,56 +1,81 @@
 # SECURITY_ACTION_REQUIRED
 
-**Status: OPEN — awaiting a replacement credential from the account owner.**
-Opened 2026-09-30. This file stays until the item is closed.
+**Status: PARTIALLY CLOSED — one step remains, and it needs the account owner.**
+Opened 2026-09-30. Rotated 2026-09-30. This file stays until the last item is done.
 
 ---
 
-## Alpha Vantage API key must be rotated
+## Alpha Vantage API key
 
-**What happened.** The live Alpha Vantage API key was committed in plaintext
-to three Markdown files and pushed to GitHub. It is present in public git
-history in commits `9a075ed`, `96ade16` and `4586d28`.
+### What happened
 
-**Why redaction was not enough.** The working tree was redacted in commit
-`4ae017a`, but the key remains reachable in history, and anything pushed to a
-public remote should be assumed captured. Rewriting history would not undo
-that either.
+The live Alpha Vantage API key was committed in plaintext to three Markdown
+files and pushed to GitHub. It is present in public git history in commits
+`9a075ed`, `96ade16` and `4586d28`. Anything pushed to a public remote should
+be assumed captured, and rewriting history would not undo that.
 
-**Therefore the key is compromised and must be replaced.**
+### DONE — production rotated off the exposed key
 
-## Why this is not blocking development
+A replacement key was supplied by the account owner and installed:
 
-The key still works and remains in AWS Secrets Manager at
-`stock-chatbot/alphavantage-api-key`. Production and Phase 1 development both
-continue. The exposure is a real but bounded risk: the key grants access to a
-free-tier market data account with a 25 request/day quota. It carries no
-funds, no personal data and no write access to anything.
+- `stock-chatbot/alphavantage-api-key` now holds the new key
+  (verified by fingerprint, `AWSCURRENT`)
+- the previous value is retained as `AWSPREVIOUS` for rollback
+- production verified end to end after rotation: a stock query through
+  API Gateway returned a live quote with the ML layer running
+- nothing this project runs uses the exposed key any more
 
-The practical damage is quota theft — someone else spending the daily budget,
-which would surface as the application being rate limited.
+### STILL OPEN — the exposed key is still active
 
-## What the account owner needs to do
+**Verified on 2026-09-30: the old key continues to return data.** Rotation
+moved us off it; it did not disable it.
 
-1. Sign in to the Alpha Vantage account and issue a new API key.
-2. Provide it through a private channel — **never** in a commit, an issue, a
-   document or a chat transcript.
+Alpha Vantage provides no self-service way to revoke a key. Their guidance is
+to tell them:
 
-## What happens then (no owner action needed)
+> If you suspect that your API key has been compromised at any point, you
+> should let Alpha Vantage know and they will take actions accordingly.
+> — <https://www.alphavantage.co/support/>
 
-3. Update the secret:
-   ```bash
-   AWS_PROFILE=mypodops aws secretsmanager put-secret-value \
-     --secret-id stock-chatbot/alphavantage-api-key \
-     --secret-string '<new key>' --region us-east-2
-   ```
-4. Verify production still answers a stock query end to end.
-5. Revoke or abandon the old key if Alpha Vantage supports it.
-6. Delete this file and note the rotation in `PRODUCTION-STATE.md`.
+**Remaining step (account owner):** contact Alpha Vantage support, say the key
+was exposed in a public repository, and ask them to revoke it. One message.
+**Do not paste the key into the support form or anywhere else** — describe it
+as "a free-tier key issued to this account, exposed publicly, please revoke"
+and let them identify it from the account.
 
-## Rules that stay in force regardless
+### How much this actually matters now
+
+Low, and bounded. The exposed key grants a free-tier market data account: 25
+requests/day, no funds, no personal data, no write access anywhere. Nothing
+depends on it, so the realistic harm is a stranger consuming a quota we no
+longer use.
+
+The reason to finish the job anyway is that the key is registered to the
+owner's Alpha Vantage account, so its usage is attributable to them.
+
+---
+
+## Credentials shared in chat transcripts
+
+Two credentials were pasted into a session transcript during this work: the
+Alpaca account password and the replacement Alpha Vantage key.
+
+- **The Alpaca password should be changed**, and urgently if it is reused on
+  any other service. The paper account holds no real money, so reuse
+  elsewhere is the real exposure, not the account itself.
+- The replacement Alpha Vantage key is free-tier and bounded as described
+  above, but it is now in a transcript. Treat it as public. If it is ever
+  swapped again, prefer a channel that is not a chat log.
+
+Neither value is written anywhere in this repository.
+
+---
+
+## Rules that stay in force
 
 - No credential is ever written to a file in this repository.
-- Both keys are read at runtime from AWS Secrets Manager.
+- Every key is read at runtime from AWS Secrets Manager.
+- Alpaca paper keys live at `stock-agent/alpaca-paper`.
 - The OpenAI key was checked and is **not** present in the repository or its
   history.
 - No secret value appears in this file, and none should be added to it.
