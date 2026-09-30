@@ -100,6 +100,12 @@ EVENTS = frozenset({
     # journal
     "trade_recorded",
     "stop_breach_recorded",
+    # replay
+    "replay_entry_filled",
+    "replay_exit_filled",
+    "replay_order_unfillable",
+    "replay_lookahead_detected",
+    "replay_complete",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")

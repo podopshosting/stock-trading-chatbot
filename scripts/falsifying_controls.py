@@ -62,11 +62,17 @@ JNL_METRICS = REPO / "agent" / "journal" / "metrics.py"
 JNL_STORE = REPO / "agent" / "journal" / "store.py"
 JNL_RECORDER = REPO / "agent" / "journal" / "recorder.py"
 
+RPL_CLOCK = REPO / "agent" / "replay" / "clock.py"
+RPL_DATA = REPO / "agent" / "replay" / "data.py"
+RPL_BROKER = REPO / "agent" / "replay" / "broker.py"
+RPL_ENGINE = REPO / "agent" / "replay" / "engine.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
           "tests.test_risk", "tests.test_broker",
-          "tests.test_positions", "tests.test_journal"]
+          "tests.test_positions", "tests.test_journal",
+          "tests.test_replay"]
 
 
 @dataclass
@@ -737,6 +743,122 @@ MUTATIONS = [
         old="        return r < -1.0",
         new="        return False  # MUTATION",
         expect=["breach", "stop", "planned risk", "1R"],
+    ),
+    # --- Milestone 12: replay and lookahead ------------------------------
+    Mutation(
+        name="let-the-clock-go-backwards",
+        description="allow a replay to rewind and re-decide",
+        path=RPL_CLOCK,
+        old="        if index <= self._index:",
+        new="        if False:  # MUTATION",
+        expect=["forward", "rewind", "clock"],
+    ),
+    Mutation(
+        name="allow-reading-future-bars",
+        description="drop the index-based lookahead guard",
+        path=RPL_CLOCK,
+        old="        if index > self._index:",
+        new="        if False:  # MUTATION",
+        expect=["future", "lookahead", "visible"],
+    ),
+    Mutation(
+        name="allow-reading-future-timestamps",
+        description="drop the time-based lookahead guard",
+        path=RPL_CLOCK,
+        old="        if timestamp > self._timestamp:",
+        new="        if False:  # MUTATION",
+        expect=["future", "lookahead", "dated"],
+    ),
+    Mutation(
+        name="treat-undated-evidence-as-visible",
+        description="show evidence whose publication time is unknown",
+        path=RPL_CLOCK,
+        old="        if timestamp is None:\n            return False",
+        new="        if timestamp is None:\n            return True  # MUTATION",
+        expect=["undated", "visible", "publication"],
+    ),
+    Mutation(
+        name="include-the-next-bar-in-the-history",
+        description="let the signal engine see one bar into the future",
+        path=RPL_DATA,
+        old="        end = min(self._clock.index + 1, len(self._bars))\n"
+            "        window = self._bars[:end]\n"
+            "        if lookback is not None:\n"
+            "            window = window[-lookback:]\n"
+            "        return [b.close for b in window]",
+        new="        window = self._bars[:self._clock.index + 2]  # MUTATION\n"
+            "        if lookback is not None:\n"
+            "            window = window[-lookback:]\n"
+            "        return [b.close for b in window]",
+        expect=["closes", "current bar", "future"],
+    ),
+    Mutation(
+        name="accept-unsorted-bars",
+        description="skip the chronological ordering check",
+        path=RPL_DATA,
+        old="            if later.timestamp <= earlier.timestamp:",
+        new="            if False:  # MUTATION",
+        expect=["order", "increasing", "chronolog"],
+    ),
+    Mutation(
+        name="invent-a-fill-on-the-final-bar",
+        description="fill an order that had no next bar to trade against",
+        path=RPL_DATA,
+        old="        nxt = self._clock.index + 1\n"
+            "        if nxt >= len(self._bars):\n"
+            "            return None\n"
+            "        return self._bars[nxt].open",
+        new="        nxt = min(self._clock.index + 1, len(self._bars) - 1)  # MUTATION\n"
+            "        return self._bars[nxt].open",
+        expect=["final bar", "NO_NEXT_BAR", "invent", "unfillable"],
+    ),
+    Mutation(
+        name="fill-entries-at-the-deciding-close",
+        description="use the price the decision was made on as the fill price",
+        path=RPL_BROKER,
+        old="        fill_price = series.next_open()",
+        new="        fill_price = series.current().close  # MUTATION",
+        expect=["next open", "close", "fill"],
+    ),
+    Mutation(
+        name="fill-every-stop-exactly-at-its-level",
+        description="ignore gaps so losses are never worse than planned",
+        path=RPL_BROKER,
+        old="                fill_price = min(stop_price, nxt[\"open\"])",
+        new="                fill_price = stop_price  # MUTATION",
+        expect=["gap", "stop", "worse"],
+    ),
+    Mutation(
+        name="decide-during-the-warmup",
+        description="take trades before the indicators have history",
+        path=RPL_ENGINE,
+        old="            if index < config.warmup_bars:",
+        new="            if False:  # MUTATION",
+        expect=["warmup", "decision"],
+    ),
+    Mutation(
+        name="silently-default-a-permissive-regime",
+        description="manufacture trades by relaxing the risk posture",
+        path=RPL_ENGINE,
+        old="    if regime_for is None:",
+        new="    if False:  # MUTATION",
+        expect=["regime", "failed closed", "warn"],
+    ),
+    Mutation(
+        name="report-a-lookahead-run-as-valid",
+        description="return a contaminated result without marking it void",
+        path=RPL_ENGINE,
+        old="        return not self.lookahead_detected",
+        new="        return True  # MUTATION",
+        expect=["valid", "void", "lookahead"],
+    ),
+    Mutation(
+        name="drop-the-end-of-data-flatten",
+        description="leave open positions out of the results",
+        path=RPL_ENGINE,
+        old="        _flatten_at_end(manager, series, journal, entry_orders, config, stats)",
+        new="        pass  # MUTATION",
+        expect=["end of data", "survive", "exits_filled", "open"],
     ),
 ]
 
