@@ -157,8 +157,8 @@ are exercised continuously rather than first tested with real money.
 
 | Component | Reason |
 |---|---|
-| `MLTradingAgent.analyze_stock` vote aggregation | **measured defect — see §5** |
-| `calculate_macd` signal line | `signal = macd * 0.9` is not a 9-period EMA; carries no crossover information |
+| ~~`MLTradingAgent.analyze_stock` vote aggregation~~ | **FIXED 2026-09-30** — see §5 |
+| ~~`calculate_macd` signal line~~ | **FIXED 2026-09-30** — see §5 |
 | `extract_stock_symbols` | naive; *"Explain dollar cost averaging"* resolves to **COST** (Costco) and fetches real quote data for a general question |
 | Request-driven analysis model | the agent must scan on a schedule, not wait for `POST /chatbot` |
 
@@ -172,7 +172,7 @@ are exercised continuously rather than first tested with real money.
 
 ---
 
-## 5. Measured defect in the inherited scoring
+## 5. Measured defect in the inherited scoring — FIXED 2026-09-30
 
 The existing `analyze_stock` treats its six signals as independent votes and
 averages their confidences. Two of them are not independent.
@@ -195,9 +195,32 @@ signal instead of adding crossover information.
 two confidences derived from *one* underlying observation, counted twice. It
 is not a probability and must never be used for position sizing.
 
-**Design rule carried forward:** the signal engine declares a correlation
-group per signal, and the aggregator counts correlated signals once. The
-number that reaches the Risk Governor must mean something.
+### Both defects are now fixed in production
+
+`calculate_macd` computes a real 9-period EMA of the MACD line (verified
+against an independently written reference to 9 decimals, and requiring 34
+closes rather than 26). `analyze_stock` groups signals by measured
+correlation and counts each group once.
+
+Re-measured after the fix: `ma_crossover` vs `macd` vote correlation fell
+to **r = −0.058** — effectively independent, where it had been a
+near-duplicate. A different genuine correlation surfaced and is now
+grouped: `rsi` vs `momentum_10d` at **r = −0.571**, the same quantity read
+in opposite directions.
+
+Groups: `trend` {ma_crossover, golden_cross}, `momentum` {rsi, macd,
+momentum_10d}, `mean_reversion` {bollinger}. Within a group votes net out;
+across groups they vote independently, and confidence scales with the
+share of opinionated groups that agreed.
+
+Production effect, measured over 12 symbols on live daily bars: **5
+recommendations changed and confidence fell 0.132 on average.** AAPL now
+reports HOLD at 0.50 with one buy group against one sell group, where it
+previously reported BUY at 0.72 from a single observation counted twice.
+
+**Design rule carried forward:** the Milestone 5 signal engine must
+declare a correlation group per signal and count correlated signals once.
+The number that reaches the Risk Governor has to mean something.
 
 ---
 
