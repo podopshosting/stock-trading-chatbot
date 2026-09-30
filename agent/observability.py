@@ -51,6 +51,19 @@ EVENTS = frozenset({
     "signal_direction_changed",
     "signal_result_persisted",
     "regime_adjustment_applied",
+    # evidence / catalysts
+    "evidence_collection_started",
+    "evidence_collection_completed",
+    "evidence_collection_failed",
+    "evidence_provider_failed",
+    "evidence_item_normalized",
+    "evidence_duplicate_detected",
+    "catalyst_created",
+    "catalyst_updated",
+    "conflicting_evidence_detected",
+    "llm_enrichment_failed",
+    "evidence_stale",
+    "evidence_result_persisted",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")

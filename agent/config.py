@@ -319,6 +319,7 @@ class StorageConfig:
     state_table: str = "stock-agent-dev-state"
     scanner_table: str = "stock-agent-dev-scanner"
     signal_table: str = "stock-agent-dev-signals"
+    evidence_table: str = "stock-agent-dev-evidence"
     region: str = "us-east-2"
     alpaca_secret_id: str = "stock-agent/alpaca-paper"
 
