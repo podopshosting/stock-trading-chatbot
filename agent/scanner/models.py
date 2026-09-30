@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -327,7 +328,17 @@ class ScannerRun:
 
     @staticmethod
     def make_id(session_date: str, started_at: str) -> str:
-        digest = hashlib.sha256(f"{session_date}:{started_at}".encode()).hexdigest()[:12]
+        """Unique per run, not per second.
+
+        Hashing only date+timestamp collided: `started_at` has second
+        resolution, so two scans in the same second produced the same id
+        and the second silently overwrote the first. A retry or a manual
+        re-run is enough to hit that.
+        """
+        nonce = uuid.uuid4().hex[:8]
+        digest = hashlib.sha256(
+            f"{session_date}:{started_at}:{nonce}".encode()
+        ).hexdigest()[:12]
         return f"scan_{digest}"
 
     def as_dict(self, include_candidates: bool = True) -> Dict:
