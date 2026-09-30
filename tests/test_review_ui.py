@@ -79,8 +79,15 @@ def _group(key, label, direction, summary, members, mixed=False):
 
 BUY_FIXTURE = {
     "symbol": "NVDA", "price": 230.60, "change": 3.39, "change_percent": "1.4900%",
-    "recommendation": "BUY", "signal_strength": "Strong", "signal_agreement": 0.72,
+    "recommendation": "BUY", "signal_strength": "Strong",
+    "signal_agreement": 0.72, "signal_magnitude": 0.64,
     "agreement_meaning": "How much the independent groups agree.",
+    "magnitude_meaning": "How far readings sit beyond their thresholds.",
+    "market_regime": "MIXED", "regime_adjustment": 0.85,
+    "regime_adjusted_magnitude": 0.544,
+    "regime_note": "magnitude scaled for a MIXED regime; "
+                   "the regime does not create or change direction",
+    "warnings": [],
     "analysis_available": True, "risk_level": "MEDIUM",
     "agreement_summary": {
         "buy_groups": 2, "sell_groups": 0, "neutral_or_silent": 1,
@@ -256,45 +263,86 @@ class TestAgreementLanguage(unittest.TestCase):
         self.assertIn("4 indicators fired", html)
         self.assertIn("2 independent opinions", html)
 
-    # The disclaimer card deliberately uses these words to deny them
-    # ("Signal agreement is not a probability of a price move"), so the
-    # scan below is applied to everything above it.
-    DISCLAIMER_MARKER = "what this does not mean"
-    BANNED = ("confidence", "probability", "% chance", "likelihood", "accuracy")
+    # These words appear legitimately in DENIALS - "signal agreement is
+    # not a probability", "neither is a probability". What must never
+    # appear is an affirmative use, which would tell the reader the
+    # number means something it does not. So denials are stripped first
+    # and the scan then looks for what survives.
+    BANNED = ("confidence", "probability", "% chance", "likelihood",
+              "accuracy")
+    DENIAL_PATTERNS = (
+        r"n[eo]\w*\s+(?:is\s+)?(?:a|the)\s+probability",
+        r"not\s+(?:a|the)\s+probability",
+        r"is\s+not\s+\w*\s*(?:a|the)\s+probability",
+        r"neither\s+is\s+a\s+probability",
+        r"not\s+(?:a|the)\s+(?:forecast|chance)",
+        r"not\s+the\s+chance",
+    )
+
+    @staticmethod
+    def _text(html: str) -> str:
+        """Visible text, with markup removed.
+
+        Scanning raw HTML missed the disclaimer entirely: "is
+        <strong>not</strong> a probability" puts a tag between the
+        negation and the noun, so no denial pattern could match and a
+        correct disclaimer was reported as a banned claim.
+        """
+        without_tags = re.sub(r"<[^>]+>", " ", html)
+        return re.sub(r"\s+", " ", without_tags).strip().lower()
+
+    def _strip_denials(self, text: str) -> str:
+        out = text
+        for pattern in self.DENIAL_PATTERNS:
+            out = re.sub(pattern, " ", out, flags=re.I)
+        return out
 
     def _claims_section(self, fixture) -> str:
-        html = render(fixture).lower()
-        idx = html.find(self.DISCLAIMER_MARKER)
-        self.assertNotEqual(idx, -1, "disclaimer card missing from the page")
-        return html[:idx]
+        """Everything the page ASSERTS: visible text, denials removed."""
+        return self._strip_denials(self._text(render(fixture)))
 
     def test_no_confidence_or_probability_wording_in_the_claims(self):
         """
-        'Confidence' and 'probability' imply a likelihood of a price move,
-        which this number is not. The page must not assert them.
+        'Confidence' and 'probability' imply a likelihood of a price
+        move, which this number is not. The page may DENY them; it must
+        never assert them.
         """
         for fixture in (BUY_FIXTURE, HOLD_FIXTURE, NEGATIVE_CHANGE):
             claims = self._claims_section(fixture)
             for banned in self.BANNED:
                 self.assertNotIn(banned, claims,
-                                 f"banned term {banned!r} in {fixture['symbol']}")
+                                 f"banned term {banned!r} asserted for "
+                                 f"{fixture['symbol']}")
 
-    def test_falsifying_control_banned_term_scan_can_fail(self):
+    def test_falsifying_control_an_affirmative_use_is_caught(self):
         """
-        The scan must be able to detect a banned term in the region it
-        actually inspects, not merely pass because it looks nowhere.
+        The scan must still fire on a real misuse. 'High confidence'
+        contains no denial, so stripping cannot hide it.
         """
         claims = self._claims_section(_variant(signal_strength="High confidence"))
         self.assertIn("confidence", claims)
 
-    def test_falsifying_control_disclaimer_is_genuinely_excluded(self):
+    def test_falsifying_control_denial_stripping_is_targeted(self):
         """
-        Proves the exclusion is doing work: the full page does contain
-        'probability', and only the trimmed claims section does not.
+        Stripping must remove ONLY the denial, not every occurrence.
+        An affirmative sentence in the same text has to survive.
         """
-        full = render(BUY_FIXTURE).lower()
-        self.assertIn("probability", full)
-        self.assertNotIn("probability", self._claims_section(BUY_FIXTURE))
+        text = ("signal agreement is not a probability. "
+                "this reading has a 90% probability of success.")
+        stripped = self._strip_denials(text)
+        self.assertIn("probability of success", stripped)
+        self.assertEqual(stripped.count("probability"), 1,
+                         "stripping removed an affirmative use as well")
+
+    def test_the_page_does_state_the_denial(self):
+        """
+        Stripping denials would also pass if the page never made one.
+        The disclaimer has to actually be there.
+        """
+        text = self._text(render(BUY_FIXTURE))
+        self.assertIn("not a probability", text)
+        self.assertIn("what this does not mean", text)
+
 
 
 @unittest.skipIf(NODE is None, "node not available")
@@ -506,6 +554,67 @@ class TestNoProseParsing(unittest.TestCase):
         self.assertIn("230.60", html)   # price
         self.assertIn("2.99", html)     # macd line
         self.assertIn("65.9", html)     # rsi
+
+
+@unittest.skipIf(NODE is None, "node not available")
+class TestMagnitudeIsShownSeparately(unittest.TestCase):
+    """
+    The point of Milestone 5's presentation change: agreement and
+    magnitude are different quantities and must be legible as two.
+    """
+
+    def test_both_meters_are_rendered(self):
+        html = render(BUY_FIXTURE)
+        self.assertIn("Signal agreement", html)
+        self.assertIn("Signal magnitude", html)
+
+    def test_each_meter_has_its_own_text_alternative(self):
+        html = render(BUY_FIXTURE)
+        self.assertIn('aria-label="Signal agreement 0.72', html)
+        self.assertIn('aria-label="Signal magnitude 0.64', html)
+
+    def test_the_difference_between_them_is_explained(self):
+        html = render(BUY_FIXTURE)
+        self.assertIn("How is magnitude different from agreement?", html)
+        self.assertIn("how many independent groups", html)
+
+    def test_regime_adjustment_is_shown_without_replacing_the_raw_value(self):
+        """Raw and adjusted must both be visible: showing only the
+        adjusted number hides that the market discounted it."""
+        html = render(BUY_FIXTURE)
+        self.assertIn("0.64", html)     # raw magnitude
+        self.assertIn("0.54", html)     # adjusted
+        self.assertIn("never creates or reverses a direction", html)
+
+    def test_a_mixed_group_is_labelled_mixed_not_neutral(self):
+        """
+        MIXED (members oppose each other), NEUTRAL (members agree there
+        is no direction) and NO_SIGNAL (nothing computable) are three
+        different claims. The UI used to collapse the first into the
+        second.
+        """
+        fixture = _variant(groups=[
+            _group("trend", "Trend", "MIXED", "Members oppose each other",
+                   [{"label": "MA crossover (20/50)", "direction": "BUY"},
+                    {"label": "Golden/death cross (50/200)", "direction": "SELL"}]),
+            _group("momentum", "Momentum", "BUY", "Supports upward direction",
+                   [{"label": "MACD", "direction": "BUY"}]),
+            _group("mean_reversion", "Mean Reversion", "NO_SIGNAL",
+                   "No signal from this group", []),
+        ])
+        html = render(fixture)
+        self.assertIn("MIXED", html)
+        self.assertIn("casts no vote", html)
+
+    def test_engine_warnings_reach_the_page(self):
+        fixture = _variant(warnings=["price data is stale",
+                                     "not computed: Golden/death cross"])
+        html = render(fixture)
+        self.assertIn("Warnings", html)
+        self.assertIn("not computed: Golden/death cross", html)
+
+    def test_no_warnings_renders_no_warning_card(self):
+        self.assertNotIn(">Warnings<", render(BUY_FIXTURE))
 
 
 if __name__ == "__main__":

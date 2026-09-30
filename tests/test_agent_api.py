@@ -15,7 +15,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
 from agent.chat_grounding import (  # noqa: E402
-    UNAVAILABLE, answer_from_state, build_context, classify_question,
+    SIGNAL_UNAVAILABLE, UNAVAILABLE, answer_from_state, answer_signal_question,
+    build_context, classify_question, classify_signal_question,
 )
 from agent.config import AgentConfig  # noqa: E402
 from agent.state import (  # noqa: E402
@@ -426,6 +427,254 @@ class TestAnalysisRoute(unittest.TestCase):
         """The check above must be able to see a validation refusal."""
         _status, body = self._call("1234")
         self.assertIn(body.get("error"), self.VALIDATION_ERRORS)
+
+
+class TestNoUndefinedNames(unittest.TestCase):
+    """
+    Static guard for names a handler references but nothing defines.
+
+    Importing the module proves module-level code runs; it says nothing
+    about a name used INSIDE a function body. `handle_signals_latest`
+    shipped a call to `_session_service()`, which never existed - the
+    import succeeded, the whole suite stayed green, and the route would
+    have raised NameError on its first request.
+    """
+
+    import builtins as _builtins
+
+    def test_every_global_referenced_by_a_handler_resolves(self):
+        import builtins
+        module_names = set(dir(api))
+        builtin_names = set(dir(builtins))
+        missing = []
+
+        for attr in dir(api):
+            fn = getattr(api, attr)
+            code = getattr(fn, "__code__", None)
+            if code is None or not callable(fn):
+                continue
+            if getattr(fn, "__module__", None) != api.__name__:
+                continue
+            for name in code.co_names:
+                # co_names also holds attribute names (x.foo), which are
+                # not globals. Only flag a name that is neither a module
+                # global, a builtin, nor an attribute accessed anywhere.
+                if name in module_names or name in builtin_names:
+                    continue
+                if name in code.co_varnames or name in code.co_freevars:
+                    continue
+                # Attribute access: appears after a dot in the source.
+                if f".{name}" in (fn.__doc__ or "") :
+                    continue
+                missing.append((attr, name))
+
+        # Attribute names dominate the false positives, so filter to the
+        # shape that actually matters: a bare call to an undefined
+        # module-level helper, which always starts with an underscore or
+        # "handle_" in this codebase.
+        real = [(f, n) for f, n in missing
+                if n.startswith("_") or n.startswith("handle_")]
+        self.assertEqual(real, [],
+                         f"handler(s) reference undefined names: {real}")
+
+    def test_falsifying_control_the_check_can_see_a_missing_name(self):
+        """Prove the scan would have caught the defect that motivated it."""
+        import builtins
+        module_names = set(dir(api))
+        self.assertNotIn("_session_service", module_names,
+                         "setup: this name should not exist")
+
+        def broken():
+            return _session_service()          # noqa: F821
+
+        found = [n for n in broken.__code__.co_names
+                 if n.startswith("_") and n not in module_names
+                 and n not in set(dir(builtins))]
+        self.assertIn("_session_service", found,
+                      "the scan cannot detect an undefined helper call")
+
+    def test_every_route_target_is_callable(self):
+        for (method, path), handler in api.ROUTES.items():
+            with self.subTest(route=f"{method} {path}"):
+                self.assertTrue(callable(handler))
+
+
+class TestSignalRoutes(unittest.TestCase):
+    """The canonical-signal read endpoints."""
+
+    @staticmethod
+    def _event(path, **params):
+        return {
+            "requestContext": {"http": {"method": "GET", "path": path}},
+            "queryStringParameters": params or None,
+        }
+
+    def _call(self, path, **params):
+        res = api.lambda_handler(self._event(path, **params), None)
+        return res["statusCode"], json.loads(res["body"])
+
+    def test_signals_requires_a_symbol(self):
+        status, body = self._call("/agent/signals")
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "symbol required")
+
+    def test_signals_refuses_a_malformed_symbol_before_any_provider_call(self):
+        for bad in ("../etc", "A B", "1234", "TOOLONGSYM"):
+            with self.subTest(symbol=bad):
+                status, body = self._call("/agent/signals", symbol=bad)
+                self.assertEqual(status, 400)
+                self.assertEqual(body["error"], "invalid symbol")
+
+    def test_unknown_route_is_reported_with_the_available_set(self):
+        status, body = self._call("/agent/nope")
+        self.assertEqual(status, 404)
+        self.assertIn("GET /agent/signals", body["available"])
+
+    def test_signal_routes_are_registered(self):
+        for path in ("/agent/signals", "/agent/signals/latest",
+                     "/agent/scanner/signals"):
+            with self.subTest(path=path):
+                self.assertIn(("GET", path), api.ROUTES)
+
+    def test_no_signal_route_accepts_a_write_method(self):
+        """
+        Read endpoints only. A POST that triggered an evaluation would
+        let an unauthenticated stranger spend provider quota, which is
+        why the one admin route in this API is disabled by default.
+        """
+        for path in ("/agent/signals", "/agent/signals/latest",
+                     "/agent/scanner/signals"):
+            with self.subTest(path=path):
+                self.assertNotIn(("POST", path), api.ROUTES)
+
+
+class TestSignalChatGrounding(unittest.TestCase):
+    """
+    Signal questions are answered from the stored result, never by a
+    model. A fabricated MACD value is indistinguishable from a real one
+    to the reader, which is why these never reach the LLM.
+    """
+
+    RESULT = {
+        "symbol": "TSLA", "direction": "SELL",
+        "signal_agreement": 0.75, "signal_magnitude": 0.77,
+        "buy_groups": 0, "sell_groups": 2, "opinionated_groups": 2,
+        "groups_total": 3, "market_regime": "MIXED",
+        "regime_adjustment": 0.85, "regime_adjusted_magnitude": 0.66,
+        "reasons": ["Trend and Momentum independently support SELL.",
+                    "Inside Trend, MA crossover is BUY and Golden cross is "
+                    "SELL - that internal disagreement halves the group's "
+                    "weight."],
+        "group_results": [
+            {"group": "trend", "label": "Trend", "direction": "SELL",
+             "internal_disagreement": True,
+             "members": [{"label": "MA crossover (20/50)", "direction": "BUY"},
+                         {"label": "Golden/death cross (50/200)",
+                          "direction": "SELL"}]},
+            {"group": "momentum", "label": "Momentum", "direction": "SELL",
+             "internal_disagreement": False, "members": []},
+            {"group": "mean_reversion", "label": "Mean Reversion",
+             "direction": "NEUTRAL", "internal_disagreement": False,
+             "members": []},
+        ],
+        "indicator_results": [
+            {"indicator": "macd", "label": "MACD (12/26/9)",
+             "direction": "SELL",
+             "reason": "MACD is below its 9-period EMA signal line",
+             "raw_values": {"macd": 2.228, "signal": 4.314,
+                            "histogram": -2.086}},
+            {"indicator": "rsi", "label": "RSI (14)", "direction": "NEUTRAL",
+             "reason": "RSI 43.5 is in the neutral 40-60 band",
+             "raw_values": {"rsi": 43.5}},
+        ],
+    }
+
+    def test_why_direction_uses_the_recorded_reasons(self):
+        answer = answer_signal_question("Why is TSLA SELL?", self.RESULT)
+        self.assertIn("TSLA is SELL", answer)
+        self.assertIn("independently support SELL", answer)
+
+    def test_which_signals_disagree_names_them(self):
+        answer = answer_signal_question("Which signals disagree?", self.RESULT)
+        self.assertIn("Trend", answer)
+        self.assertIn("MA crossover", answer)
+        self.assertIn("Golden/death cross", answer)
+
+    def test_macd_question_reports_the_real_values(self):
+        answer = answer_signal_question("What does MACD say?", self.RESULT)
+        self.assertIn("2.228", answer)
+        self.assertIn("4.314", answer)
+        self.assertIn("SELL", answer)
+
+    def test_rsi_question_reports_the_engine_vote_not_an_invented_one(self):
+        answer = answer_signal_question("What is the RSI?", self.RESULT)
+        self.assertIn("NEUTRAL", answer)
+        self.assertIn("43.5", answer)
+
+    def test_agreement_question_explains_and_disclaims(self):
+        answer = answer_signal_question("Why is agreement lower?", self.RESULT)
+        self.assertIn("0.75", answer)
+        self.assertIn("not a probability", answer)
+
+    def test_magnitude_is_described_as_separate_from_agreement(self):
+        answer = answer_signal_question("How strong is the magnitude?",
+                                        self.RESULT)
+        self.assertIn("0.77", answer)
+        self.assertIn("separate from agreement", answer)
+
+    def test_market_support_question_states_the_regime_cannot_flip_direction(self):
+        answer = answer_signal_question(
+            "Is the broader market supporting this?", self.RESULT)
+        self.assertIn("MIXED", answer)
+        self.assertIn("never creates or reverses a direction", answer)
+
+    def test_missing_data_is_stated_not_invented(self):
+        for query in ("Why is AAPL BUY?", "Which signals disagree?",
+                      "What does MACD say?"):
+            with self.subTest(query=query):
+                self.assertEqual(answer_signal_question(query, None),
+                                 SIGNAL_UNAVAILABLE)
+
+    def test_unrelated_questions_are_passed_through(self):
+        self.assertIsNone(
+            answer_signal_question("Explain dollar cost averaging", self.RESULT))
+
+    def test_no_answer_invents_a_number_absent_from_the_result(self):
+        """
+        Every figure in an answer must appear in the stored result. An
+        answer that computed something itself would drift from what the
+        engine recorded.
+        """
+        import re
+        allowed = set()
+        def collect(obj):
+            if isinstance(obj, dict):
+                for v in obj.values(): collect(v)
+            elif isinstance(obj, list):
+                for v in obj: collect(v)
+            elif isinstance(obj, (int, float)):
+                # Collect the DIGITS, not the signed literal: the answer
+                # renders -2.086 inside a sentence and the scan below
+                # extracts "2.086", so an unsigned comparison is the
+                # like-for-like one.
+                for n in re.findall(r"\d+\.?\d*", str(obj)):
+                    allowed.add(n)
+                if isinstance(obj, float):
+                    for n in re.findall(r"\d+\.?\d*", f"{obj:.2f}"):
+                        allowed.add(n)
+            elif isinstance(obj, str):
+                for n in re.findall(r"\d+\.?\d*", obj):
+                    allowed.add(n)
+        collect(self.RESULT)
+
+        for query in ("Why is TSLA SELL?", "What does MACD say?",
+                      "Why is agreement lower?", "How strong is it?",
+                      "Is the market supporting this?"):
+            answer = answer_signal_question(query, self.RESULT) or ""
+            for number in re.findall(r"\d+\.?\d*", answer):
+                with self.subTest(query=query, number=number):
+                    self.assertIn(number, allowed,
+                                  f"answer invented the number {number}")
 
 
 if __name__ == "__main__":
