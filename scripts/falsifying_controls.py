@@ -49,10 +49,14 @@ HYP_ENGINE = REPO / "agent" / "hypothesis" / "engine.py"
 RISK_GOV = REPO / "agent" / "risk" / "governor.py"
 RISK_MODELS = REPO / "agent" / "risk" / "models.py"
 
+BRK_PAPER = REPO / "agent" / "broker" / "paper.py"
+BRK_EXEC = REPO / "agent" / "broker" / "execution.py"
+BRK_MODELS = REPO / "agent" / "broker" / "models.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
-          "tests.test_risk"]
+          "tests.test_risk", "tests.test_broker"]
 
 
 @dataclass
@@ -390,6 +394,105 @@ MUTATIONS = [
         old="    agreement = share * internal",
         new="    agreement = share * internal * magnitude  # MUTATION",
         expect=["structural", "agreement"],
+    ),
+    # --- Milestone 9: paper broker ---------------------------------------
+    Mutation(
+        name="fill-at-the-mid",
+        description="ignore the spread and fill both sides at the midpoint",
+        path=BRK_PAPER,
+        old="        if side is OrderSide.BUY:\n"
+            "            return quote.ask if quote.ask is not None else quote.last\n"
+            "        return quote.bid if quote.bid is not None else quote.last",
+        new="        return quote.mid  # MUTATION",
+        expect=["mid", "spread", "flat", "round"],
+    ),
+    Mutation(
+        name="slippage-in-your-favour",
+        description="apply slippage as an improvement rather than a cost",
+        path=BRK_PAPER,
+        old="        return price + drift if side is OrderSide.BUY else price - drift",
+        new="        return price - drift if side is OrderSide.BUY else price + drift  # MUTATION",
+        expect=["slippage", "against", "ask", "bid"],
+    ),
+    Mutation(
+        name="no-slippage-at-all",
+        description="model a market with no price impact",
+        path=BRK_PAPER,
+        old="        drift = price * (self.config.slippage_bps / 10_000.0)",
+        new="        drift = 0.0  # MUTATION",
+        expect=["slippage"],
+    ),
+    Mutation(
+        name="duplicate-client-id-places-second-order",
+        description="let a retried submission double the position",
+        path=BRK_PAPER,
+        old="        if client_order_id in self._client_ids:",
+        new="        if False:  # MUTATION",
+        expect=["duplicate", "double", "retr", "idempot"],
+    ),
+    Mutation(
+        name="permit-shorting",
+        description="allow selling a name that is not held",
+        path=BRK_PAPER,
+        old="            if held <= 0:",
+        new="            if False:  # MUTATION",
+        expect=["short"],
+    ),
+    Mutation(
+        name="ignore-buying-power",
+        description="fill an order larger than the cash available",
+        path=BRK_PAPER,
+        old="            if required > self._account.buying_power + 1e-9:",
+        new="            if False:  # MUTATION",
+        expect=["buying_power", "INSUFFICIENT_BUYING_POWER", "buying power"],
+    ),
+    Mutation(
+        name="stop-reserving-cash-for-working-orders",
+        description="let two working orders be sized against the same dollar",
+        path=BRK_PAPER,
+        old="        self._account.reserved_cash += (",
+        new="        self._account.reserved_cash += 0.0 * (  # MUTATION",
+        expect=["reserv", "buying_power"],
+    ),
+    Mutation(
+        name="execute-without-approval",
+        description="submit an order from an unapproved risk decision",
+        path=BRK_EXEC,
+        old="    if not getattr(decision, \"approved\", False):",
+        new="    if False:  # MUTATION",
+        expect=["approv", "refus"],
+    ),
+    Mutation(
+        name="execute-while-execution-unavailable",
+        description="ignore the execution_available kill switch",
+        path=BRK_EXEC,
+        old="    if not execution_available:",
+        new="    if False:  # MUTATION",
+        expect=["execution_available", "refus", "unavail"],
+    ),
+    Mutation(
+        name="accept-a-mismatched-hypothesis",
+        description="reuse one approval to execute a different hypothesis",
+        path=BRK_EXEC,
+        old="    if hypothesis is not None and decision.hypothesis_id != getattr(\n            hypothesis, \"hypothesis_id\", None):",
+        new="    if False:  # MUTATION",
+        expect=["mismatch", "hypothes"],
+    ),
+    Mutation(
+        name="random-client-order-id",
+        description="derive the client id from chance rather than the decision",
+        path=BRK_EXEC,
+        old="        f\"{decision.decision_id}:{intent}\".encode()).hexdigest()[:20]",
+        new="        repr(id(decision)).encode()).hexdigest()[:20]  # MUTATION",
+        expect=["client_order_id", "derived", "retr", "double"],
+    ),
+    Mutation(
+        name="reintroduce-market-orders",
+        description="offer an order type that accepts any price",
+        path=BRK_MODELS,
+        old='    LIMIT = "LIMIT"',
+        new='    MARKET = "MARKET"  # MUTATION\n    LIMIT = "LIMIT"',
+        expect=["MARKET", "order_types"],
     ),
 ]
 

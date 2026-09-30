@@ -76,6 +76,17 @@ EVENTS = frozenset({
     "risk_lock_engaged",
     "global_halt_engaged",
     "global_halt_cleared",
+    # broker / orders
+    "order_proposed",
+    "order_submitted",
+    "order_filled",
+    "order_cancelled",
+    "order_rejected",
+    "order_expired",
+    "order_duplicate_suppressed",
+    "position_opened",
+    "position_reduced",
+    "position_closed",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")
