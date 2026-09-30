@@ -419,6 +419,169 @@ def answer_signal_question(query: str, result: Optional[Dict]
     return None
 
 
+EVIDENCE_UNAVAILABLE = (
+    "I have no evidence recorded for that symbol. That is not the same "
+    "as there being no news - it means the agent has not collected any."
+)
+
+NO_CATALYST = (
+    "No active catalyst. Evidence was collected and none of it is "
+    "current and material enough to explain a move. That is a valid "
+    "answer, not a gap."
+)
+
+_EVIDENCE_PATTERNS = [
+    ("same_story", r"\bsame story\b|\bsame (?:event|article)\b"
+                   r"|\bduplicat\w+\b|\bsyndicat\w+\b"),
+    ("dilution", r"\bdilut\w+\b|\boffering\b|\bshelf\b|\bs-3\b"),
+    ("filing", r"\bsec\b|\bfiling\b|\b8-?k\b|\b10-?[qk]\b|\bform 4\b"),
+    ("earnings_today", r"\bearnings\b.*\b(?:today|when|due|upcoming)\b"
+                       r"|\bis earnings\b"),
+    ("is_new", r"\b(?:is|was) (?:this|it) (?:a )?new\b|\bnovel\w*\b"
+               r"|\bhow new\b"),
+    ("provenance", r"\bfrom the company\b|\bcompany or\b|\bwho (?:said|"
+                   r"reported|published)\b|\bwhat source\b|\bprimary source\b"),
+    ("why_moving", r"\bwhy is\b.*\bmoving\b|\bwhat(?:'s| is) moving\b"
+                   r"|\bwhy.*\bmove[sd]?\b"),
+    ("any_news", r"\bany news\b|\bis there news\b|\bnews on\b"
+                 r"|\bwhat catalyst\b|\bcatalyst\b"),
+]
+
+
+def classify_evidence_question(query: str) -> Optional[str]:
+    lowered = (query or "").lower()
+    for topic, pattern in _EVIDENCE_PATTERNS:
+        if re.search(pattern, lowered, re.IGNORECASE):
+            return topic
+    return None
+
+
+def answer_evidence_question(query: str, catalyst: Optional[Dict]
+                             ) -> Optional[str]:
+    """Answer from a stored catalyst result, or None to pass it on.
+
+    Deterministic, and grounded strictly in what was collected. The model
+    is never asked to fill a gap from general knowledge: "I have no
+    evidence" is a correct answer, and a plausible invented headline is
+    indistinguishable from a real one to the reader.
+    """
+    topic = classify_evidence_question(query)
+    if topic is None:
+        return None
+    if not catalyst:
+        return EVIDENCE_UNAVAILABLE
+
+    symbol = catalyst.get("symbol", "this symbol")
+    items = catalyst.get("items") or catalyst.get("top_evidence") or []
+    primary = catalyst.get("primary_catalyst")
+    has = catalyst.get("has_active_catalyst")
+
+    def _cite(entry):
+        src = entry.get("source") or {}
+        when = entry.get("published_at") or "time unknown"
+        return (f"{entry.get('headline', '')[:110]} "
+                f"[{src.get('publisher', 'unknown')}, {when}]")
+
+    if topic in ("why_moving", "any_news"):
+        if not has or not primary:
+            extra = ""
+            if items:
+                extra = (f" {len(items)} item(s) were collected but none is "
+                         f"current and material enough.")
+            return NO_CATALYST + extra
+        conflict = ""
+        if catalyst.get("conflicting_evidence"):
+            conflict = (" Note the evidence CONFLICTS: "
+                        + "; ".join(catalyst.get("conflict_detail", [])[:2]))
+        return (
+            f"{symbol}: {primary.get('type')} - {primary.get('headline','')[:120]}. "
+            f"Direction {primary.get('direction')}, materiality "
+            f"{primary.get('materiality')}, novelty {primary.get('novelty')}, "
+            f"{primary.get('window')}. Source: {primary.get('publisher')} "
+            f"({primary.get('source_class')}), "
+            f"{catalyst.get('independent_source_count', 0)} independent "
+            f"source(s).{conflict}"
+        )
+
+    if topic == "same_story":
+        collapsed = catalyst.get("duplicates_collapsed", 0)
+        groups = catalyst.get("duplicate_groups", 0)
+        total = catalyst.get("total_evidence_count", 0)
+        if not collapsed:
+            return (f"No duplicates: the {total} item(s) for {symbol} describe "
+                    f"{groups} distinct event(s).")
+        return (
+            f"Yes. {total} item(s) collapsed into {groups} distinct event(s); "
+            f"{collapsed} were retellings of a story already counted. "
+            f"{catalyst.get('independent_source_count', 0)} genuinely "
+            f"independent source(s) back the strongest one."
+        )
+
+    if topic == "filing":
+        filings = [i for i in items
+                   if (i.get("source") or {}).get("provider") == "sec"]
+        if not filings:
+            return f"No SEC filing was retrieved for {symbol} in this window."
+        return (f"{len(filings)} SEC filing(s) for {symbol}: "
+                + "; ".join(_cite(f) for f in filings[:3]))
+
+    if topic == "dilution":
+        financing = [i for i in items if i.get("type") in
+                     ("SHELF_REGISTRATION", "SHARE_OFFERING", "DILUTION",
+                      "ATM_OFFERING", "CONVERTIBLE_DEBT", "DEBT_OFFERING")]
+        if not financing:
+            return (f"No financing or dilution event was found for {symbol} "
+                    f"in this window.")
+        lines = []
+        for f in financing[:3]:
+            stage = (f.get("raw_metadata") or {}).get("financing_stage", "")
+            note = ""
+            if stage == "ABILITY_TO_ISSUE":
+                note = (" - this is CAPACITY to issue securities later, not "
+                        "an offering being sold now")
+            elif stage == "ACTUAL_OFFERING":
+                note = " - securities are being sold"
+            lines.append(f"{f.get('type')}: {_cite(f)}{note}")
+        return " | ".join(lines)
+
+    if topic == "earnings_today":
+        earnings = [i for i in items if i.get("type") in
+                    ("EARNINGS", "UPCOMING_EARNINGS")]
+        if not earnings:
+            return (f"No earnings event was found for {symbol} in the "
+                    f"collected evidence. I do not have an earnings calendar, "
+                    f"so this is not a confirmation that none is scheduled.")
+        return "; ".join(_cite(e) for e in earnings[:2])
+
+    if topic == "is_new":
+        if not primary:
+            return NO_CATALYST
+        return (
+            f"Novelty {primary.get('novelty')} on a 0-1 scale, window "
+            f"{primary.get('window')}. 1.0 is a genuinely new development; "
+            f"a low value means the story restates something already known. "
+            f"{catalyst.get('duplicates_collapsed', 0)} retelling(s) were "
+            f"collapsed."
+        )
+
+    if topic == "provenance":
+        if not primary:
+            return NO_CATALYST
+        klass = primary.get("source_class")
+        explain = ("a primary source - the issuer or a government body"
+                   if klass == "PRIMARY" else
+                   "a licensed news feed carrying a publisher's account")
+        return (
+            f"{primary.get('publisher')} ({klass}) - {explain}. "
+            f"{catalyst.get('primary_source_count', 0)} of the supporting "
+            f"item(s) are primary. Reliability describes how confidently we "
+            f"can say the source stated this, not whether the interpretation "
+            f"is right."
+        )
+
+    return None
+
+
 def answer_from_state(query: str, session_dict: Optional[Dict]) -> Optional[str]:
     """Answer a state question directly, or return None to let chat handle it.
 

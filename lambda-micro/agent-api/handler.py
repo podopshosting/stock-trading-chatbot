@@ -34,6 +34,8 @@ from agent.providers.base import ProviderError, SymbolNotFound
 from agent.analysis import build_analysis
 from agent.scanner import DynamoDBScannerStore
 from agent.signals import DynamoDBSignalStore, SignalService
+from agent.evidence import DynamoDBEvidenceStore, EvidenceService
+from agent.evidence.providers import AlpacaNewsProvider, SECProvider
 from agent.state import (
     AgentState, AgentStateService, DynamoDBStateStore, MarketSession,
 )
@@ -120,6 +122,51 @@ def _signal_store():
     if not table:
         return None
     return DynamoDBSignalStore(table_name=table, region=cfg.storage.region)
+
+
+# SEC asks for a descriptive User-Agent with contact details and refuses
+# requests without one.
+SEC_USER_AGENT = os.environ.get(
+    "SEC_USER_AGENT",
+    "stock-trading-chatbot dev (contact: hi@thepodops.com)")
+
+
+def _evidence_store():
+    cfg = _config()
+    table = os.environ.get("AGENT_EVIDENCE_TABLE",
+                           getattr(cfg.storage, "evidence_table", "") or "")
+    if not table:
+        return None
+    return DynamoDBEvidenceStore(table_name=table, region=cfg.storage.region)
+
+
+def _evidence_service() -> EvidenceService:
+    """Evidence providers, ordered primary-first.
+
+    SEC leads because a filing outranks a story about it when the two
+    describe the same event, and deduplication keeps whichever comes
+    first in the list as the group seed.
+    """
+    cfg = _config()
+    creds = _load_alpaca_credentials(cfg.storage.alpaca_secret_id,
+                                     cfg.storage.region)
+    _raw, cached = _provider()
+    cache = getattr(cached, "cache", None) or getattr(cached, "backend", None)
+
+    sec = SECProvider(user_agent=SEC_USER_AGENT, cache=cache)
+    news = AlpacaNewsProvider(api_key_id=creds["api_key_id"],
+                              api_secret_key=creds["api_secret_key"],
+                              cache=cache)
+
+    def resolve_name(symbol: str):
+        # Used to tell "a story about this company" from "a story that
+        # merely mentions it". Best-effort: a failure only weakens the
+        # relevance check.
+        return sec.cik_for(symbol)[1]
+
+    top_n = int(os.environ.get("EVIDENCE_TOP_N", "5"))
+    return EvidenceService([sec, news], store=_evidence_store(),
+                           top_n=top_n, name_resolver=resolve_name)
 
 
 def _signal_service() -> SignalService:
@@ -613,6 +660,87 @@ def _market_context() -> Dict:
         return {"available": False}
 
 
+def handle_evidence(event) -> Dict:
+    """Collect evidence for one symbol, live.
+
+    Read-only in the sense that matters - it places no orders and writes
+    no trading state - but it does spend provider calls, so it is capped
+    by EVIDENCE_TOP_N elsewhere and by one symbol here.
+    """
+    symbol, refusal = _symbol_from(event)
+    if refusal:
+        return refusal
+
+    try:
+        result = _evidence_service().collect(symbol)
+    except Exception as e:
+        log_event("evidence_collection_failed", symbol=symbol,
+                  error=type(e).__name__)
+        return _response(503, {"error": "evidence collection failed",
+                               "detail": type(e).__name__})
+
+    return _response(200, result.as_dict(include_items=True))
+
+
+def handle_catalysts(event) -> Dict:
+    """The catalyst verdict for a symbol, without the full item list."""
+    symbol, refusal = _symbol_from(event)
+    if refusal:
+        return refusal
+
+    try:
+        result = _evidence_service().collect(symbol)
+    except Exception as e:
+        return _response(503, {"error": "evidence collection failed",
+                               "detail": type(e).__name__})
+
+    payload = result.as_dict(include_items=False)
+    # Enough of the supporting items to show provenance, without
+    # reproducing the whole set.
+    payload["top_evidence"] = [
+        i.as_dict() for i in result.items if i.is_canonical][:5]
+    return _response(200, payload)
+
+
+def handle_evidence_latest(event) -> Dict:
+    """Most recent STORED evidence. Never triggers a collection, so a
+    public GET cannot be used to spend provider quota."""
+    params = _query(event)
+    symbol = (params.get("symbol") or "").strip().upper()
+    store = _evidence_store()
+    if store is None:
+        return _response(503, {"error": "evidence store unavailable"})
+    if not symbol:
+        return _response(400, {"error": "symbol required"})
+
+    catalyst = store.latest_catalyst(symbol)
+    if not catalyst:
+        return _response(404, {"found": False, "symbol": symbol,
+                               "message": "no stored evidence for this symbol"})
+    return _response(200, {"found": True, "catalyst": catalyst})
+
+
+def handle_scanner_evidence(event) -> Dict:
+    """Stored evidence for a scanner run's candidates."""
+    params = _query(event)
+    store = _evidence_store()
+    if store is None:
+        return _response(503, {"error": "evidence store unavailable"})
+
+    session_date = params.get("session_date") or _session_date()
+    run = store.latest_run(session_date) if hasattr(store, "latest_run") else None
+    if not run:
+        return _response(404, {"found": False, "session_date": session_date,
+                               "message": "no evidence run recorded for this "
+                                          "session"})
+    scanner_run_id = (params.get("scanner_run_id") or "").strip()
+    if scanner_run_id and run.get("scanner_run_id") != scanner_run_id:
+        return _response(404, {
+            "found": False, "scanner_run_id": scanner_run_id,
+            "message": "no evidence run stored for that scanner run"})
+    return _response(200, {"found": True, "run": run})
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
@@ -625,6 +753,10 @@ ROUTES = {
     ("GET", "/agent/signals"): handle_signals,
     ("GET", "/agent/signals/latest"): handle_signals_latest,
     ("GET", "/agent/scanner/signals"): handle_scanner_signals,
+    ("GET", "/agent/evidence"): handle_evidence,
+    ("GET", "/agent/evidence/latest"): handle_evidence_latest,
+    ("GET", "/agent/catalysts"): handle_catalysts,
+    ("GET", "/agent/scanner/evidence"): handle_scanner_evidence,
 }
 
 

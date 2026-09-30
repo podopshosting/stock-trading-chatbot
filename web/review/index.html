@@ -237,6 +237,55 @@
   }
   .soon strong { color: var(--text-dim); display: block; margin-bottom: 5px; font-size: 14px; }
 
+  /* ---------- catalysts & evidence ---------- */
+  .cat-head { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
+  .cat-box {
+    border-radius: 10px; padding: 13px 16px; border: 1px solid;
+    min-width: 190px; flex: 0 0 auto;
+  }
+  .cat-type { font-size: 19px; font-weight: 720; line-height: 1.2; }
+  .cat-sub { font-size: 12.5px; font-weight: 620; margin-top: 3px; }
+  .cat-none {
+    border: 1px dashed var(--border-strong); border-radius: 10px;
+    padding: 16px; color: var(--text-dim); font-size: 13.5px;
+  }
+  .cat-none strong { color: var(--text); display: block; margin-bottom: 4px; font-size: 14.5px; }
+
+  .ev-list { margin-top: 12px; }
+  .ev {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-left: 3px solid var(--border-strong);
+    border-radius: 8px; padding: 11px 13px; margin-bottom: 8px;
+  }
+  .ev.primary { border-left-color: var(--accent); }
+  .ev.dup { opacity: .62; border-style: dashed; }
+  .ev-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 5px; }
+  .ev-head { font-size: 13.5px; font-weight: 620; line-height: 1.4; }
+  .ev-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 5px;
+             display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .ev-meta a { color: var(--accent); }
+  .src-tag {
+    font-size: 10.5px; font-weight: 750; padding: 2px 7px; border-radius: 4px;
+    border: 1px solid; letter-spacing: .04em; white-space: nowrap;
+  }
+  .src-PRIMARY { color: var(--accent); border-color: var(--accent);
+                 background: rgba(88,166,255,.12); }
+  .src-STRUCTURED_NEWS { color: var(--text-dim); border-color: var(--border-strong); }
+  .src-AGGREGATED { color: var(--text-faint); border-color: var(--border); }
+  .demo-flag {
+    background: var(--warn-bg); border: 1px solid var(--warn); color: var(--warn);
+    font-size: 11px; font-weight: 750; padding: 3px 9px; border-radius: 999px;
+    letter-spacing: .05em;
+  }
+  .ev-counts { display: grid; grid-template-columns: repeat(auto-fit,minmax(112px,1fr));
+               gap: 10px; margin-top: 12px; }
+  .ev-counts div { background: var(--surface-2); border: 1px solid var(--border);
+                   border-radius: 8px; padding: 9px 10px; }
+  .ev-counts .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
+                  color: var(--text-dim); }
+  .ev-counts .v { font-size: 17px; font-weight: 680; font-variant-numeric: tabular-nums;
+                  margin-top: 2px; }
+
   /* ---------- modal ---------- */
   .backdrop {
     position: fixed; inset: 0; background: rgba(1,4,9,.72); z-index: 50;
@@ -486,6 +535,7 @@ function badge(d) {
 
 /* ---------------- state ---------------- */
 let currentAnalysis = null;
+let currentEvidence = null;
 let lastFocused = null;
 
 function loadWatchlist() {
@@ -741,6 +791,144 @@ function marketContextCard(mc) {
   </div>`;
 }
 
+const EV_DIR = {
+  POSITIVE:  { cls: "dir-buy",  g: "▲", word: "Positive"  },
+  NEGATIVE:  { cls: "dir-sell", g: "▼", word: "Negative"  },
+  MIXED:     { cls: "dir-hold", g: "◆", word: "Mixed"     },
+  NEUTRAL:   { cls: "dir-hold", g: "■", word: "Neutral"   },
+  UNCERTAIN: { cls: "dir-hold", g: "?", word: "Uncertain" },
+};
+function evDir(d) { return EV_DIR[d] || EV_DIR.NEUTRAL; }
+
+function sourceTag(cls) {
+  const label = cls === "PRIMARY" ? "PRIMARY SOURCE"
+    : cls === "STRUCTURED_NEWS" ? "NEWS FEED"
+    : cls === "AGGREGATED" ? "AGGREGATED" : "UNKNOWN";
+  return `<span class="src-tag src-${esc(cls || "UNKNOWN")}">${label}</span>`;
+}
+
+function evidenceRow(e) {
+  const cls = e.source?.source_class;
+  const dup = !e.is_canonical;
+  return `
+  <div class="ev ${cls === "PRIMARY" ? "primary" : ""} ${dup ? "dup" : ""}">
+    <div class="ev-top">
+      ${sourceTag(cls)}
+      <span class="badge" style="color:var(--text-dim);border-color:var(--border-strong)">${esc(e.type || "")}</span>
+      <span class="badge" style="color:${evDir(e.direction).cls === "dir-buy" ? "var(--up)" : evDir(e.direction).cls === "dir-sell" ? "var(--down)" : "var(--flat)"};border-color:currentColor">
+        <span class="glyph" aria-hidden="true">${evDir(e.direction).g}</span> ${esc(evDir(e.direction).word)}</span>
+      ${dup ? `<span class="badge" style="color:var(--text-faint);border-color:var(--border)">DUPLICATE</span>` : ""}
+      ${e.window ? `<span class="badge" style="color:var(--text-faint);border-color:var(--border)">${esc(e.window)}</span>` : ""}
+    </div>
+    <div class="ev-head">${esc(e.headline || "")}</div>
+    ${e.summary ? `<div class="note">${esc(e.summary)}</div>` : ""}
+    <div class="ev-meta">
+      <span><strong>${esc(e.source?.publisher || "unknown")}</strong></span>
+      <span>${esc(e.published_at || "time unknown")}</span>
+      <span>materiality ${num(e.materiality)}</span>
+      <span>novelty ${num(e.novelty)}</span>
+      <span>reliability ${num(e.reliability)}</span>
+      ${e.source?.url ? `<a href="${esc(e.source.url)}" target="_blank" rel="noopener noreferrer">open source ↗</a>` : ""}
+    </div>
+    ${(e.warnings || []).length ? `<div class="note" style="color:var(--warn)">${esc(e.warnings[0])}</div>` : ""}
+  </div>`;
+}
+
+// Catalysts are rendered from stored evidence only. When there is none,
+// the page says so — it never fills the gap with a narrative, because a
+// stock can move for reasons no source has published.
+function evidenceCard(ev, demo) {
+  if (!ev) return "";
+  if (ev.error) {
+    return `<div class="card"><h2>Catalysts &amp; evidence</h2>
+      <div class="banner err"><span aria-hidden="true">⚠</span>
+      <span><strong>Evidence source unavailable.</strong> ${esc(ev.error)} —
+      this is not the same as “no catalyst”.</span></div></div>`;
+  }
+  const c = ev.primary_catalyst;
+  const items = (ev.items || ev.top_evidence || []);
+  const canon = items.filter(i => i.is_canonical);
+  const dups = items.filter(i => !i.is_canonical);
+
+  const head = c ? `
+    <div class="cat-head">
+      <div class="cat-box ${evDir(c.direction).cls}">
+        <div class="cat-type">${esc(c.type)}</div>
+        <div class="cat-sub"><span class="glyph" aria-hidden="true">${evDir(c.direction).g}</span>
+          ${esc(evDir(c.direction).word)} · ${esc(c.window || "")}</div>
+      </div>
+      <div style="flex:1 1 260px;min-width:0">
+        <div class="ev-head" style="font-size:15px">${esc(c.headline || "")}</div>
+        <div class="ev-meta" style="margin-top:7px">
+          ${sourceTag(c.source_class)}
+          <span><strong>${esc(c.publisher || "")}</strong></span>
+          <span>${esc(c.published_at || "time unknown")}</span>
+          ${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">open source ↗</a>` : ""}
+        </div>
+        <div class="note">materiality ${num(c.materiality)} · novelty ${num(c.novelty)} ·
+          reliability ${num(c.reliability)}</div>
+      </div>
+    </div>`
+    : `<div class="cat-none">
+         <strong>No current catalyst found</strong>
+         ${ev.total_evidence_count
+           ? `${ev.total_evidence_count} item(s) were collected; none is current and
+              material enough to explain a move.`
+           : `No evidence was retrieved for this symbol in the requested window.`}
+         That is a valid result — a stock can move for reasons no source has published.
+       </div>`;
+
+  const conflict = ev.conflicting_evidence ? `
+    <div class="banner warn" style="margin-top:12px"><span aria-hidden="true">⚠</span>
+      <span><strong>Evidence conflicts.</strong>
+      ${(ev.conflict_detail || []).map(esc).join(" · ")}</span></div>` : "";
+
+  const failed = (ev.providers_failed || []).length ? `
+    <div class="banner warn" style="margin-top:12px"><span aria-hidden="true">⚠</span>
+      <span><strong>Incomplete.</strong> ${esc((ev.providers_failed || []).join(", "))}
+      did not respond, so material information may be missing.</span></div>` : "";
+
+  return `
+  <div class="card">
+    <h2>Catalysts &amp; evidence ${demo ? `<span class="demo-flag">DEMO DATA</span>` : ""}</h2>
+    ${failed}
+    ${head}
+    ${conflict}
+
+    <div class="ev-counts">
+      <div><div class="k">Distinct events</div><div class="v">${ev.duplicate_groups ?? 0}</div></div>
+      <div><div class="k">Items collected</div><div class="v">${ev.total_evidence_count ?? 0}</div></div>
+      <div><div class="k">Duplicates collapsed</div><div class="v">${ev.duplicates_collapsed ?? 0}</div></div>
+      <div><div class="k">Independent sources</div><div class="v">${ev.independent_source_count ?? 0}</div></div>
+      <div><div class="k">Primary sources</div><div class="v">${ev.primary_source_count ?? 0}</div></div>
+      <div><div class="k">Evidence score</div><div class="v">${num(ev.evidence_score)}</div></div>
+    </div>
+    <details class="info">
+      <summary>What does evidence score mean?</summary>
+      <div>${esc(ev.evidence_score_meaning || "")}</div>
+    </details>
+
+    ${canon.length ? `<div class="ev-list">
+      <h2 style="margin-top:16px">Supporting evidence</h2>
+      ${canon.slice(0, 6).map(evidenceRow).join("")}
+    </div>` : ""}
+
+    ${dups.length ? `<details class="info" style="margin-top:6px">
+      <summary>${dups.length} duplicate retelling(s) of stories already counted</summary>
+      <div style="background:none;border:0;border-left:0;padding:0">
+        ${dups.slice(0, 5).map(evidenceRow).join("")}
+        <div class="note">These are kept for provenance but excluded from the
+        counts above. Republication is not corroboration.</div>
+      </div>
+    </details>` : ""}
+
+    <details class="info" style="margin-top:8px">
+      <summary>How source reliability is meant</summary>
+      <div>${esc(ev.source_reliability_caveat || "")}</div>
+    </details>
+  </div>`;
+}
+
 function renderAnalysis(a) {
   currentAnalysis = a;
   if (a.analysis_available === false) {
@@ -819,6 +1007,8 @@ function renderAnalysis(a) {
     </ul>
   </div>` : ""}
 
+  <div id="evidence-slot"></div>
+
   ${marketContextCard(a.market_context)}
   ${dataQualityBlock(a.data_quality)}
 
@@ -876,6 +1066,7 @@ function detailModal(a) {
     </div></div>
   <div class="sec"><h3>Why this result</h3>${whyBlock(a)}</div>
   <div class="sec"><h3>Market context</h3>${marketContextCard(a.market_context)}</div>
+  <div class="sec"><h3>Catalysts &amp; evidence</h3>${evidenceCard(currentEvidence, false)}</div>
   <div class="sec"><h3>Data quality</h3>${dataQualityBlock(a.data_quality)}</div>
   <div class="sec"><h3>Important</h3>
     <p class="note" style="font-size:12.5px">${esc(a.disclaimer || "")}</p></div>`;
@@ -901,9 +1092,27 @@ async function analyse(symbol) {
     }
     out.innerHTML = renderAnalysis(data);
     wireAnalysisButtons();
+    loadEvidence(symbol);
   } catch (e) {
     out.innerHTML = `<div class="card"><div class="banner err"><span aria-hidden="true">⚠</span>
       <span>Could not reach the analysis API. ${esc(e.message)}</span></div></div>`;
+  }
+}
+
+// Evidence is fetched separately and rendered into its own slot, so a
+// slow or failing evidence source never delays or breaks the
+// quantitative analysis above it. The two are independent readings and
+// are never combined into one score.
+async function loadEvidence(symbol) {
+  const slot = document.getElementById("evidence-slot");
+  if (!slot) return;
+  slot.innerHTML = `<div class="card"><div class="spinner">Collecting evidence…</div></div>`;
+  try {
+    const data = await api("/agent/catalysts?symbol=" + encodeURIComponent(symbol));
+    currentEvidence = data;
+    slot.innerHTML = evidenceCard(data, false);
+  } catch (e) {
+    slot.innerHTML = evidenceCard({ error: e.message }, false);
   }
 }
 
