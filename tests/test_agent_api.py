@@ -35,6 +35,16 @@ def _load_agent_api():
     two apart.
     """
     import importlib.util
+    # The analysis route runs the same engine as production /chatbot, so
+    # the handler imports ml_agent_lite. In the deployment artifact that
+    # module sits flat beside handler.py (build_lambda_package.sh copies
+    # it via EXTRA_FILES); in the repo it lives under chatbot-router, so
+    # the test has to put that directory on the path to match the shape
+    # the Lambda actually sees.
+    router_dir = os.path.join(REPO_ROOT, "lambda-micro", "chatbot-router")
+    if router_dir not in sys.path:
+        sys.path.insert(0, router_dir)
+
     path = os.path.join(REPO_ROOT, "lambda-micro", "agent-api", "handler.py")
     spec = importlib.util.spec_from_file_location("agent_api_handler", path)
     module = importlib.util.module_from_spec(spec)
@@ -366,6 +376,56 @@ class TestChatGroundingContext(unittest.TestCase):
         self.assertIn("NOT a probability", ctx)
         self.assertIn("state only what appears above", ctx)
         self.assertIn("Never describe this system as placing trades", ctx)
+
+
+class TestAnalysisRoute(unittest.TestCase):
+    """
+    The /agent/analysis route exists so the UI never has to parse prose to
+    recover a number. These tests pin the shape of that contract and the
+    route's refusal behaviour; the scoring itself is tested elsewhere and
+    is not touched here.
+    """
+
+    @staticmethod
+    def _event(symbol=None):
+        return {
+            "requestContext": {"http": {"method": "GET",
+                                        "path": "/agent/analysis"}},
+            "queryStringParameters": {"symbol": symbol} if symbol else None,
+        }
+
+    def _call(self, symbol=None):
+        res = api.lambda_handler(self._event(symbol), None)
+        return res["statusCode"], json.loads(res["body"])
+
+    def test_missing_symbol_is_refused(self):
+        status, body = self._call()
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "symbol required")
+
+    def test_non_alphabetic_symbol_is_refused_before_any_provider_call(self):
+        for bad in ("../etc", "A B", "1234", "TOOLONGSYM"):
+            with self.subTest(symbol=bad):
+                status, body = self._call(bad)
+                self.assertEqual(status, 400)
+                self.assertEqual(body["error"], "invalid symbol")
+
+    VALIDATION_ERRORS = {"symbol required", "invalid symbol"}
+
+    def test_lower_case_symbol_passes_validation(self):
+        """
+        Validation runs before any provider call, so a lower-case symbol
+        that gets past it proves the upper-casing happened. Asserting only
+        'not 400' would also be satisfied by a missing route, so this
+        checks the error identity rather than the status code.
+        """
+        _status, body = self._call("nvda")
+        self.assertNotIn(body.get("error"), self.VALIDATION_ERRORS)
+
+    def test_falsifying_control_validation_errors_are_detectable(self):
+        """The check above must be able to see a validation refusal."""
+        _status, body = self._call("1234")
+        self.assertIn(body.get("error"), self.VALIDATION_ERRORS)
 
 
 if __name__ == "__main__":

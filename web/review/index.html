@@ -1,0 +1,1035 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading Agent — Analysis Review</title>
+<meta name="description" content="Development review build of the trading agent analysis UX.">
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface-2: #1c232c;
+    --border: #2d333b; --border-strong: #3d444d;
+    --text: #e6edf3; --text-dim: #9198a1; --text-faint: #6e7681;
+    --up: #3fb950; --up-bg: rgba(63,185,80,.12);
+    --down: #f85149; --down-bg: rgba(248,81,73,.12);
+    --flat: #8b949e; --flat-bg: rgba(139,148,158,.12);
+    --warn: #d29922; --warn-bg: rgba(210,153,34,.14);
+    --accent: #58a6ff;
+    --radius: 10px; --gap: 16px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f8fa; --surface: #ffffff; --surface-2: #f0f3f6;
+    --border: #d1d9e0; --border-strong: #b6c0cb;
+    --text: #1f2328; --text-dim: #59636e; --text-faint: #818b98;
+    --up: #1a7f37; --up-bg: rgba(26,127,55,.10);
+    --down: #cf222e; --down-bg: rgba(207,34,46,.10);
+    --flat: #59636e; --flat-bg: rgba(89,99,110,.10);
+    --warn: #9a6700; --warn-bg: rgba(154,103,0,.12);
+    --accent: #0969da;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1,h2,h3,h4 { margin: 0; font-weight: 650; letter-spacing: -.01em; }
+  a { color: var(--accent); }
+  button { font: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+  /* ---------- chrome ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 20; background: var(--surface);
+    border-bottom: 1px solid var(--border); padding: 10px 16px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .brand { font-weight: 700; font-size: 15px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; align-items: center; }
+  .chip {
+    font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--border-strong); color: var(--text-dim);
+    background: var(--surface-2); white-space: nowrap;
+  }
+  .chip.open { color: var(--up); border-color: var(--up); background: var(--up-bg); }
+  .chip.closed { color: var(--text-dim); }
+  .chip.locked { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+  .icon-btn {
+    background: var(--surface-2); border: 1px solid var(--border-strong);
+    color: var(--text); border-radius: 8px; padding: 5px 10px; font-size: 13px;
+  }
+
+  nav.tabs {
+    display: flex; gap: 2px; overflow-x: auto; background: var(--surface);
+    border-bottom: 1px solid var(--border); padding: 0 8px;
+    scrollbar-width: none;
+  }
+  nav.tabs::-webkit-scrollbar { display: none; }
+  nav.tabs button {
+    background: none; border: 0; border-bottom: 2px solid transparent;
+    color: var(--text-dim); padding: 10px 12px; font-size: 13.5px;
+    font-weight: 600; white-space: nowrap;
+  }
+  nav.tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+
+  main { max-width: 1120px; margin: 0 auto; padding: var(--gap); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; margin-bottom: var(--gap);
+  }
+  .card > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
+               color: var(--text-dim); margin-bottom: 12px; }
+
+  /* ---------- today strip ---------- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); gap: 12px; }
+  .stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-dim); }
+  .stat .v { font-size: 19px; font-weight: 680; font-variant-numeric: tabular-nums; margin-top: 3px; }
+
+  /* ---------- search ---------- */
+  .search { display: flex; gap: 8px; flex-wrap: wrap; }
+  .search input {
+    flex: 1 1 180px; min-width: 0; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 8px; padding: 9px 12px;
+    font-size: 15px; text-transform: uppercase;
+  }
+  .search button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 9px 16px; font-weight: 650;
+  }
+  .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .quick button {
+    background: var(--surface-2); border: 1px solid var(--border-strong);
+    color: var(--text-dim); border-radius: 999px; padding: 4px 11px;
+    font-size: 12.5px; font-weight: 600; font-family: var(--mono);
+  }
+  .quick button:hover { color: var(--text); border-color: var(--accent); }
+
+  /* ---------- verdict ---------- */
+  .verdict-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .sym { font-size: 26px; font-weight: 720; font-family: var(--mono); letter-spacing: -.02em; }
+  .px { font-size: 21px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .delta { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+
+  .verdict {
+    display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap;
+    margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
+  }
+  .callbox {
+    border-radius: 10px; padding: 12px 16px; border: 1px solid;
+    min-width: 168px;
+  }
+  .callbox .call { font-size: 27px; font-weight: 750; line-height: 1.1; display: flex; align-items: center; gap: 8px; }
+  .callbox .strength { font-size: 13px; font-weight: 620; margin-top: 3px; }
+  .dir-buy   { color: var(--up);   background: var(--up-bg);   border-color: var(--up); }
+  .dir-sell  { color: var(--down); background: var(--down-bg); border-color: var(--down); }
+  .dir-hold  { color: var(--flat); background: var(--flat-bg); border-color: var(--border-strong); }
+
+  .tally { flex: 1 1 260px; min-width: 0; }
+  .tally-row { display: flex; align-items: center; gap: 9px; padding: 3px 0; font-size: 14px; }
+  .tally-row .n { font-family: var(--mono); font-weight: 700; min-width: 16px; text-align: right; }
+  .tally-verdict { font-size: 13.5px; color: var(--text-dim); margin-top: 7px; font-weight: 600; }
+
+  /* direction glyph: state is never colour-only */
+  .glyph { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+
+  /* ---------- agreement meter ---------- */
+  .agree { margin-top: 14px; }
+  .agree-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .agree-label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); font-weight: 650; }
+  .agree-val { font-family: var(--mono); font-weight: 700; font-size: 14px; }
+  .bar { height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden;
+         margin-top: 7px; border: 1px solid var(--border); }
+  .bar > span { display: block; height: 100%; border-radius: 999px; }
+
+  details.info { margin-top: 8px; }
+  details.info > summary {
+    cursor: pointer; font-size: 12.5px; color: var(--accent); font-weight: 600;
+    list-style: none; display: inline-flex; align-items: center; gap: 5px;
+  }
+  details.info > summary::-webkit-details-marker { display: none; }
+  details.info > summary::before { content: "ⓘ"; font-size: 13px; }
+  details.info > div {
+    margin-top: 7px; font-size: 13px; color: var(--text-dim);
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: 6px; padding: 10px 12px;
+  }
+
+  /* ---------- why ---------- */
+  .why { background: var(--surface-2); border: 1px solid var(--border);
+         border-radius: 8px; padding: 12px 14px; margin-top: 14px; }
+  .why h3 { font-size: 14px; margin-bottom: 7px; }
+  .why ul { margin: 0; padding-left: 18px; }
+  .why li { font-size: 13.5px; color: var(--text-dim); margin: 4px 0; }
+
+  /* ---------- groups ---------- */
+  .groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(258px,1fr)); gap: 12px; }
+  .group {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 13px; border-left: 3px solid var(--border-strong);
+  }
+  .group.g-buy  { border-left-color: var(--up); }
+  .group.g-sell { border-left-color: var(--down); }
+  .group.g-mixed{ border-left-color: var(--warn); }
+  .group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .group-name { font-size: 14.5px; font-weight: 670; }
+  .badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+           border: 1px solid; white-space: nowrap; }
+  .group-desc { font-size: 12px; color: var(--text-faint); margin-top: 3px; }
+  .group-summary { font-size: 12.5px; color: var(--text-dim); margin-top: 8px; }
+  .members { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+  .member { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; padding: 2.5px 0; }
+  .member .mn { color: var(--text-dim); }
+  .member .mv { font-weight: 650; font-family: var(--mono); font-size: 12px; }
+  .conflict {
+    margin-top: 9px; font-size: 12px; color: var(--warn); background: var(--warn-bg);
+    border: 1px solid var(--warn); border-radius: 6px; padding: 7px 9px; font-weight: 600;
+  }
+
+  /* ---------- indicators ---------- */
+  .ind-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(255px,1fr)); gap: 12px; }
+  .ind { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 13px; }
+  .ind h4 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-dim); }
+  .kv { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 3px 0;
+        border-bottom: 1px solid var(--border); }
+  .kv:last-of-type { border-bottom: 0; }
+  .kv .k { color: var(--text-dim); }
+  .kv .v { font-family: var(--mono); font-weight: 650; font-variant-numeric: tabular-nums; }
+  .read { margin-top: 9px; font-size: 13px; font-weight: 640; }
+  .note { margin-top: 7px; font-size: 11.5px; color: var(--text-faint); line-height: 1.45; }
+
+  /* ---------- data quality ---------- */
+  .dq { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12.5px; color: var(--text-dim); }
+  .banner {
+    border-radius: 8px; padding: 10px 13px; font-size: 13px; font-weight: 620;
+    border: 1px solid; margin-bottom: 12px; display: flex; gap: 8px; align-items: flex-start;
+  }
+  .banner.warn { color: var(--warn); background: var(--warn-bg); border-color: var(--warn); }
+  .banner.err  { color: var(--down); background: var(--down-bg); border-color: var(--down); }
+
+  /* ---------- market context ---------- */
+  .idx { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px,1fr)); gap: 10px; margin-top: 11px; }
+  .idx > div { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+               padding: 9px 10px; text-align: center; }
+  .idx .t { font-family: var(--mono); font-size: 12.5px; color: var(--text-dim); font-weight: 650; }
+  .idx .c { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+  /* ---------- watchlist / candidates ---------- */
+  table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.grid th {
+    text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--text-dim); border-bottom: 1px solid var(--border); padding: 7px 8px; font-weight: 650;
+  }
+  table.grid td { padding: 8px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  table.grid tbody tr:hover { background: var(--surface-2); }
+  .symlink { background: none; border: 0; color: var(--accent); font-family: var(--mono);
+             font-weight: 700; padding: 0; font-size: 13px; }
+  .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  .empty { color: var(--text-faint); font-size: 13.5px; padding: 8px 0; }
+  .soon {
+    border: 1px dashed var(--border-strong); border-radius: 8px; padding: 22px;
+    text-align: center; color: var(--text-faint); font-size: 13.5px;
+  }
+  .soon strong { color: var(--text-dim); display: block; margin-bottom: 5px; font-size: 14px; }
+
+  /* ---------- modal ---------- */
+  .backdrop {
+    position: fixed; inset: 0; background: rgba(1,4,9,.72); z-index: 50;
+    display: none; padding: 16px; overflow-y: auto;
+  }
+  .backdrop.show { display: block; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 12px; max-width: 800px; margin: 24px auto; padding: 18px;
+  }
+  .modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+                margin-bottom: 14px; }
+  .modal h2 { font-size: 17px; }
+  .close { background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text);
+           border-radius: 8px; width: 32px; height: 32px; font-size: 16px; line-height: 1; }
+  .sec { margin-top: 16px; }
+  .sec > h3 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em;
+              color: var(--text-dim); margin-bottom: 9px; }
+
+  .pin { background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text-dim);
+         border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 650; }
+  .pin.on { color: var(--up); border-color: var(--up); background: var(--up-bg); }
+
+  .review-flag {
+    background: var(--warn-bg); border-bottom: 1px solid var(--warn); color: var(--warn);
+    font-size: 12px; font-weight: 700; text-align: center; padding: 5px 10px;
+    letter-spacing: .03em;
+  }
+  .spinner { color: var(--text-dim); font-size: 13.5px; padding: 10px 0; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+  }
+  @media (max-width: 620px) {
+    main { padding: 12px; }
+    .card { padding: 13px; }
+    .sym { font-size: 22px; }
+    .callbox { min-width: 100%; }
+    .callbox .call { font-size: 24px; }
+    .groups, .ind-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="review-flag" role="note">
+  REVIEW BUILD — development only · not production · execution disabled
+</div>
+
+<header class="topbar">
+  <span class="brand">Trading Agent</span>
+  <div class="chips">
+    <span class="chip" id="chip-session">Session —</span>
+    <span class="chip locked" id="chip-exec">Execution disabled</span>
+    <span class="chip" id="chip-mode">Paper mode</span>
+    <button class="icon-btn" id="theme-btn" aria-label="Switch to light mode">
+      <span aria-hidden="true">☀︎</span> Light
+    </button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist" aria-label="Sections">
+  <button role="tab" aria-selected="true"  aria-controls="p-today"     id="t-today">Today</button>
+  <button role="tab" aria-selected="false" aria-controls="p-market"    id="t-market">Market</button>
+  <button role="tab" aria-selected="false" aria-controls="p-watching"  id="t-watching">Watching</button>
+  <button role="tab" aria-selected="false" aria-controls="p-positions" id="t-positions">Positions</button>
+  <button role="tab" aria-selected="false" aria-controls="p-decisions" id="t-decisions">Decisions</button>
+  <button role="tab" aria-selected="false" aria-controls="p-journal"   id="t-journal">Journal</button>
+  <button role="tab" aria-selected="false" aria-controls="p-chat"      id="t-chat">Chat</button>
+</nav>
+
+<main>
+  <!-- ================= TODAY ================= -->
+  <section class="panel active" id="p-today" role="tabpanel" aria-labelledby="t-today">
+
+    <div class="card">
+      <h2>Today</h2>
+      <div class="stats">
+        <div class="stat"><div class="k">Allocated</div><div class="v">$50.00</div></div>
+        <div class="stat"><div class="k">Deployed</div><div class="v">$0.00</div></div>
+        <div class="stat"><div class="k">Realised P&amp;L</div><div class="v">$0.00</div></div>
+        <div class="stat"><div class="k">Open positions</div><div class="v">0</div></div>
+      </div>
+      <p class="note">No capital is deployed and no position can be opened: this build
+        contains no broker adapter, paper or live.</p>
+    </div>
+
+    <div class="card">
+      <h2>Stock analysis</h2>
+      <form class="search" id="search-form" role="search">
+        <label class="sr-only" for="sym-input">Ticker symbol</label>
+        <input id="sym-input" placeholder="Enter a ticker, e.g. NVDA"
+               autocomplete="off" spellcheck="false" maxlength="6">
+        <button type="submit">Analyse</button>
+      </form>
+      <div class="quick" id="quick-syms" aria-label="Example symbols"></div>
+    </div>
+
+    <div id="analysis-out" aria-live="polite"></div>
+  </section>
+
+  <!-- ================= MARKET ================= -->
+  <section class="panel" id="p-market" role="tabpanel" aria-labelledby="t-market">
+    <div id="market-out"></div>
+  </section>
+
+  <!-- ================= WATCHING ================= -->
+  <section class="panel" id="p-watching" role="tabpanel" aria-labelledby="t-watching">
+    <div class="card">
+      <h2>My watchlist</h2>
+      <div id="watchlist-out"></div>
+    </div>
+    <div class="card">
+      <h2>Scanner candidates</h2>
+      <p class="note" style="margin-top:0">Symbols the scanner ranked as worth a closer
+        look. This is a research priority, not a recommendation and not a forecast.</p>
+      <div id="candidates-out"><div class="spinner">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- ================= PLACEHOLDERS ================= -->
+  <section class="panel" id="p-positions" role="tabpanel" aria-labelledby="t-positions">
+    <div class="card"><div class="soon">
+      <strong>Coming in Trading Agent</strong>
+      Positions appear once a paper broker exists. Nothing is simulated here.
+    </div></div>
+  </section>
+  <section class="panel" id="p-decisions" role="tabpanel" aria-labelledby="t-decisions">
+    <div class="card"><div class="soon">
+      <strong>Coming in Trading Agent</strong>
+      Trade hypotheses and risk decisions arrive with the Risk Governor.
+    </div></div>
+  </section>
+  <section class="panel" id="p-journal" role="tabpanel" aria-labelledby="t-journal">
+    <div class="card"><div class="soon">
+      <strong>Coming in Trading Agent</strong>
+      The trade journal records taken and rejected trades once trades exist.
+    </div></div>
+  </section>
+  <section class="panel" id="p-chat" role="tabpanel" aria-labelledby="t-chat">
+    <div class="card"><div class="soon">
+      <strong>Chat stays on the production app</strong>
+      This review build focuses on the analysis presentation. The existing
+      chatbot is unchanged.
+    </div></div>
+  </section>
+
+  <div class="card">
+    <details class="info">
+      <summary>How this analysis works</summary>
+      <div>
+        <p style="margin-top:0">The system combines several technical indicators, but
+        indicators that measure similar behaviour are <strong>grouped together</strong> so
+        they cannot artificially inflate conviction. A strong signal requires agreement
+        <em>across</em> independent categories, not several readings of the same thing.</p>
+        <p><strong>Trend</strong> — where price sits relative to its moving averages
+        (MA crossover, golden/death cross).<br>
+        <strong>Momentum</strong> — rate and direction of recent change
+        (RSI, MACD, 10-day momentum).<br>
+        <strong>Mean reversion</strong> — whether price is stretched from its range
+        (Bollinger Bands).</p>
+        <p>The grouping was chosen from measured correlation between the signals' votes,
+        not by intuition. When signals <em>inside</em> one group disagree, that group's
+        influence is halved. When the groups themselves disagree, the result is HOLD.</p>
+        <p style="margin-bottom:0"><strong>This is analysis of past price data. It is not
+        investment advice and it does not predict future prices.</strong></p>
+      </div>
+    </details>
+  </div>
+</main>
+
+<div class="backdrop" id="backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal" id="modal">
+    <div class="modal-head">
+      <h2 id="modal-title">Details</h2>
+      <button class="close" id="modal-close" aria-label="Close details">×</button>
+    </div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<script>
+const API = "https://drpkjhfv4x77f5bgfelped7aki0thixd.lambda-url.us-east-2.on.aws";
+const EXAMPLES = ["NVDA", "AAPL", "TSLA", "MSFT", "AMD", "SPY"];
+const WL_KEY = "agentReviewWatchlist";
+
+/* ---------------- formatting ---------------- */
+
+// Keeps the sign on a dollar figure. Math.abs() alone rendered -9.00 as
+// "$9.00", dropping the minus from a financial number while the
+// percentage beside it stayed negative.
+function money(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return "N/A";
+  const sign = n > 0 ? "+" : (n < 0 ? "-" : "");
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
+}
+function plainMoney(v) {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : "N/A";
+}
+function pct(v, digits = 2) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return "N/A";
+  return `${n > 0 ? "+" : ""}${n.toFixed(digits)}%`;
+}
+function num(v, digits = 2) {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n.toFixed(digits) : "N/A";
+}
+function parsePct(s) {
+  if (s === null || s === undefined) return NaN;
+  return parseFloat(String(s).replace("%", ""));
+}
+function age(sec) {
+  if (sec === null || sec === undefined) return "unknown age";
+  const n = Number(sec);
+  if (n < 90) return `${Math.round(n)} sec ago`;
+  if (n < 5400) return `${Math.round(n / 60)} min ago`;
+  return `${(n / 3600).toFixed(1)} h ago`;
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Direction is never conveyed by colour alone: every state carries a
+// glyph and a word as well.
+const DIR = {
+  BUY:       { cls: "dir-buy",  g: "▲", word: "Buy",     grp: "g-buy"   },
+  SELL:      { cls: "dir-sell", g: "▼", word: "Sell",    grp: "g-sell"  },
+  HOLD:      { cls: "dir-hold", g: "■", word: "Hold",    grp: ""        },
+  NEUTRAL:   { cls: "dir-hold", g: "■", word: "Neutral", grp: ""        },
+  NO_SIGNAL: { cls: "dir-hold", g: "—", word: "No signal", grp: ""      },
+};
+function dirOf(d) { return DIR[d] || DIR.NEUTRAL; }
+function badge(d) {
+  const m = dirOf(d);
+  const colour = d === "BUY" ? "var(--up)" : d === "SELL" ? "var(--down)" : "var(--flat)";
+  return `<span class="badge" style="color:${colour};border-color:${colour}">
+    <span class="glyph" aria-hidden="true">${m.g}</span> ${esc(m.word).toUpperCase()}</span>`;
+}
+
+/* ---------------- state ---------------- */
+let currentAnalysis = null;
+let lastFocused = null;
+
+function loadWatchlist() {
+  try { return JSON.parse(localStorage.getItem(WL_KEY) || "[]"); }
+  catch { return []; }
+}
+function saveWatchlist(list) {
+  try { localStorage.setItem(WL_KEY, JSON.stringify(list)); } catch {}
+}
+
+/* ---------------- rendering ---------------- */
+
+function agreementBlock(a) {
+  const strengthColour = a.recommendation === "BUY" ? "var(--up)"
+    : a.recommendation === "SELL" ? "var(--down)" : "var(--flat)";
+  const width = Math.round((a.signal_agreement || 0) * 100);
+  return `
+  <div class="agree">
+    <div class="agree-top">
+      <span class="agree-label">Signal agreement</span>
+      <span class="agree-val" style="color:${strengthColour}">${a.signal_strength}</span>
+      <span class="agree-val" style="color:var(--text-faint)">(${(a.signal_agreement ?? 0).toFixed(2)})</span>
+    </div>
+    <div class="bar" role="img"
+         aria-label="Signal agreement ${(a.signal_agreement ?? 0).toFixed(2)} of 1.0, described as ${esc(a.signal_strength)}">
+      <span style="width:${width}%;background:${strengthColour}"></span>
+    </div>
+    <details class="info">
+      <summary>What does signal agreement mean?</summary>
+      <div>${esc(a.agreement_meaning)}</div>
+    </details>
+  </div>`;
+}
+
+function tallyBlock(a) {
+  const s = a.agreement_summary || {};
+  const row = (n, d, label) => `
+    <div class="tally-row">
+      <span class="n" style="color:${d === "BUY" ? "var(--up)" : d === "SELL" ? "var(--down)" : "var(--flat)"}">${n}</span>
+      <span class="glyph" aria-hidden="true" style="color:${d === "BUY" ? "var(--up)" : d === "SELL" ? "var(--down)" : "var(--flat)"}">${dirOf(d).g}</span>
+      <span>${label}</span>
+    </div>`;
+  return `
+  <div class="tally">
+    ${row(s.buy_groups ?? 0, "BUY", "group" + ((s.buy_groups === 1) ? "" : "s") + " support Buy")}
+    ${row(s.sell_groups ?? 0, "SELL", "group" + ((s.sell_groups === 1) ? "" : "s") + " support Sell")}
+    ${row(s.neutral_or_silent ?? 0, "NEUTRAL", "neutral or no signal")}
+    <div class="tally-verdict">${esc(s.verdict || "")}</div>
+    <div class="note" style="margin-top:4px">
+      ${s.raw_signals_fired ?? 0} indicators fired, grouped into
+      ${s.groups_with_opinion ?? 0} independent opinion${(s.groups_with_opinion === 1) ? "" : "s"}
+      of ${s.groups_total ?? 3} categories.
+    </div>
+  </div>`;
+}
+
+function groupCard(g) {
+  const m = dirOf(g.direction);
+  const cls = g.internal_disagreement ? "g-mixed" : m.grp;
+  const members = (g.members || []).map(x => `
+    <div class="member">
+      <span class="mn">${esc(x.label)}</span>
+      <span class="mv" style="color:${x.direction === "BUY" ? "var(--up)"
+        : x.direction === "SELL" ? "var(--down)" : "var(--flat)"}">
+        <span class="glyph" aria-hidden="true">${dirOf(x.direction).g}</span>
+        ${esc(dirOf(x.direction).word)}
+      </span>
+    </div>`).join("");
+  return `
+  <div class="group ${cls}">
+    <div class="group-head">
+      <span class="group-name">${esc(g.label)}</span>
+      ${badge(g.internal_disagreement ? "NEUTRAL" : g.direction)}
+    </div>
+    <div class="group-desc">${esc(g.description)}</div>
+    ${g.internal_disagreement ? `<div class="badge" style="color:var(--warn);border-color:var(--warn);margin-top:8px;display:inline-block">MIXED</div>` : ""}
+    <div class="group-summary">${esc(g.summary)}</div>
+    ${members ? `<div class="members">${members}</div>` : ""}
+    ${g.internal_disagreement
+      ? `<div class="conflict">Signals inside this group disagree — its influence is halved.</div>` : ""}
+    ${g.direction === "NO_SIGNAL"
+      ? `<div class="note">Not counted. "No signal" is not the same as neutral.</div>` : ""}
+  </div>`;
+}
+
+function whyBlock(a) {
+  const e = a.explanation || {};
+  return `
+  <div class="why">
+    <h3>${esc(e.headline || "Why this result?")}</h3>
+    <ul>${(e.lines || []).map(l => `<li>${esc(l)}</li>`).join("")}</ul>
+  </div>`;
+}
+
+function macdCard(m) {
+  if (!m || !m.available) {
+    return `<div class="ind"><h4>MACD</h4><div class="empty">Not available — ${esc(m?.note || "insufficient history")}</div></div>`;
+  }
+  const bull = m.crossover === "bullish";
+  const col = bull ? "var(--up)" : "var(--down)";
+  return `
+  <div class="ind">
+    <h4>MACD</h4>
+    <div class="kv"><span class="k">MACD line</span><span class="v">${num(m.macd_line)}</span></div>
+    <div class="kv"><span class="k">Signal line</span><span class="v">${num(m.signal_line)}</span></div>
+    <div class="kv"><span class="k">Histogram</span><span class="v" style="color:${col}">${num(m.histogram)}</span></div>
+    <div class="kv"><span class="k">Relation</span><span class="v" style="color:${col}">${esc(m.relation)}</span></div>
+    <div class="read" style="color:${col}">
+      <span class="glyph" aria-hidden="true">${bull ? "▲" : "▼"}</span> ${esc(m.interpretation)}
+    </div>
+    <div class="note">${esc(m.note)}</div>
+  </div>`;
+}
+
+function rsiCard(r) {
+  if (!r || !r.available) return `<div class="ind"><h4>RSI</h4><div class="empty">Not available</div></div>`;
+  return `
+  <div class="ind">
+    <h4>RSI (14)</h4>
+    <div class="kv"><span class="k">Value</span><span class="v">${num(r.value, 1)}</span></div>
+    <div class="kv"><span class="k">Zone</span><span class="v">${esc(r.zone)}</span></div>
+    <div class="kv"><span class="k">Engine vote</span><span class="v">${esc((r.engine_vote || "none").toUpperCase())}</span></div>
+    <div class="read">${esc(r.reading)}</div>
+    <div class="note">${esc(r.note)}</div>
+  </div>`;
+}
+
+function maCard(ma) {
+  if (!ma || !ma.available) return `<div class="ind"><h4>Moving averages</h4><div class="empty">Not available</div></div>`;
+  return `
+  <div class="ind">
+    <h4>Moving averages</h4>
+    <div class="kv"><span class="k">Price</span><span class="v">${plainMoney(ma.price)}</span></div>
+    <div class="kv"><span class="k">SMA 20</span><span class="v">${plainMoney(ma.sma_20)}</span></div>
+    <div class="kv"><span class="k">SMA 50</span><span class="v">${plainMoney(ma.sma_50)}</span></div>
+    <div class="kv"><span class="k">Structure</span><span class="v">${esc(ma.structure)}</span></div>
+    <div class="read">${esc(ma.reading)}</div>
+  </div>`;
+}
+
+function bbCard(b) {
+  if (!b || !b.available) {
+    return `<div class="ind"><h4>Bollinger bands</h4>
+      <div class="empty">No reading${b?.note ? " — " + esc(b.note) : ""}</div></div>`;
+  }
+  return `
+  <div class="ind">
+    <h4>Bollinger bands (20)</h4>
+    <div class="kv"><span class="k">Upper</span><span class="v">${plainMoney(b.upper)}</span></div>
+    <div class="kv"><span class="k">Midline</span><span class="v">${plainMoney(b.middle)}</span></div>
+    <div class="kv"><span class="k">Lower</span><span class="v">${plainMoney(b.lower)}</span></div>
+    <div class="kv"><span class="k">Price</span><span class="v">${plainMoney(b.price)}</span></div>
+    <div class="kv"><span class="k">Position</span><span class="v">${num(b.position_pct, 0)}% of range</span></div>
+    <div class="read">${esc(b.where)} · engine vote ${esc((b.engine_vote || "none").toUpperCase())}</div>
+    <div class="note">${esc(b.note)}</div>
+  </div>`;
+}
+
+function dataQualityBlock(dq) {
+  if (!dq) return "";
+  let banner = "";
+  if (dq.freshness === "STALE") {
+    banner = `<div class="banner warn"><span aria-hidden="true">⚠</span>
+      <span><strong>STALE DATA</strong> — this analysis may not reflect current
+      conditions. Price data is ${esc(age(dq.age_seconds))}.</span></div>`;
+  } else if (dq.freshness === "MISSING" || dq.freshness === "UNKNOWN") {
+    banner = `<div class="banner err"><span aria-hidden="true">⚠</span>
+      <span><strong>DATA UNAVAILABLE OR TOO OLD</strong> — treat this analysis as
+      unreliable.</span></div>`;
+  }
+  const delayed = dq.is_delayed
+    ? `<span class="chip" style="color:var(--warn);border-color:var(--warn)">Delayed data</span>` : "";
+  return `${banner}
+  <div class="card">
+    <h2>Data quality</h2>
+    <div class="dq">
+      <span class="chip">${esc(dq.freshness)}</span>
+      ${delayed}
+      <span>Price &amp; bars: <strong>${esc(dq.sources?.price_and_bars || dq.price_source)}</strong>
+        · updated ${esc(age(dq.age_seconds))}</span>
+    </div>
+    <div class="note">
+      ${esc(dq.feed_note || "")}<br>
+      ${dq.history_bars ?? 0} daily closes used. Fundamentals are not used in this analysis.
+    </div>
+  </div>`;
+}
+
+function marketContextCard(mc) {
+  if (!mc || mc.available === false) {
+    return `<div class="card"><h2>Market context</h2>
+      <div class="empty">Market context unavailable.</div></div>`;
+  }
+  const idx = Object.entries(mc.indices || {}).map(([sym, v]) => {
+    const change = (v.change_pct ?? null);
+    const c = change === null ? "var(--flat)" : change > 0 ? "var(--up)" : change < 0 ? "var(--down)" : "var(--flat)";
+    const g = change === null ? "—" : change > 0 ? "▲" : change < 0 ? "▼" : "■";
+    return `<div><div class="t">${esc(sym)}</div>
+      <div class="c" style="color:${c}"><span class="glyph" aria-hidden="true">${g}</span>
+        ${change === null ? "N/A" : pct(change * 100)}</div></div>`;
+  }).join("");
+  return `
+  <div class="card">
+    <h2>Market context</h2>
+    <div class="verdict-head">
+      <span class="sym" style="font-size:20px">${esc(mc.regime || "UNKNOWN")}</span>
+      <span class="chip">${esc(mc.risk_posture || "—")}</span>
+      <span class="chip">${esc(mc.market_session || "—")}</span>
+    </div>
+    <div class="note" style="margin-top:6px">
+      Trend ${esc(mc.trend || "—")} · volatility ${esc(mc.volatility || "—")} ·
+      breadth ${esc(mc.breadth_proxy || "—")}
+      ${mc.regime_agreement !== undefined
+        ? ` · regime agreement ${num(mc.regime_agreement, 2)}` : ""}
+    </div>
+    ${idx ? `<div class="idx">${idx}</div>` : ""}
+    <details class="info">
+      <summary>What does regime agreement mean?</summary>
+      <div>${esc(mc.agreement_meaning || "")}</div>
+    </details>
+    <div class="note">An individual stock does not move in isolation; a hostile
+      regime raises the bar the evidence has to clear.</div>
+  </div>`;
+}
+
+function renderAnalysis(a) {
+  currentAnalysis = a;
+  if (a.analysis_available === false) {
+    return `<div class="card"><div class="banner warn"><span aria-hidden="true">⚠</span>
+      <span>${esc(a.message || "Analysis unavailable")}</span></div></div>`;
+  }
+  const m = dirOf(a.recommendation);
+  const changeN = parseFloat(a.change);
+  const pctN = parsePct(a.change_percent);
+  const changeColour = Number.isFinite(changeN)
+    ? (changeN > 0 ? "var(--up)" : changeN < 0 ? "var(--down)" : "var(--flat)") : "var(--flat)";
+  const inWatch = loadWatchlist().includes(a.symbol);
+
+  return `
+  <div class="card">
+    <div class="verdict-head">
+      <span class="sym">${esc(a.symbol)}</span>
+      <span class="px">${plainMoney(a.price)}</span>
+      <span class="delta" style="color:${changeColour}">
+        <span class="glyph" aria-hidden="true">${Number.isFinite(changeN) ? (changeN > 0 ? "▲" : changeN < 0 ? "▼" : "■") : "—"}</span>
+        ${money(a.change)} (${Number.isFinite(pctN) ? pct(pctN) : "N/A"})
+      </span>
+      <button class="pin ${inWatch ? "on" : ""}" id="pin-btn" style="margin-left:auto">
+        ${inWatch ? "✓ Watching" : "+ Watch"}
+      </button>
+    </div>
+
+    <div class="verdict">
+      <div class="callbox ${m.cls}">
+        <div class="call"><span class="glyph" aria-hidden="true">${m.g}</span>${esc(a.recommendation)}</div>
+        <div class="strength">${esc(a.signal_strength)}</div>
+      </div>
+      ${tallyBlock(a)}
+    </div>
+
+    ${agreementBlock(a)}
+    ${whyBlock(a)}
+
+    <div style="margin-top:14px">
+      <button class="icon-btn" id="detail-btn">View full analysis</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Independent signals</h2>
+    <p class="note" style="margin-top:0;margin-bottom:12px">Three categories, not six
+      votes. Indicators measuring similar behaviour share a category so they cannot
+      inflate conviction.</p>
+    <div class="groups">${(a.groups || []).map(groupCard).join("")}</div>
+  </div>
+
+  <div class="card">
+    <h2>Technical detail</h2>
+    <div class="ind-grid">
+      ${macdCard(a.indicators?.macd)}
+      ${rsiCard(a.indicators?.rsi)}
+      ${maCard(a.indicators?.moving_averages)}
+      ${bbCard(a.indicators?.bollinger)}
+      <div class="ind">
+        <h4>Other</h4>
+        <div class="kv"><span class="k">10-day momentum</span><span class="v">${pct(a.indicators?.momentum_10d)}</span></div>
+        <div class="kv"><span class="k">Volatility</span><span class="v">${num(a.indicators?.volatility_pct)}%</span></div>
+        <div class="kv"><span class="k">Risk level</span><span class="v">${esc(a.risk_level || "—")}</span></div>
+      </div>
+    </div>
+  </div>
+
+  ${marketContextCard(a.market_context)}
+  ${dataQualityBlock(a.data_quality)}
+
+  <div class="card">
+    <h2>What this does not mean</h2>
+    <ul style="margin:0;padding-left:18px;color:var(--text-dim);font-size:13.5px">
+      <li>Signal agreement is <strong>not</strong> a probability of a price move or of a
+        profitable trade.</li>
+      <li>This is technical analysis of past prices. It does not predict future prices.</li>
+      <li>A recommendation describes what the indicators currently say — it is not advice.</li>
+      <li>No order can be placed from this system. There is no broker adapter.</li>
+    </ul>
+  </div>`;
+}
+
+/* ---------------- modal ---------------- */
+
+function openModal(title, html) {
+  lastFocused = document.activeElement;
+  document.getElementById("modal-title").textContent = title;
+  document.getElementById("modal-body").innerHTML = html;
+  const bd = document.getElementById("backdrop");
+  bd.classList.add("show");
+  document.getElementById("modal-close").focus();
+}
+function closeModal() {
+  document.getElementById("backdrop").classList.remove("show");
+  if (lastFocused) lastFocused.focus();
+}
+
+function detailModal(a) {
+  const m = dirOf(a.recommendation);
+  return `
+  <div class="verdict-head">
+    <span class="sym">${esc(a.symbol)}</span>
+    <span class="px">${plainMoney(a.price)}</span>
+    <span class="delta">${money(a.change)} (${pct(parsePct(a.change_percent))})</span>
+  </div>
+  <div class="sec">
+    <h3>Recommendation</h3>
+    <div class="callbox ${m.cls}" style="display:inline-block">
+      <div class="call"><span class="glyph" aria-hidden="true">${m.g}</span>${esc(a.recommendation)}</div>
+      <div class="strength">${esc(a.signal_strength)} signal agreement</div>
+    </div>
+    ${agreementBlock(a)}
+  </div>
+  <div class="sec"><h3>Independent signals</h3>
+    <div class="groups">${(a.groups || []).map(groupCard).join("")}</div></div>
+  <div class="sec"><h3>Technical detail</h3>
+    <div class="ind-grid">
+      ${macdCard(a.indicators?.macd)}
+      ${rsiCard(a.indicators?.rsi)}
+      ${maCard(a.indicators?.moving_averages)}
+      ${bbCard(a.indicators?.bollinger)}
+    </div></div>
+  <div class="sec"><h3>Why this result</h3>${whyBlock(a)}</div>
+  <div class="sec"><h3>Market context</h3>${marketContextCard(a.market_context)}</div>
+  <div class="sec"><h3>Data quality</h3>${dataQualityBlock(a.data_quality)}</div>
+  <div class="sec"><h3>Important</h3>
+    <p class="note" style="font-size:12.5px">${esc(a.disclaimer || "")}</p></div>`;
+}
+
+/* ---------------- data loading ---------------- */
+
+async function api(path) {
+  const res = await fetch(API + path, { headers: { "Accept": "application/json" } });
+  if (!res.ok && res.status !== 404) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+async function analyse(symbol) {
+  const out = document.getElementById("analysis-out");
+  out.innerHTML = `<div class="card"><div class="spinner">Analysing ${esc(symbol)}…</div></div>`;
+  try {
+    const data = await api("/agent/analysis?symbol=" + encodeURIComponent(symbol));
+    if (data.error) {
+      out.innerHTML = `<div class="card"><div class="banner err">
+        <span aria-hidden="true">⚠</span><span>${esc(data.error)}${data.symbol ? ` — ${esc(data.symbol)}` : ""}</span></div></div>`;
+      return;
+    }
+    out.innerHTML = renderAnalysis(data);
+    wireAnalysisButtons();
+  } catch (e) {
+    out.innerHTML = `<div class="card"><div class="banner err"><span aria-hidden="true">⚠</span>
+      <span>Could not reach the analysis API. ${esc(e.message)}</span></div></div>`;
+  }
+}
+
+function wireAnalysisButtons() {
+  const detail = document.getElementById("detail-btn");
+  if (detail) detail.onclick = () =>
+    openModal(currentAnalysis.symbol + " — full analysis", detailModal(currentAnalysis));
+  const pin = document.getElementById("pin-btn");
+  if (pin) pin.onclick = () => {
+    const list = loadWatchlist();
+    const sym = currentAnalysis.symbol;
+    const next = list.includes(sym) ? list.filter(s => s !== sym) : [...list, sym];
+    saveWatchlist(next);
+    pin.classList.toggle("on", next.includes(sym));
+    pin.textContent = next.includes(sym) ? "✓ Watching" : "+ Watch";
+    renderWatchlist();
+  };
+}
+
+function renderWatchlist() {
+  const list = loadWatchlist();
+  const el = document.getElementById("watchlist-out");
+  if (!list.length) {
+    el.innerHTML = `<div class="empty">Nothing on the watchlist. Analyse a symbol and
+      choose “Watch”.</div>`;
+    return;
+  }
+  el.innerHTML = `<div class="scroll-x"><table class="grid">
+    <thead><tr><th>Symbol</th><th></th></tr></thead><tbody>
+    ${list.map(s => `<tr>
+      <td><button class="symlink" data-sym="${esc(s)}">${esc(s)}</button></td>
+      <td style="text-align:right"><button class="pin" data-remove="${esc(s)}">Remove</button></td>
+    </tr>`).join("")}</tbody></table></div>`;
+  el.querySelectorAll("[data-sym]").forEach(b =>
+    b.onclick = () => { selectTab("t-today"); analyse(b.dataset.sym); });
+  el.querySelectorAll("[data-remove]").forEach(b =>
+    b.onclick = () => { saveWatchlist(loadWatchlist().filter(s => s !== b.dataset.remove)); renderWatchlist(); });
+}
+
+async function loadMarket() {
+  const el = document.getElementById("market-out");
+  el.innerHTML = `<div class="card"><div class="spinner">Loading market context…</div></div>`;
+  try {
+    const [s, r] = await Promise.all([api("/agent/status"), api("/agent/market-regime")]);
+    document.getElementById("chip-session").textContent =
+      "Session " + (s.market_session || "—");
+    document.getElementById("chip-session").className =
+      "chip " + (s.market_session === "OPEN" ? "open" : "closed");
+
+    // The regime endpoint carries per-instrument features and the
+    // plain-English reasons behind the classification; /agent/status
+    // carries only the verdict.
+    const indices = {};
+    for (const [sym, f] of Object.entries(r.features || {})) {
+      indices[sym] = { change_pct: f.intraday_change_pct };
+    }
+    const mc = {
+      regime: r.regime ?? s.regime?.regime,
+      risk_posture: r.risk_posture ?? s.regime?.risk_posture,
+      regime_agreement: r.confidence ?? s.regime?.confidence,
+      trend: r.trend ?? s.regime?.trend,
+      volatility: r.volatility ?? s.regime?.volatility,
+      breadth_proxy: r.breadth_proxy ?? s.regime?.breadth_proxy,
+      market_session: s.market_session, indices,
+      agreement_meaning: s.regime?.confidence_meaning,
+    };
+    const reasons = (r.reasons || []).length ? `
+      <div class="card"><h2>Why this regime</h2>
+        <p class="note" style="margin-top:0"><strong>${esc(r.primary_reason || "")}</strong></p>
+        <ul style="margin:8px 0 0;padding-left:18px;color:var(--text-dim);font-size:13px">
+          ${r.reasons.slice(1).map(x => `<li>${esc(x)}</li>`).join("")}
+        </ul>
+      </div>` : "";
+
+    el.innerHTML = marketContextCard(mc) + reasons + `
+      <div class="card"><h2>Agent state</h2>
+        <div class="stats">
+          <div class="stat"><div class="k">State</div><div class="v" style="font-size:16px">${esc(s.agent_state || "—")}</div></div>
+          <div class="stat"><div class="k">Trading</div><div class="v" style="font-size:16px">${s.trading_enabled ? "Enabled" : "Disabled"}</div></div>
+          <div class="stat"><div class="k">Execution</div><div class="v" style="font-size:16px">${s.execution_available ? "Available" : "None"}</div></div>
+          <div class="stat"><div class="k">Last scan</div><div class="v" style="font-size:16px">${esc(s.last_scan_at ? s.last_scan_at.slice(11,19) + "Z" : "—")}</div></div>
+        </div>
+        <div class="note">${esc(s.execution_note || "")}</div>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="card"><div class="banner err"><span aria-hidden="true">⚠</span>
+      <span>Could not load market context. ${esc(e.message)}</span></div></div>`;
+  }
+}
+
+async function loadCandidates() {
+  const el = document.getElementById("candidates-out");
+  try {
+    const d = await api("/agent/candidates?limit=10");
+    if (!d.found || !(d.candidates || []).length) {
+      el.innerHTML = `<div class="empty">No scanner run recorded yet for this session.</div>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="note" style="margin-top:0">Regime ${esc(d.market_regime)} ·
+        posture ${esc(d.risk_posture)}</div>
+      <div class="scroll-x"><table class="grid">
+        <thead><tr><th>#</th><th>Symbol</th><th>Price</th><th>Score</th><th>Why</th></tr></thead>
+        <tbody>${d.candidates.map(c => `<tr>
+          <td>${c.rank}</td>
+          <td><button class="symlink" data-sym="${esc(c.symbol)}">${esc(c.symbol)}</button></td>
+          <td>${plainMoney(c.price)}</td>
+          <td>${num(c.scanner_score, 1)}</td>
+          <td style="color:var(--text-dim);font-size:12px">${esc((c.reasons || []).slice(0,2).join(", "))}</td>
+        </tr>`).join("")}</tbody></table></div>
+      <div class="note">${esc(d.score_meaning || "")}</div>`;
+    el.querySelectorAll("[data-sym]").forEach(b =>
+      b.onclick = () => { selectTab("t-today"); analyse(b.dataset.sym); });
+  } catch (e) {
+    el.innerHTML = `<div class="empty">Scanner data unavailable (${esc(e.message)}).</div>`;
+  }
+}
+
+/* ---------------- tabs, theme, wiring ---------------- */
+
+function selectTab(id) {
+  document.querySelectorAll('nav.tabs button').forEach(b => {
+    const on = b.id === id;
+    b.setAttribute("aria-selected", on ? "true" : "false");
+    document.getElementById(b.getAttribute("aria-controls")).classList.toggle("active", on);
+  });
+  if (id === "t-market") loadMarket();
+  if (id === "t-watching") { renderWatchlist(); loadCandidates(); }
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  const btn = document.getElementById("theme-btn");
+  const toLight = theme === "dark";
+  btn.innerHTML = `<span aria-hidden="true">${toLight ? "☀︎" : "☾"}</span> ${toLight ? "Light" : "Dark"}`;
+  btn.setAttribute("aria-label", `Switch to ${toLight ? "light" : "dark"} mode`);
+  try { localStorage.setItem("agentReviewTheme", theme); } catch {}
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  try { applyTheme(localStorage.getItem("agentReviewTheme") || "dark"); }
+  catch { applyTheme("dark"); }
+
+  document.getElementById("theme-btn").onclick = () =>
+    applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+
+  document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => selectTab(b.id));
+
+  const quick = document.getElementById("quick-syms");
+  quick.innerHTML = EXAMPLES.map(s => `<button data-sym="${s}">${s}</button>`).join("");
+  quick.querySelectorAll("[data-sym]").forEach(b =>
+    b.onclick = () => { document.getElementById("sym-input").value = b.dataset.sym; analyse(b.dataset.sym); });
+
+  document.getElementById("search-form").onsubmit = ev => {
+    ev.preventDefault();
+    const v = document.getElementById("sym-input").value.trim().toUpperCase();
+    if (v) analyse(v);
+  };
+
+  document.getElementById("modal-close").onclick = closeModal;
+  document.getElementById("backdrop").onclick = ev => {
+    if (ev.target.id === "backdrop") closeModal();
+  };
+  document.addEventListener("keydown", ev => {
+    if (ev.key === "Escape" && document.getElementById("backdrop").classList.contains("show")) closeModal();
+  });
+
+  loadMarket();
+  renderWatchlist();
+  analyse("NVDA");
+});
+</script>
+</body>
+</html>
