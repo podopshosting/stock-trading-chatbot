@@ -83,6 +83,21 @@ Earlier cohorts stay as they are and must not be upgraded retroactively:
 - **Cohort 1** (SHA `8674df7`): **VOID** — two defects meant it could not trade.
 - **Cohort 2** (SHA `66989c4`, 2026-10-01 13:39:39): `OPERATIONAL_VALIDATION_ONLY` — it ran on the 15-minute delayed tape.
 
+**The 2026-10-01 session straddles both.** Its first cycle ran at
+13:32:42 on `8674df7`; the redeploy landed at 13:39:39, and the
+remaining 64 cycles ran on `66989c4`. A runtime change inside a session
+is `RUNTIME_VERSION_CHANGED_MID_SESSION` and makes the session
+unattributable, so it must not be counted toward either cohort's
+strategy evidence.
+
+The session's own tally does not say so: per-cycle SHA recording shipped
+in the same work as that redeploy, so the artifact running at session
+open could not record it, and the tally reports a single SHA with the
+feed as its only reason. See
+[CYCLE-ARTIFACT-LAG.md](CYCLE-ARTIFACT-LAG.md). From the cohort created
+below this is self-reporting, because the deployed artifact records
+per-cycle SHAs.
+
 ## What will change in behaviour, and why
 
 The Risk Governor now judges freshness on the **data's** timestamp rather
