@@ -22,6 +22,7 @@ from agent.replay import (                                        # noqa: E402
     Bar, LookaheadError, PointInTimeEvidence, PointInTimeSeries,
     ReplayBroker, ReplayClock, ReplayConfig, ReplayResult, run,
     UnadjustedCorporateAction, adjust_bars_for_splits, find_discontinuities,
+    PointInTimeFundamentals,
 )
 
 
@@ -647,3 +648,85 @@ class TestUnadjustedCorporateActions(unittest.TestCase):
         self.assertAlmostEqual(adj[0].close, 100.0)
         self.assertAlmostEqual(adj[1].close, 100.0)
         self.assertAlmostEqual(adj[2].close, 100.0)
+
+
+class TestFundamentalsAreGatedOnFilingDate(unittest.TestCase):
+    """The subtlest leak available to a replay. A quarter ending 27 June
+    is not public on 27 June - Apple's actually filed 2026-08-01. Gating
+    on the period end hands the strategy five weeks of hindsight about
+    results nobody had, and because the data is genuinely historical the
+    run looks impeccable."""
+
+    FACTS = [
+        {"concept": "Revenues", "period_end": "2026-03-28",
+         "filed": "2026-05-02", "value": 90.0},
+        {"concept": "Revenues", "period_end": "2026-06-27",
+         "filed": "2026-08-01", "value": 94.0},
+        {"concept": "Revenues", "period_end": "2026-06-27",
+         "value": 99.0},                      # no filing date at all
+    ]
+
+    def at(self, day, facts=None):
+        return PointInTimeFundamentals(facts if facts is not None
+                                       else self.FACTS, ReplayClock(day))
+
+    def test_a_quarter_is_invisible_before_it_is_filed(self):
+        f = self.at("2026-07-15")
+        self.assertEqual([r["value"] for r in f.visible()], [90.0])
+        self.assertEqual(f.latest()["value"], 90.0)
+
+    def test_the_same_quarter_is_visible_once_filed(self):
+        """The control: without it, the test above could pass because
+        nothing is ever visible."""
+        self.assertEqual(self.at("2026-08-15").latest()["value"], 94.0)
+
+    def test_a_fact_with_no_filing_date_is_never_served(self):
+        """It cannot be shown to have been knowable, so it is not used -
+        at either date, including after every real filing is public."""
+        for day in ("2026-07-15", "2026-08-15"):
+            with self.subTest(day=day):
+                f = self.at(day)
+                self.assertNotIn(99.0, [r["value"] for r in f.visible()])
+                self.assertEqual(f.undated_count, 1)
+
+    def test_a_withheld_quarter_is_counted_rather_than_hidden(self):
+        f = self.at("2026-07-15")
+        self.assertEqual([r["value"] for r in f.withheld()], [94.0])
+
+    def test_coverage_reports_what_was_discarded_and_why(self):
+        c = self.at("2026-07-15").coverage()
+        self.assertEqual(c["total"], 3)
+        self.assertEqual(c["visible"], 1)
+        self.assertEqual(c["withheld_not_yet_filed"], 1)
+        self.assertEqual(c["discarded_no_filing_date"], 1)
+        self.assertEqual(c["gated_on"], "filed")
+
+    def test_period_end_is_not_what_decides_visibility(self):
+        """Stated directly, because this is the whole point: the June
+        quarter has the later period end and is still the hidden one."""
+        f = self.at("2026-07-15")
+        visible = f.visible()
+        self.assertEqual(len(visible), 1)
+        self.assertEqual(visible[0]["period_end"], "2026-03-28")
+
+    def test_a_late_filed_restatement_does_not_displace_by_period_end(self):
+        """Ordered by filing date first. By period end alone, a
+        restatement covering an earlier quarter but filed later would
+        displace the figure actually in front of the market."""
+        f = self.at("2026-09-01", facts=self.FACTS + [
+            {"concept": "Revenues", "period_end": "2026-03-28",
+             "filed": "2026-08-20", "value": 91.5}])
+        self.assertEqual(f.latest()["value"], 91.5)
+
+    def test_concept_filtering_still_respects_the_gate(self):
+        f = self.at("2026-07-15")
+        self.assertEqual(len(f.visible("Revenues")), 1)
+        self.assertIsNone(f.latest("NetIncomeLoss"))
+
+    def test_an_unstarted_clock_serves_nothing_rather_than_everything(self):
+        """ReplayClock treats an unset timestamp as "everything is
+        visible", which is sensible for a clock and catastrophic here:
+        it would serve every filing ever made."""
+        f = PointInTimeFundamentals(self.FACTS, ReplayClock())
+        self.assertEqual(f.visible(), [])
+        self.assertIsNone(f.latest())

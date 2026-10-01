@@ -285,3 +285,79 @@ def find_discontinuities(bars: Sequence[Bar]) -> List[Dict]:
             "nearest_ratio": match,
         })
     return found
+
+
+class PointInTimeFundamentals:
+    """Company facts gated by FILING date, never by period end.
+
+    This is the subtlest leak available to a replay. A quarter ending
+    27 June is not public on 27 June; it is filed weeks later. Gating on
+    the period end hands the strategy five or six weeks of hindsight
+    about results nobody had yet, and because the data is genuinely
+    historical the run looks impeccable.
+
+    Company Intelligence measures freshness from the period end, which
+    is right for "how stale is this view of the company" and wrong for
+    "was this knowable then". Both questions are legitimate; using one
+    answer for the other is the bug.
+    """
+
+    def __init__(self, facts: Iterable[Dict], clock: ReplayClock,
+                 filed_key: str = "filed"):
+        self._facts = list(facts)
+        self._clock = clock
+        self._key = filed_key
+        # A fact with no filing date cannot be shown to have been
+        # knowable. Served never, counted always, so a run can report
+        # how much of its fundamental data it had to discard rather than
+        # quietly proceeding on a thinner basis than intended.
+        self._undated = [f for f in self._facts if not f.get(filed_key)]
+
+    @property
+    def undated_count(self) -> int:
+        return len(self._undated)
+
+    @property
+    def total_count(self) -> int:
+        return len(self._facts)
+
+    def visible(self, concept: Optional[str] = None) -> List[Dict]:
+        # A clock with no timestamp treats everything as visible, which
+        # is reasonable for a clock and catastrophic here: it would serve
+        # every filing ever made. Fail closed instead - an ungated feed
+        # is the leak this class exists to prevent.
+        if self._clock.timestamp is None:
+            return []
+        out = [f for f in self._facts
+               if f.get(self._key) and self._clock.is_visible(f[self._key])]
+        if concept is not None:
+            out = [f for f in out if f.get("concept") == concept]
+        return out
+
+    def latest(self, concept: Optional[str] = None) -> Optional[Dict]:
+        """The most recently FILED fact that was public by now.
+
+        Ordered by filing date, then period end. Ordering by period end
+        alone would let a restatement filed later but covering an earlier
+        quarter displace the figure actually in front of the market.
+        """
+        rows = self.visible(concept)
+        if not rows:
+            return None
+        return max(rows, key=lambda f: (f.get(self._key) or "",
+                                        f.get("period_end") or ""))
+
+    def withheld(self) -> List[Dict]:
+        """Facts that exist but were not yet public. For reporting."""
+        return [f for f in self._facts
+                if f.get(self._key)
+                and not self._clock.is_visible(f[self._key])]
+
+    def coverage(self) -> Dict:
+        visible = self.visible()
+        return {"total": len(self._facts), "visible": len(visible),
+                "withheld_not_yet_filed": len(self.withheld()),
+                "discarded_no_filing_date": self.undated_count,
+                "gated_on": self._key,
+                "note": ("gated on filing date, not period end: a quarter "
+                         "is not public on the day it ends")}
