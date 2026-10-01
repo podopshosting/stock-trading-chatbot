@@ -71,3 +71,55 @@ class TestHolding(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAgingDataCapsTheVerdict(unittest.TestCase):
+    """
+    Found by live validation 2026-10-01: COST read FAVORABLE while its
+    fundamentals were AGING. Freshness was held out of the factor tally
+    (it is not a fact about the company) and was then ignored entirely,
+    so a favourable reading could rest on a stale quarter.
+    """
+
+    def run_(self, freshness):
+        return holding_context(
+            dividend=ACTIVE, fundamentals=fund(), earnings_trends=EPS_UP,
+            splits=None, days_to_earnings=None, freshness=freshness)
+
+    def test_current_data_can_still_be_favorable(self):
+        """The control: without it, capping could hide a verdict that was
+        never reachable."""
+        self.assertEqual(self.run_("CURRENT")["label"], "FAVORABLE")
+
+    def test_aging_data_is_capped_at_neutral(self):
+        out = self.run_("AGING")
+        self.assertEqual(out["label"], "NEUTRAL")
+        self.assertIn("AGING", out["why"])
+        self.assertIn("not shown to be current", out["why"])
+
+    def test_stale_data_still_yields_insufficient(self):
+        self.assertEqual(self.run_("STALE")["label"], "INSUFFICIENT_DATA")
+
+    def test_unknown_freshness_is_not_promoted_to_favorable(self):
+        self.assertNotEqual(self.run_("UNKNOWN")["label"], "FAVORABLE")
+
+    def test_the_freshness_factor_is_still_reported(self):
+        out = self.run_("AGING")
+        factor = [f for f in out["factors"]
+                  if f["factor"] == "data_freshness"][0]
+        self.assertEqual(factor["state"], "CAUTION")
+
+    def test_absent_freshness_is_not_promoted_to_favorable(self):
+        out = holding_context(
+            dividend=ACTIVE, fundamentals=fund(), earnings_trends=EPS_UP,
+            splits=None, days_to_earnings=None, freshness=None)
+        self.assertEqual(out["label"], "NEUTRAL")
+        self.assertIn("unknown age", out["why"])
+
+    def test_favorable_requires_current_not_merely_not_aging(self):
+        """An allowlist: a freshness label nobody has seen before must
+        not reach FAVORABLE by default."""
+        out = holding_context(
+            dividend=ACTIVE, fundamentals=fund(), earnings_trends=EPS_UP,
+            splits=None, days_to_earnings=None, freshness="SOME_NEW_LABEL")
+        self.assertEqual(out["label"], "NEUTRAL")

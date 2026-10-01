@@ -154,3 +154,73 @@ class TestPerformance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMajorGroupMatchingDoesNotLumpUnrelatedIndustries(unittest.TestCase):
+    """
+    Found by live validation 2026-10-01. Matching on the 2-digit SIC
+    major group put Apple (3571, electronic computers) in with
+    Caterpillar and Deere (3531/3523, construction and farm machinery),
+    and made NVIDIA (3674, semiconductors) a peer of General Electric
+    (3600, electrical equipment). Both lists looked plausible.
+    """
+
+    def peers_of(self, subject, candidates):
+        ps = PE.select(subject, candidates)
+        return {p["symbol"] for p in ps.peers}
+
+    def test_computers_are_not_peers_of_farm_and_construction_machinery(self):
+        """Comparable caps deliberately. With Apple's real cap these are
+        rejected as cap outliers whether the SIC logic is right or not,
+        so the test would pass without guarding anything."""
+        aapl = prof("AAPL", "3571", 300e9)
+        cands = [prof("CAT", "3531", 200e9), prof("DE", "3523", 150e9)]
+        self.assertEqual(self.peers_of(aapl, cands), set())
+
+    def test_semiconductors_are_not_peers_of_electrical_equipment(self):
+        nvda = prof("NVDA", "3674", 5500e9)
+        self.assertEqual(self.peers_of(nvda, [prof("GE", "3600", 324e9)]),
+                         set())
+
+    def test_the_relation_is_refused_in_both_directions(self):
+        ge = prof("GE", "3600", 324e9)
+        self.assertEqual(self.peers_of(ge, [prof("NVDA", "3674", 5500e9)]),
+                         set())
+
+    def test_cars_are_not_peers_of_aircraft(self):
+        tsla = prof("TSLA", "3711", 1400e9)
+        self.assertEqual(self.peers_of(tsla, [prof("BA", "3721", 180e9)]),
+                         set())
+
+    def test_the_same_industry_group_is_still_a_peer(self):
+        """The control: three-digit matching must still work, or the
+        rejections above would prove only that nothing can be a peer."""
+        aapl = prof("AAPL", "3571", 4800e9)
+        peers = self.peers_of(aapl, [prof("IBM", "3570", 300e9),
+                                     prof("CSCO", "3576", 280e9)])
+        self.assertEqual(peers, {"IBM", "CSCO"})
+
+    def test_identical_sic_codes_are_still_peers(self):
+        """Comparable caps on purpose: a 27x cap gap is rejected as an
+        outlier by design, which would mask whether SIC matching ran."""
+        nvda = prof("NVDA", "3674", 500e9)
+        peers = self.peers_of(nvda, [prof("AMD", "3674", 400e9),
+                                     prof("INTC", "3674", 200e9)])
+        self.assertEqual(peers, {"AMD", "INTC"})
+
+    def test_food_remains_cohesive_at_the_major_group(self):
+        """Major group 20 genuinely competes with itself: grain mills,
+        canned goods and confectionery are one industry."""
+        gis = prof("GIS", "2040", 17e9)
+        peers = self.peers_of(gis, [prof("CPB", "2030", 12e9),
+                                    prof("HSY", "2064", 35e9)])
+        self.assertEqual(peers, {"CPB", "HSY"})
+
+    def test_the_cohesive_list_is_short_and_explicit(self):
+        """A long list would mean asserting that many whole major groups
+        compete with themselves, which is usually false."""
+        self.assertLessEqual(len(PE.COHESIVE_MAJOR_GROUPS), 6)
+        self.assertIn("20", PE.COHESIVE_MAJOR_GROUPS)
+        for group in ("35", "36", "37", "28"):
+            with self.subTest(group=group):
+                self.assertNotIn(group, PE.COHESIVE_MAJOR_GROUPS)

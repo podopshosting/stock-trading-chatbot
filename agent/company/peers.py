@@ -25,6 +25,23 @@ STRUCTURED_REASONS = {"SAME_SIC", "SAME_SIC_GROUP", "SAME_SIC_MAJOR",
 INDUSTRY_REASONS = {"SAME_SIC", "SAME_SIC_GROUP", "SAME_SIC_MAJOR",
                     "SAME_INDUSTRY"}
 CAP_BAND = (0.2, 5.0)        # SIMILAR_MARKET_CAP
+
+# SIC major groups (2 digits) that are genuinely ONE industry, so a
+# 2-digit match is real evidence. Everywhere else a 2-digit match is not:
+# verified live 2026-10-01, major group 35 put Apple (3571, electronic
+# computers) in with Caterpillar and Deere (3531/3523, construction and
+# farm machinery), and major group 36 made NVIDIA (3674, semiconductors)
+# a peer of General Electric (3600, electrical equipment). Both were
+# wrong, and both looked plausible in a list.
+#
+# This list is deliberately short. Adding to it is a judgement that a
+# whole major group competes with itself, which is usually false.
+COHESIVE_MAJOR_GROUPS = {
+    "20",   # Food and Kindred Products - grain mills, canned goods,
+            # dairy, confectionery and beverages genuinely compete
+    "60",   # Depository Institutions
+    "63",   # Insurance Carriers
+}
 CAP_OUTLIER = 20.0           # beyond this ratio either way: not a peer
 
 
@@ -68,8 +85,8 @@ def _evaluate(subject: CompanyProfile, c: CompanyProfile):
         reasons.append("SAME_SIC")
     elif sic_group(subject.sic) and sic_group(subject.sic) == sic_group(c.sic):
         reasons.append("SAME_SIC_GROUP")
-    elif sic_group(subject.sic, 2) and \
-            sic_group(subject.sic, 2) == sic_group(c.sic, 2):
+    elif (sic_group(subject.sic, 2) in COHESIVE_MAJOR_GROUPS
+          and sic_group(subject.sic, 2) == sic_group(c.sic, 2)):
         reasons.append("SAME_SIC_MAJOR")
     if (subject.industry and c.industry
             and subject.industry.lower() == c.industry.lower()

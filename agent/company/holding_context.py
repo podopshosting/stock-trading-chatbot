@@ -116,6 +116,12 @@ def factors(dividend, fundamentals: Optional[Dict], earnings_trends: Optional[Di
 
 
 def derive(factor_list: List[Dict], freshness: str) -> Dict:
+    # Freshness is held out of the POSITIVE/NEGATIVE tally because it is
+    # not a fact about the company. It is still allowed to cap the
+    # verdict below: AGING fundamentals were being ignored entirely, so
+    # COST read FAVORABLE on numbers from an older quarter.
+    freshness_factor = next((f for f in factor_list
+                             if f["factor"] == "data_freshness"), None)
     known = [f for f in factor_list
              if f["state"] != UNKNOWN and f["factor"] != "data_freshness"]
     count = {s: sum(f["state"] == s for f in known)
@@ -131,7 +137,18 @@ def derive(factor_list: List[Dict], freshness: str) -> Dict:
     elif count[NEGATIVE] == 1 or count[CAUTION] >= 2:
         label, why = L.CAUTIOUS, "a negative factor or several cautions"
     elif count[POSITIVE] >= 3 and count[CAUTION] == 0:
-        label, why = L.FAVORABLE, "three or more positive factors, no cautions"
+        # FAVORABLE requires data we have positively established to be
+        # current. An allowlist, not a denylist: "AGING is bad" leaves a
+        # new freshness label promoting to FAVORABLE by default, and
+        # unknown age is not the same as acceptable age.
+        if freshness == "CURRENT":
+            label, why = (L.FAVORABLE,
+                          "three or more positive factors, no cautions")
+        else:
+            label = L.NEUTRAL
+            why = ("three or more positive factors, but the fundamentals "
+                   f"are {freshness or 'of unknown age'}, so a favourable "
+                   "reading would rest on numbers not shown to be current")
     else:
         label, why = L.NEUTRAL, "mixed or limited evidence"
     return {"label": str(label), "why": why, "counts": count,
