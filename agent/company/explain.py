@@ -21,7 +21,8 @@ import re
 from typing import Callable, Dict, List, Optional
 
 INTENTS = (
-    "DIVIDEND", "LAST_DIVIDEND", "DIVIDEND_CUT", "NEXT_EX_DATE",
+    "DIVIDEND", "LAST_DIVIDEND", "DIVIDEND_CUT", "DIVIDEND_GROWTH",
+    "NEXT_EX_DATE",
     "SPLITS", "COMPETITORS", "COMPARE_WITH", "REVENUE_GROWTH",
     "MARGINS", "DEBT", "LAST_EARNINGS", "NEXT_EARNINGS",
     "HOLDING_DIFFERENCE", "CORPORATE_ACTIONS",
@@ -56,6 +57,10 @@ def classify(query: str) -> Optional[str]:
     if re.search(r"(would|does|is).*(differ|different|change).*(hold|holding|"
                  r"overnight|longer)|hold(ing)? it|if we held", q):
         return "HOLDING_DIFFERENCE"
+    if re.search(r"(dividend|payout|distribution).*(grow|growth|increas|"
+                 r"rais|hike|cagr)|"
+                 r"(grow|growth|increas|rais|hike).*(dividend|payout)", q):
+        return "DIVIDEND_GROWTH"
     if re.search(r"(cut|reduc|suspend|stopp?ed|slash).*(dividend)|"
                  r"dividend.*(cut|reduc|suspend|stopp?ed|safe)", q):
         return "DIVIDEND_CUT"
@@ -197,6 +202,44 @@ def _dividend_cut(service, symbol, _others, intent):
         f"retrieved from the provider, and a per-share amount can also "
         f"change because of a split.", ["dividends", "splits"],
         intent=intent)
+
+
+def _dividend_growth(service, symbol, _others, intent):
+    d = service.dividends(symbol)
+    g = d.get("growth") or {}
+    spans = g.get("spans") or {}
+    known = [(k, spans[k]) for k in ("1y", "3y", "5y")
+             if spans.get(k, {}).get("growth_pct") is not None]
+    if not known:
+        reasons = sorted({sp.get("reason") for sp in spans.values()
+                          if sp.get("reason")})
+        return _answer(
+            f"No dividend growth figure can be given for {symbol}: "
+            + (reasons[0] if reasons else "no regular dividends were found")
+            + ". An unreachable span is left unknown rather than reported as "
+              "zero, because a company with four years of payments has not "
+              "held its dividend flat for five.",
+            ["dividends"], grounded=True, intent=intent)
+
+    parts = []
+    for key, sp in known:
+        label = f"{key} {'a year ' if sp.get('annualised') else ''}"
+        parts.append(f"{label}{sp['growth_pct']:+.1f}%")
+    body = (f"{symbol}'s regular dividend has grown "
+            + ", ".join(parts) + ". ")
+    # Said rather than assumed: an unadjusted series turns a 4-for-1
+    # split into a 75% cut, so the reader needs to know which they have.
+    if g.get("split_adjusted"):
+        body += ("Amounts before any split are restated into current share "
+                 "terms, so a split does not appear as a cut. ")
+    unknown = [k for k in ("1y", "3y", "5y")
+               if spans.get(k, {}).get("growth_pct") is None]
+    if unknown:
+        first = spans[unknown[0]].get("reason") or "the history is too short"
+        body += (f"The {', '.join(unknown)} span(s) are unknown: {first}. ")
+    body += ("Special dividends are excluded throughout - a one-off "
+             "distribution is not a change in the regular rate.")
+    return _answer(body, ["dividends"], intent=intent)
 
 
 def _next_ex_date(service, symbol, _others, intent):
@@ -432,7 +475,8 @@ def _holding_difference(service, symbol, _others, intent):
 
 _HANDLERS: Dict[str, Callable] = {
     "DIVIDEND": _dividend, "LAST_DIVIDEND": _last_dividend,
-    "DIVIDEND_CUT": _dividend_cut, "NEXT_EX_DATE": _next_ex_date,
+    "DIVIDEND_CUT": _dividend_cut, "DIVIDEND_GROWTH": _dividend_growth,
+    "NEXT_EX_DATE": _next_ex_date,
     "SPLITS": _splits, "COMPETITORS": _competitors,
     "COMPARE_WITH": _compare_with, "REVENUE_GROWTH": _revenue_growth,
     "MARGINS": _margins, "DEBT": _debt,

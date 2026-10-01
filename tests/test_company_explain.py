@@ -338,3 +338,51 @@ class TestHoldingContextIsNotAnInstruction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDividendGrowthIsAnswered(unittest.TestCase):
+    """A growth figure is only meaningful if the reader knows whether it
+    is split-adjusted and which spans are missing, so the answer states
+    both rather than leaving them to be assumed."""
+
+    def test_the_question_routes_to_its_own_intent(self):
+        for q in ("has GIS grown its dividend?",
+                  "GIS dividend growth rate",
+                  "did GIS raise the payout",
+                  "GIS dividend cagr over 5 years"):
+            with self.subTest(q=q):
+                self.assertEqual(ce.classify(q), "DIVIDEND_GROWTH")
+
+    def test_it_does_not_capture_the_neighbouring_intents(self):
+        """The control. 'Is the dividend safe' and 'what is the yield'
+        both contain 'dividend' and must not be answered with a growth
+        rate."""
+        self.assertEqual(ce.classify("is the GIS dividend safe?"),
+                         "DIVIDEND_CUT")
+        self.assertEqual(ce.classify("what is GIS's yield"), "DIVIDEND")
+        self.assertEqual(ce.classify("when is GIS's next ex-date"),
+                         "NEXT_EX_DATE")
+
+    def test_the_answer_is_grounded_and_uses_no_model(self):
+        out = ask("has GIS grown its dividend?")
+        self.assertFalse(out["llm_used"])
+        self.assertIn("dividends", out["sources"])
+
+    def test_the_answer_says_whether_it_is_split_adjusted(self):
+        out = ask("has GIS grown its dividend?")
+        if "%" in out["answer"]:
+            self.assertIn("share terms", out["answer"])
+
+    def test_an_unknown_span_is_named_rather_than_shown_as_zero(self):
+        out = ask("has GIS grown its dividend?")
+        self.assertNotIn("0.0%", out["answer"])
+
+    def test_specials_are_declared_excluded(self):
+        out = ask("has GIS grown its dividend?")
+        if "%" in out["answer"]:
+            self.assertIn("Special dividends are excluded", out["answer"])
+
+    def test_a_non_payer_is_declined_rather_than_answered_with_zero(self):
+        out = ask("has AAPL grown its dividend?")
+        self.assertFalse(out["llm_used"])
+        self.assertTrue(out["answer"])
