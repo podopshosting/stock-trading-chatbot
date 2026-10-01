@@ -361,7 +361,12 @@ class TestDependencyOutages(unittest.TestCase):
         rig.health.raise_condition(Condition.LLM_UNAVAILABLE)
         result = rig.cycle(quote=stopping_quote, hypothesis=nothing)
         self.assertGreater(result.exits_submitted, 0)
-        self.assertEqual(rig.cycle().entries_submitted, 1)
+        # A DIFFERENT symbol: XYZ was just exited and is cooling down.
+        from agent.broker import Quote
+        rig.broker.set_quote(Quote(symbol="AAA", bid=99.9, ask=100.1,
+                                   last=100.0))
+        self.assertEqual(
+            rig.cycle(candidates=("AAA",)).entries_submitted, 1)
 
     def test_no_decision_module_imports_an_llm_client(self):
         """

@@ -160,6 +160,15 @@ class InvalidTransition(Exception):
 
 
 def allowed_targets(source: AgentState) -> Set[AgentState]:
+    if source is AgentState.EMERGENCY_STOP:
+        # Terminal, as the table above says it is. The always-reachable
+        # set used to be unioned in unconditionally, which let an
+        # emergency stop be DOWNGRADED to DAILY_RISK_LOCK and from there
+        # walked back to SCANNING through POSITION_EXITING: the
+        # documented-terminal state was not terminal, it just looked it
+        # in the table. Only re-assertion is allowed; leaving is the
+        # human act clear_emergency_stop().
+        return {AgentState.EMERGENCY_STOP}
     return set(_ALLOWED.get(source, set())) | _ALWAYS_REACHABLE
 
 

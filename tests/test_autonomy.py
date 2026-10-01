@@ -79,7 +79,7 @@ class Rig:
     """An orchestrator wired with every autonomy dependency."""
 
     def __init__(self, mode=ExecutionMode.PAPER, cash=1000.0, broker=None,
-                 with_lock=True):
+                 with_lock=True, limits=None):
         self.broker = broker or PaperBroker(PaperBrokerConfig(
             starting_cash=cash, seed=3, partial_fill_probability=0.0))
         if isinstance(self.broker, PaperBroker):
@@ -98,7 +98,7 @@ class Rig:
         self.orchestrator = MarketDayOrchestrator(
             broker=self.broker, position_manager=self.manager,
             journal=self.journal, halt_store=self.halt_store,
-            limits=RiskLimits(), cycle_lock=self.lock,
+            limits=limits or RiskLimits(), cycle_lock=self.lock,
             autonomy=AutonomyPolicy(mode=mode), health=self.health,
             alerts=self.alerts, decisions=self.decisions,
             versions=self.versions)
@@ -793,20 +793,96 @@ class TestDailyCountersSurviveClosingAPosition(unittest.TestCase):
         self.assertGreater(counters["capital_deployed_today"], 0.0)
 
     def test_the_daily_new_position_cap_holds_across_cycles(self):
-        """The bypass, as a behaviour: close and reopen until the cap."""
-        rig = Rig(cash=5000.0)
-        limits = RiskLimits()
-        for _ in range(limits.max_new_positions_per_day + 3):
+        """
+        The bypass, as a behaviour: close a position and open another,
+        repeatedly, until the cap.
+
+        Uses DISTINCT symbols. An earlier version round-tripped one
+        symbol, and once the same-session cooldown existed it stopped
+        after one trade and passed WITHOUT EVER REACHING the cap it
+        claimed to test.
+        """
+        # A generous capital limit, so the position-COUNT cap is the one
+        # that binds. With the default $50 allowance the capital ceiling
+        # binds first (two positions), which is also correct but means a
+        # count-cap test never reaches the count cap.
+        limits = RiskLimits(daily_capital_limit=5000.0,
+                            max_daily_capital=10000.0,
+                            max_concurrent_positions=1,
+                            daily_loss_limit=1000.0)
+        symbols = [f"S{i}" for i in range(limits.max_new_positions_per_day + 3)]
+        rig = Rig(cash=50000.0, limits=limits)
+        for symbol in symbols:
+            rig.broker.set_quote(Quote(symbol=symbol, bid=99.9, ask=100.1,
+                                       last=100.0))
+        for symbol in symbols:
             counters = daily_counters(rig.journal, rig.manager, SESSION)
             rig.cycle(
+                candidates=(symbol,),
                 capital_deployed=counters["capital_deployed_today"],
                 realized_pnl_today=0.0,
                 positions_opened_today=counters["positions_opened_today"])
             rig.cycle(quote=stopping_quote, hypothesis=lambda s: None,
                       realized_pnl_today=0.0)
         counters = daily_counters(rig.journal, rig.manager, SESSION)
-        self.assertLessEqual(counters["positions_opened_today"],
-                             limits.max_new_positions_per_day)
+        # EXACTLY the cap: the extra symbols were offered and refused.
+        self.assertEqual(counters["positions_opened_today"],
+                         limits.max_new_positions_per_day)
+
+    def test_a_symbol_exited_this_session_is_not_re_entered(self):
+        """
+        Buying straight back into a stop-out is churn. Found when a
+        handler test saw the agent stop out of XYZ at 96 and re-enter at
+        96 in the same cycle.
+        """
+        rig = Rig()
+        rig.open_position()
+        result = rig.cycle(quote=stopping_quote)
+        self.assertGreater(result.exits_submitted, 0)
+        self.assertEqual(result.entries_submitted, 0)
+        outcomes = [r["outcome"] for r in rig.decisions.for_session(SESSION)]
+        self.assertIn("COOLDOWN", outcomes)
+
+    def test_the_cooldown_persists_across_cycles(self):
+        rig = Rig()
+        rig.open_position()
+        rig.cycle(quote=stopping_quote, hypothesis=lambda s: None)
+        again = rig.cycle()
+        self.assertEqual(again.entries_submitted, 0)
+
+    def test_the_cooldown_does_not_block_a_different_symbol(self):
+        """The falsifying control: it must not freeze everything."""
+        rig = Rig()
+        rig.broker.set_quote(Quote(symbol="AAA", bid=99.9, ask=100.1,
+                                   last=100.0))
+        rig.open_position()
+        rig.cycle(quote=stopping_quote, hypothesis=lambda s: None)
+        self.assertEqual(rig.cycle(candidates=("AAA",)).entries_submitted, 1)
+
+    def test_the_cooldown_applies_to_the_day_only(self):
+        """A new session may trade the name again."""
+        rig = Rig()
+        rig.open_position()
+        rig.cycle(quote=stopping_quote, hypothesis=lambda s: None)
+        result = rig.orchestrator.run_cycle(
+            session_date="2026-10-02", phase=CyclePhase.INTRADAY,
+            candidates=["XYZ"], quote_for=quote_for,
+            hypothesis_for=hypothesis_for, minutes_to_close=200)
+        self.assertEqual(result.entries_submitted, 1)
+
+    def test_an_unreadable_journal_blocks_entries_rather_than_assuming_none(self):
+        """Unknown is treated as cooling down."""
+        class Broken:
+            def list_trades(self, **kw):
+                raise RuntimeError("dynamo read failed")
+
+            def record(self, t):
+                pass
+        rig = Rig()
+        rig.orchestrator.journal = Broken()
+        result = rig.cycle()
+        self.assertEqual(result.entries_submitted, 0)
+        self.assertTrue(any("cooldown unknown" in e for e in result.errors))
 
     def test_an_empty_day_has_zero_counters(self):
         rig = Rig()

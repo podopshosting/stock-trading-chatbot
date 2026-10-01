@@ -39,7 +39,9 @@ from .models import (
     CycleOutcome, CyclePhase, CycleResult, HaltReason,
 )
 
-CONFIG_VERSION = "orchestration-v1.0.0"
+# v1.1.0: same-session re-entry cooldown. Bumped because it changes
+# behaviour, which starts a new evidence cohort by design.
+CONFIG_VERSION = "orchestration-v1.1.0"
 
 # The opening minutes are excluded from entries: spreads are widest and
 # the first print is often not a price anyone could have traded.
@@ -179,6 +181,12 @@ class MarketDayOrchestrator:
                                  if self.autonomy else "LEGACY")
         result.versions = dict(self.versions)
         duplicates_before = getattr(self.broker, "duplicate_attempts", 0)
+        # closed_positions() is the manager's whole-PROCESS history. The
+        # cooldown must only see exits from THIS cycle (earlier ones are
+        # in the journal), or in a long-lived process yesterday's exit
+        # would block today's entry. Lambda hides the difference with a
+        # fresh manager per call; replay and tests do not.
+        self._closed_at_cycle_start = len(self.positions.closed_positions())
 
         # --- 0. do not run twice at once ---------------------------------
         if not self._acquire_lock(result):
@@ -818,8 +826,41 @@ class MarketDayOrchestrator:
         opened = positions_opened_today
         failures: List[str] = []
 
+        # Same-session re-entry cooldown. Buying straight back into a
+        # name that has just been stopped out of is churn: the same
+        # price, the same signal that has already been wrong once, and
+        # the daily cap is the only thing limiting it. Found when a
+        # handler test saw the agent stop out of XYZ at 96 and re-enter
+        # XYZ at 96 within the same cycle.
+        #
+        # Unknown is treated as cooling down. If the journal cannot be
+        # read, no entry is made rather than assuming nothing was
+        # traded today.
+        try:
+            exited_today = {t.symbol for t in
+                            self.journal.list_trades(session_date=session_date)}
+            exited_today |= {p.symbol for p in
+                             self.positions.closed_positions()[
+                                 getattr(self, "_closed_at_cycle_start", 0):]}
+            cooldown_known = True
+        except Exception as exc:                          # noqa: BLE001
+            exited_today, cooldown_known = set(), False
+            result.errors.append(f"cooldown unknown, no entries made: {exc}")
+
         for symbol in candidates:
             result.symbols_scanned += 1
+            if not cooldown_known:
+                self._record_decision(
+                    result, symbol, "NOT_EVALUATED",
+                    detail="today's trades could not be read, so the "
+                           "re-entry cooldown cannot be applied")
+                continue
+            if symbol in exited_today:
+                self._record_decision(
+                    result, symbol, "COOLDOWN",
+                    detail="already traded and exited this session; no "
+                           "same-session re-entry")
+                continue
             if symbol in held:
                 self._record_decision(result, symbol, "ALREADY_HELD",
                                       detail="a position is already open")

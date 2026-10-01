@@ -50,11 +50,44 @@ class TestTransitionRules(unittest.TestCase):
         self.assertTrue(can_transition(AgentState.MARKET_CLOSED, AgentState.OFFLINE))
 
     def test_safety_states_are_reachable_from_everywhere(self):
-        """A halt that needs a tidy starting state is not a halt."""
+        """A halt that needs a tidy starting state is not a halt.
+
+        The one exception is deliberate: from EMERGENCY_STOP the weaker
+        DAILY_RISK_LOCK is NOT reachable. That edge let an emergency stop
+        be downgraded and then walked back to SCANNING, so the state
+        documented as terminal was not terminal.
+        """
         for state in AgentState:
             with self.subTest(state=state):
                 self.assertIn(AgentState.EMERGENCY_STOP, allowed_targets(state))
-                self.assertIn(AgentState.DAILY_RISK_LOCK, allowed_targets(state))
+                if state is not AgentState.EMERGENCY_STOP:
+                    self.assertIn(AgentState.DAILY_RISK_LOCK,
+                                  allowed_targets(state))
+
+    def test_emergency_stop_is_terminal_for_transitions(self):
+        """Only re-assertion. Leaving is a human act."""
+        self.assertEqual(allowed_targets(AgentState.EMERGENCY_STOP),
+                         {AgentState.EMERGENCY_STOP})
+
+    def test_an_emergency_stop_cannot_be_walked_out_of_by_any_path(self):
+        """
+        The leak was a CHAIN: EMERGENCY_STOP -> DAILY_RISK_LOCK ->
+        POSITION_EXITING -> SCANNING. Checks reachability, not just the
+        first edge, because that is the shape the bug had.
+        """
+        reachable, frontier = {AgentState.EMERGENCY_STOP}, [
+            AgentState.EMERGENCY_STOP]
+        while frontier:
+            for nxt in allowed_targets(frontier.pop()):
+                if nxt not in reachable:
+                    reachable.add(nxt)
+                    frontier.append(nxt)
+        self.assertEqual(reachable, {AgentState.EMERGENCY_STOP})
+
+    def test_a_daily_risk_lock_can_still_escalate_to_an_emergency_stop(self):
+        """The falsifying control: escalation must remain possible."""
+        self.assertIn(AgentState.EMERGENCY_STOP,
+                      allowed_targets(AgentState.DAILY_RISK_LOCK))
 
     def test_invalid_transitions_are_rejected(self):
         bad = [

@@ -72,6 +72,11 @@ class SessionTally:
     halt_reasons: Dict[str, int] = field(default_factory=dict)
     first_cycle_at: Optional[str] = None
     last_cycle_at: Optional[str] = None
+    # Cash at the first cycle of the day. The end-of-day cash check is
+    # against THIS, not the account's starting balance: the starting
+    # balance is only right on day one, and from day two it would report
+    # a reconciliation failure on a perfectly healthy account.
+    opening_cash: Optional[float] = None
     finalized: bool = False
     revision: int = 0
 
@@ -268,8 +273,8 @@ class DynamoDBSessionStore(SessionStore):
 
 
 def record_cycle(store: SessionStore, session_date: str, cycle: Dict,
-                 versions: Dict, decisions: Optional[List[Dict]] = None
-                 ) -> SessionTally:
+                 versions: Dict, decisions: Optional[List[Dict]] = None,
+                 opening_cash: Optional[float] = None) -> SessionTally:
     """Fold a cycle into the day's tally.
 
     A cycle under DIFFERENT behavioural versions than the tally was
@@ -282,6 +287,8 @@ def record_cycle(store: SessionStore, session_date: str, cycle: Dict,
     if tally.cohort and tally.cohort != cohort_key(versions):
         tally.halt_reasons["COHORT_CHANGED_MID_SESSION"] = \
             tally.halt_reasons.get("COHORT_CHANGED_MID_SESSION", 0) + 1
+    if tally.opening_cash is None and opening_cash is not None:
+        tally.opening_cash = opening_cash
     tally.absorb(cycle, decisions)
     store.put(tally)
     return tally
@@ -289,8 +296,7 @@ def record_cycle(store: SessionStore, session_date: str, cycle: Dict,
 
 def build_report(tally: SessionTally, trades: List, positions_open: int,
                  broker_positions: Optional[List[Dict]],
-                 account: Optional[Dict], starting_cash: float,
-                 describe_fn=None) -> Dict:
+                 account: Optional[Dict], describe_fn=None) -> Dict:
     """The formal end-of-day verification.
 
     Each check is reported individually and `session_ok` is derived from
@@ -299,8 +305,14 @@ def build_report(tally: SessionTally, trades: List, positions_open: int,
     """
     realized = sum(t.net_pnl for t in trades)
     cash = (account or {}).get("cash")
-    expected_cash = starting_cash + realized
-    cash_ok = (cash is not None
+    # Independent of the broker: opening cash plus what the JOURNAL says
+    # the day earned. If the broker's cash disagrees, either a trade is
+    # missing from the journal or the broker did something unrecorded.
+    # With no recorded opening cash this cannot be checked, and an
+    # unverifiable reconciliation is reported as failed, not passed.
+    expected_cash = (None if tally.opening_cash is None
+                     else tally.opening_cash + realized)
+    cash_ok = (cash is not None and expected_cash is not None
                and abs(cash - expected_cash) <= CASH_TOLERANCE)
 
     broker_flat = (broker_positions is not None
@@ -326,7 +338,10 @@ def build_report(tally: SessionTally, trades: List, positions_open: int,
         "checks": checks,
         "session_ok": all(checks.values()),
         "failed_checks": [k for k, v in checks.items() if not v],
-        "cash": {"actual": cash, "expected": round(expected_cash, 4),
+        "cash": {"actual": cash,
+                 "opening": tally.opening_cash,
+                 "expected": (None if expected_cash is None
+                              else round(expected_cash, 4)),
                  "tolerance": CASH_TOLERANCE},
         "tally": tally.as_dict(),
         "zero_trade_day": tally.zero_trade_day,
@@ -342,8 +357,7 @@ def build_report(tally: SessionTally, trades: List, positions_open: int,
 
 def finalize_session(store: SessionStore, session_date: str, trades: List,
                      positions_open: int, broker_positions, account,
-                     starting_cash: float, describe_fn=None
-                     ) -> Optional[Dict]:
+                     describe_fn=None) -> Optional[Dict]:
     """Write the session report once, and mark the tally finalized.
 
     Idempotent: a second call returns the existing report. Returns None
@@ -358,7 +372,7 @@ def finalize_session(store: SessionStore, session_date: str, trades: List,
     if tally is None or not tally.ran_during_market_hours:
         return None
     report = build_report(tally, trades, positions_open, broker_positions,
-                          account, starting_cash, describe_fn)
+                          account, describe_fn)
     if store.put_report(session_date, report):
         tally.finalized = True
         store.put(tally)
