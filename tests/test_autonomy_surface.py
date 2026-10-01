@@ -509,5 +509,23 @@ class TestSchedule(unittest.TestCase):
         self.assertEqual(t.weekday(), 0)
 
 
+class TestStoresUseTablesWithTheirKeySchema(unittest.TestCase):
+    """
+    The state table is keyed on session_date alone; the autonomy stores
+    write PK/SK records. Pointing them at it passed every in-memory test
+    and failed with a ValidationException only against the real table,
+    which the API then (correctly) reported as HALTED.
+    """
+
+    def test_no_autonomy_store_defaults_to_the_session_keyed_state_table(self):
+        import glob
+        for path in glob.glob(os.path.join(REPO_ROOT, "agent", "autonomy",
+                                           "*.py")):
+            body = open(path).read()
+            with self.subTest(file=os.path.basename(path)):
+                self.assertNotIn("stock-agent-dev-state", body)
+                self.assertNotIn("AGENT_STATE_TABLE", body)
+
+
 if __name__ == "__main__":
     unittest.main()

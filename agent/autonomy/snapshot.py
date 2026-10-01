@@ -55,7 +55,7 @@ class DynamoDBSnapshotStore(SnapshotStore):
 
     def __init__(self, table_name: Optional[str] = None, client=None):
         self.table_name = table_name or os.environ.get(
-            "AGENT_STATE_TABLE", "stock-agent-dev-state")
+            "AGENT_JOURNAL_TABLE", "stock-agent-dev-journal")
         self._client = client
 
     @property
