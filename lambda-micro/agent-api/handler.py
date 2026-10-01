@@ -68,7 +68,7 @@ from agent import readiness
 from agent.autonomy import (
     DynamoDBAlertSink, DynamoDBDecisionLog, DynamoDBHealthStore,
     DynamoDBSessionStore, DynamoDBSnapshotStore, aggregate_evidence,
-    explain as explain_question, next_cycle_time,
+    classify_question, explain as explain_question, next_cycle_time,
 )
 from agent.positions import DynamoDBPositionStore
 from agent.company.service import CompanyService
@@ -1329,6 +1329,20 @@ def handle_ask(event) -> Dict:
     if not query:
         return _response(400, {"error": "q is required"})
     session_date = q.get("date") or today_market_date()
+
+    # A company question is answered from company intelligence; anything
+    # operational from the session records. Both are deterministic, and
+    # neither consults a language model: the operational explainer is
+    # tried first because "how did today go" is about the agent, not
+    # about a company.
+    from agent.company import explain as company_explain
+    if classify_question(query) is None \
+            and company_explain.classify(query) is not None:
+        answer = company_explain.explain(
+            query, _company_service(), default_symbol=q.get("symbol"))
+        answer["session_date"] = session_date
+        return _response(200, answer)
+
     ctx = _autonomy_context(session_date)
     answer = explain_question(query, ctx)
     answer["session_date"] = session_date

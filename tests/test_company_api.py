@@ -9,7 +9,12 @@ from test_company_service import svc, FakeActions, QUARTERLY, FakeFacts  # noqa
 def call(path, method="GET", service=None):
     service = service or svc(FakeActions(QUARTERLY))[0]
     path, _, query = path.partition("?")
-    params = dict(p.split("=", 1) for p in query.split("&")) if query else None
+    # A real Function URL event carries DECODED query values; building
+    # them encoded hid a ticker behind "%20GIS" with no word boundary.
+    from urllib.parse import unquote_plus
+    params = ({k: unquote_plus(v) for k, v in
+               (p.split("=", 1) for p in query.split("&"))}
+              if query else None)
     with mock.patch.object(api, "_company_service", lambda: service):
         r = api.lambda_handler({"requestContext": {"http": {
             "method": method, "path": path}},
@@ -112,3 +117,35 @@ class TestRefreshIsStillReadOnly(unittest.TestCase):
                 self.assertEqual(
                     call("/agent/company/GIS/dividends?refresh=1", method)[0],
                     405)
+
+
+class TestAskAnswersCompanyQuestionsToo(unittest.TestCase):
+    """`/agent/ask` routes a company question to company intelligence and
+    an operational one to the session records. Still one POST, still no
+    language model."""
+
+    def ask(self, question, service=None):
+        from urllib.parse import quote
+        code, body = call(f"/agent/ask?q={quote(question)}", service=service)
+        self.assertEqual(code, 200, body)
+        return body
+
+    def test_a_company_question_is_answered_from_company_records(self):
+        out = self.ask("Does GIS pay a dividend?")
+        self.assertEqual(out["intent"], "DIVIDEND")
+        self.assertIn("dividends", out["sources"])
+        self.assertFalse(out["llm_used"])
+
+    def test_an_operational_question_still_reaches_the_session_records(self):
+        out = self.ask("Are you healthy?")
+        self.assertEqual(out["intent"], "HEALTH")
+
+    def test_a_split_question_is_company_not_operational(self):
+        self.assertEqual(self.ask("Has GIS split before?")["intent"], "SPLITS")
+
+    def test_an_unknown_question_is_still_declined(self):
+        out = self.ask("tell me a joke")
+        self.assertFalse(out["grounded"])
+
+    def test_ask_is_still_a_GET_and_requires_a_question(self):
+        self.assertEqual(call("/agent/ask")[0], 400)

@@ -95,15 +95,16 @@ EVAL_SWEEP = REPO / "agent" / "evaluation" / "sweep.py"
 READINESS = REPO / "agent" / "readiness.py"
 LIVE_CONTRACT = REPO / "agent" / "broker" / "live_contract.py"
 
-SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
-          "tests.test_signal_equivalence", "tests.test_evidence",
-          "tests.test_evidence_service", "tests.test_hypothesis",
-          "tests.test_risk", "tests.test_broker",
-          "tests.test_positions", "tests.test_journal",
-          "tests.test_replay", "tests.test_orchestration",
-          "tests.test_agent_dashboard", "tests.test_persistence",
-          "tests.test_pilot_integration", "tests.test_evaluation",
-          "tests.test_readiness", "tests.test_live_contract"]
+# Every test module under tests/, discovered - NOT a hand-maintained list.
+#
+# It was a hand-maintained list of 18 modules, and on 2026-10-01 that let
+# 15 new mutations "survive" while the tests that catch them sat in files
+# the harness never ran: the company-intelligence and autonomy suites were
+# absent, so no mutation in that code could ever fail. A harness reporting
+# coverage it does not have is worse than no harness, because the report
+# reads like evidence. Discovery means a new test file participates the
+# moment it exists.
+SUITES = ["discover", "-s", "tests", "-t", "."]
 
 
 @dataclass
@@ -1544,7 +1545,7 @@ def _purge_bytecode() -> None:
 
 
 def run_suites() -> Dict:
-    """Run the signal and evidence suites, returning pass/fail."""
+    """Run the whole discovered test suite, returning pass/fail."""
     _purge_bytecode()
     env = dict(os.environ)
     # Belt and braces: don't write new bytecode either.
