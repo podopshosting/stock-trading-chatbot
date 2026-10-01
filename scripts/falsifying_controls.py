@@ -84,6 +84,9 @@ POS_STORE = REPO / "agent" / "positions" / "store.py"
 EVAL_CAL = REPO / "agent" / "evaluation" / "calibration.py"
 EVAL_SWEEP = REPO / "agent" / "evaluation" / "sweep.py"
 
+READINESS = REPO / "agent" / "readiness.py"
+LIVE_CONTRACT = REPO / "agent" / "broker" / "live_contract.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
@@ -91,7 +94,8 @@ SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_positions", "tests.test_journal",
           "tests.test_replay", "tests.test_orchestration",
           "tests.test_agent_dashboard", "tests.test_persistence",
-          "tests.test_pilot_integration", "tests.test_evaluation"]
+          "tests.test_pilot_integration", "tests.test_evaluation",
+          "tests.test_readiness", "tests.test_live_contract"]
 
 
 @dataclass
@@ -1309,6 +1313,76 @@ MUTATIONS = [
             "    cut = int(len(shuffled) * (1.0 - holdout))\n"
             "    return shuffled[:cut], shuffled[cut:]",
         expect=["chronolog", "random", "split"],
+    ),
+    # --- Milestones 17-18: live contract and readiness gate --------------
+    Mutation(
+        name="let-a-paper-adapter-be-live-ready",
+        description="drop the paper disqualification",
+        path=LIVE_CONTRACT,
+        old="        return not self.unmet and not self.is_paper",
+        new="        return not self.unmet  # MUTATION",
+        expect=["paper", "ready_for_real_money"],
+    ),
+    Mutation(
+        name="trust-a-declared-capability",
+        description="count an adapter's own claim as verification",
+        path=LIVE_CONTRACT,
+        old="        assessment.notes.append(\n"
+            "            \"Requirements marked satisfied here are DECLARED by the \"",
+        new="        pass  # MUTATION\n"
+            "        _unused = (\n"
+            "            \"Requirements marked satisfied here are DECLARED by the \"",
+        expect=["declared", "verified"],
+    ),
+    Mutation(
+        name="treat-an-opaque-adapter-as-live",
+        description="assume a non-describing adapter is not paper",
+        path=LIVE_CONTRACT,
+        old='    is_paper = bool(capabilities.get("is_paper", True))',
+        new='    is_paper = bool(capabilities.get("is_paper", False))  # MUTATION',
+        expect=["paper", "capabilities", "opaque"],
+    ),
+    Mutation(
+        name="pass-the-gate-on-a-majority",
+        description="treat gates as a score rather than prerequisites",
+        path=READINESS,
+        old="        return bool(self.gates) and not self.unmet",
+        new="        return bool(self.gates) and len(self.unmet) <= len(self.gates) // 2  # MUTATION",
+        expect=["unmet", "disqualif", "ready"],
+    ),
+    Mutation(
+        name="treat-an-unknown-gate-as-met",
+        description="let an unchecked prerequisite count as satisfied",
+        path=READINESS,
+        old="        return self is GateStatus.MET",
+        new="        return self is not GateStatus.UNMET  # MUTATION",
+        expect=["unknown", "unmet", "ready"],
+    ),
+    Mutation(
+        name="pass-an-empty-gate-list",
+        description="let a report with no gates read as ready",
+        path=READINESS,
+        old="        return bool(self.gates) and not self.unmet",
+        new="        return not self.unmet  # MUTATION",
+        expect=["empty", "ready", "trivial"],
+    ),
+    Mutation(
+        name="count-zero-assessed-trades-as-stops-holding",
+        description="read a 0% breach rate over no trades as evidence",
+        path=READINESS,
+        old="    if breach_rate is None or assessed == 0:",
+        new="    if breach_rate is None:  # MUTATION",
+        expect=["assessed", "unknown", "stops_hold"],
+    ),
+    Mutation(
+        name="unblock-the-venue-gate",
+        description="report an execution venue that does not exist",
+        path=READINESS,
+        old='        "execution_venue_available", GateCategory.EXECUTION,\n'
+            "        GateStatus.BLOCKED,",
+        new='        "execution_venue_available", GateCategory.EXECUTION,\n'
+            "        GateStatus.MET,  # MUTATION",
+        expect=["BLOCKED", "venue", "blocked"],
     ),
 ]
 
