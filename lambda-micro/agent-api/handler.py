@@ -938,21 +938,39 @@ def handle_risk_preview(event) -> Dict:
 
 
 def handle_positions(event) -> Dict:
-    """Open positions.
+    """Open positions, read from the store the cycle writes.
 
-    Returns an explicit empty state rather than an empty list with no
-    explanation, because "no positions" and "position store not wired"
-    look identical otherwise.
+    It used to return a fixed empty state explaining that nothing was
+    scheduled. That was true when written and became a lie once the
+    cycle began running: it reported zero while two positions were open.
+    An unreadable store is still reported as unreadable, which is not
+    the same as reporting none.
     """
+    session_date = _query(event).get("date") or today_market_date()
+    store, error = _safe(lambda: DynamoDBPositionStore(
+        table_name=os.environ.get("AGENT_POSITIONS_TABLE",
+                                  "stock-agent-dev-positions")
+    ).load_open(session_date))
+    if error:
+        return _response(200, {
+            "positions": [], "open_count": None, "total_open_risk": None,
+            "source": "unreadable", "detail": error,
+            "note": ("The position store could not be read. This is not "
+                     "a report of zero positions."),
+        })
+    rows = [p.as_dict() if hasattr(p, "as_dict") else dict(p)
+            for p in (store or [])]
+    risks = [r.get("open_risk") for r in rows
+             if isinstance(r.get("open_risk"), (int, float))]
     return _response(200, {
-        "positions": [],
-        "open_count": 0,
-        "total_open_risk": None,
-        "source": "none",
-        "detail": ("No position store is wired into this Lambda. Positions "
-                   "exist only inside a running orchestrator, and nothing "
-                   "is scheduled yet, so there is nothing to report - "
-                   "which is different from reporting zero positions."),
+        "positions": rows,
+        "open_count": len(rows),
+        "total_open_risk": round(sum(risks), 2) if risks else None,
+        "risk_known_for": f"{len(risks)} of {len(rows)}",
+        "source": "position store",
+        "session_date": session_date,
+        "note": ("Stops are polled by the cycle, not resting at a broker, "
+                 "which is why positions are flattened before the close."),
     })
 
 

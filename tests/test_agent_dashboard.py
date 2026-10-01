@@ -236,16 +236,22 @@ class TestReadEndpoints(unittest.TestCase):
         _code, body = call("/agent/risk/limits")
         self.assertIn("not a target", body["note"])
 
-    def test_positions_explains_an_empty_result(self):
+    def test_positions_distinguishes_none_from_unreadable(self):
         """
-        "No positions" and "position store not wired" look identical
-        unless the reason is stated.
+        "No positions" and "the store could not be read" look identical
+        unless the reason is stated. The endpoint used to return a fixed
+        empty state saying nothing was scheduled, which became a lie once
+        the cycle ran: it reported zero while two positions were open.
         """
         code, body = call("/agent/positions")
         self.assertEqual(code, 200)
-        self.assertEqual(body["open_count"], 0)
-        self.assertEqual(body["source"], "none")
-        self.assertTrue(body["detail"])
+        if body["source"] == "unreadable":
+            self.assertIsNone(body["open_count"])
+            self.assertIn("not a report of zero", body["note"])
+        else:
+            self.assertEqual(body["source"], "position store")
+            self.assertIsInstance(body["open_count"], int)
+            self.assertEqual(len(body["positions"]), body["open_count"])
 
     def test_total_open_risk_is_none_not_zero_when_unknown(self):
         """
