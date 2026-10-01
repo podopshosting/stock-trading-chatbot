@@ -251,3 +251,45 @@ class TestAggregatedEvidenceExcludesWhatItCannotAttribute(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEmptyEvidenceSaysWhyItIsEmpty(unittest.TestCase):
+    """An absence has causes, and they are not interchangeable. Reporting
+    a session that is still running as "no sessions recorded" reads as a
+    broken pipeline on a day that is merely still open - which is what
+    /agent/readiness said on 2026-10-01 while 68 cycles were on record."""
+
+    def test_nothing_at_all_still_says_so(self):
+        out = classify_evidence([])
+        self.assertEqual(out["reasons"], ["no sessions recorded"])
+
+    def test_a_session_in_progress_is_not_reported_as_nothing(self):
+        out = classify_evidence([], in_progress=1)
+        self.assertIn("in progress", out["reasons"][0])
+        self.assertIn("evidence at its close", out["reasons"][0])
+        self.assertNotIn("no sessions recorded", out["reasons"][0])
+
+    def test_all_void_is_distinguished_from_both(self):
+        out = classify_evidence([], excluded_void=2)
+        self.assertIn("all VOID", out["reasons"][0])
+        self.assertIn("spanned a redeploy", out["reasons"][0])
+        self.assertEqual(out["void_sessions"], 2)
+
+    def test_void_is_reported_ahead_of_in_progress(self):
+        """Having recorded sessions and discarded all of them is the more
+        specific fact, so it is the one stated."""
+        out = classify_evidence([], in_progress=1, excluded_void=2)
+        self.assertIn("all VOID", out["reasons"][0])
+
+    def test_every_empty_case_still_fails_closed(self):
+        for kw in ({}, {"in_progress": 3}, {"excluded_void": 3}):
+            with self.subTest(**kw):
+                out = classify_evidence([], **kw)
+                self.assertFalse(out["counts_toward_strategy_gates"])
+                self.assertEqual(out["strategy_grade_sessions"], 0)
+                self.assertEqual(out["data_quality"], "UNKNOWN")
+
+    def test_a_reason_is_never_absent(self):
+        for kw in ({}, {"in_progress": 1}, {"excluded_void": 1}):
+            with self.subTest(**kw):
+                self.assertTrue(classify_evidence([], **kw)["reasons"][0])
