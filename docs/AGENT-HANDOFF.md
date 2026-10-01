@@ -16,7 +16,7 @@ Short start prompt: `docs/NEXT-AGENT-PROMPT.md`.
 | Final SHA / tag | recorded in `docs/agent-handoff-state.json` (`head_sha`, `handoff_tag`); tag `agent-handoff-2026-10-01` |
 | Local repo | `/Users/Brian 1/Documents/GitHub/stock-trading-chatbot` |
 | Remote | `git@github.com:podopshosting/stock-trading-chatbot.git` |
-| Tests | **1738 passing, 0 failing, 1 skipped** (`python3 -m unittest discover -s tests`) |
+| Tests | **1738 run: 1737 passing, 0 failing, 1 skipped** (`python3 -m unittest discover -s tests`) |
 | Working tree | clean at handoff (backup lives outside the repo) |
 | Earlier tags | `recovery-2026-09-30`, `paper-cohort-1` (see section 8: cohort 1 is VOID) |
 
@@ -59,14 +59,14 @@ Detail: `docs/progress/MILESTONE-07..19A.md`, `docs/progress/SUMMARY-7-18.md`.
 - **Readiness gate** — `agent/readiness.py` (11 gates; derived, no override).
 - **19A autonomy** — `agent/autonomy/*` (policy, health, alerts, decisions, versions/cohorts, sessions, grounded explainer, schedule).
 
-Counts: tests 1738; falsifying-control mutations **140 at the last full harness run**
+Counts: tests 1738 run (1737 pass, 1 skipped); falsifying-control mutations **140 at the last full harness run**
 (not re-run during this handoff; see section 14); readiness 0/11; **completed paper
 trades: 0**.
 
 ## 4. Company Intelligence status (package `agent/company/`)
 
 The "slice at `fdc09c0`" (models, dividend logic, split logic, 16 tests) is now only the
-start. **Much more is committed after it**, all tested (1738-test suite green):
+start. **Much more is committed after it**, all tested (1738-test suite green (1 skipped)):
 
 DONE and committed:
 - models with provenance; dividends (status/history/special-vs-regular/next ex-date/yield price basis); splits (type from ratio, split-aware moves)
