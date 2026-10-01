@@ -218,6 +218,19 @@
     <div id="coBody"><p class="empty">Enter a symbol.</p></div>
   </section>
 
+
+  <!-- Why no trade: inactivity explained as clearly as activity -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Why no trade</h2>
+    <div id="whyNoTrade"><p class="empty">Loading…</p></div>
+  </section>
+
+  <!-- Evidence cohorts, never pooled -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Evidence cohorts</h2>
+    <div id="cohorts"><p class="empty">Loading…</p></div>
+  </section>
+
   <!-- Readiness: the answer that matters most -->
   <section class="card" style="margin-bottom:var(--gap)">
     <h2>Real-money readiness</h2>
@@ -770,6 +783,36 @@
         ["blocked", d.gates_blocked]
       ]);
 
+      var all = d.gates || [];
+      if (all.length) {
+        box.appendChild(el("h3", null,
+          "All " + all.length + " gates"));
+        var gt = el("table", "co-table");
+        var gh = el("tr");
+        ["Gate", "Category", "State", "Why"].forEach(function (h) {
+          gh.appendChild(el("th", null, h));
+        });
+        gt.appendChild(gh);
+        all.forEach(function (g) {
+          var tr = el("tr");
+          tr.appendChild(el("td", null, g.name));
+          tr.appendChild(el("td", null, g.category));
+          var cell = el("td");
+          cell.appendChild(el("span", "pill " +
+            (g.status === "MET" ? "up"
+             : g.status === "BLOCKED" ? "down" : "flat"), g.status));
+          tr.appendChild(cell);
+          tr.appendChild(el("td", null, g.detail || g.why));
+          gt.appendChild(tr);
+        });
+        box.appendChild(gt);
+        var ev = d.evidence || {};
+        box.appendChild(el("p", "co-prov",
+          "Evidence class: " + (ev.evidence_class || "unknown") +
+          ". Operational evidence proves the machinery runs; only " +
+          "real-time, single-runtime evidence can satisfy a strategy " +
+          "gate. " + ((ev.evidence_class_reasons || []).join("; "))));
+      }
       var unmet = d.unmet || [];
       if (unmet.length) {
         box.appendChild(el("h3", null, "What is not met"));
@@ -1239,12 +1282,116 @@
     coLoad();
   });
 
+
+  // ---- why no trade ----------------------------------------------------
+  function loadWhyNoTrade() {
+    var box = document.getElementById("whyNoTrade");
+    get("/agent/why-no-trade").then(function (d) {
+      box.innerHTML = "";
+      box.appendChild(el("p", null, d.headline));
+      var f = d.funnel || {};
+      kv(el("dl"), []);  // no-op to keep helpers referenced
+      var t = el("table", "co-table");
+      [["symbols scanned", f.symbols_scanned],
+       ["decisions recorded", f.decisions_recorded],
+       ["not evaluated", f.not_evaluated],
+       ["refused by the Risk Governor", f.refused_by_risk],
+       ["entered", f.entered],
+       ["would have traded with more room",
+        d.would_have_traded_with_more_room]].forEach(function (row) {
+        var tr = el("tr");
+        tr.appendChild(el("th", null, row[0]));
+        tr.appendChild(el("td", "num", fmt(row[1])));
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+      var stages = d.stages || [];
+      if (stages.length) {
+        box.appendChild(el("h3", null, "Binding constraint"));
+        var st = el("table", "co-table");
+        var head = el("tr");
+        ["Reason", "Category", "Decisions", "Symbols", "Meaning"]
+          .forEach(function (h) { head.appendChild(el("th", null, h)); });
+        st.appendChild(head);
+        stages.forEach(function (s) {
+          var tr = el("tr");
+          tr.appendChild(el("td", null, s.code));
+          tr.appendChild(el("td", null, s.category));
+          tr.appendChild(el("td", "num", s.decisions));
+          tr.appendChild(el("td", null, (s.symbols || []).slice(0, 6).join(", ")));
+          tr.appendChild(el("td", null, s.meaning));
+          st.appendChild(tr);
+        });
+        box.appendChild(st);
+      }
+      box.appendChild(el("p", "co-prov", d.note || ""));
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  // ---- evidence cohorts ------------------------------------------------
+  var COHORT_TONE = {
+    "REAL_TIME_STRATEGY_EVIDENCE": "up",
+    "OPERATIONAL_VALIDATION_ONLY": "flat",
+    "VOID": "down"
+  };
+  function loadCohorts() {
+    var box = document.getElementById("cohorts");
+    get("/agent/cohorts").then(function (d) {
+      box.innerHTML = "";
+      if (!(d.cohorts || []).length) {
+        box.appendChild(el("p", "empty", "No cohort recorded yet."));
+        return;
+      }
+      d.cohorts.forEach(function (c) {
+        var head = el("h3");
+        head.appendChild(document.createTextNode(c.cohort + " "));
+        head.appendChild(el("span", "pill " +
+          (COHORT_TONE[c.evidence_class] || "flat"), c.evidence_class));
+        box.appendChild(head);
+        var ops = c.operational || {};
+        var t = el("table", "co-table");
+        [["sessions", c.sessions],
+         ["runtime span", (c.first_session || "?") + " … " + (c.last_session || "?")],
+         ["code SHAs", (c.code_shas || []).join(", ")],
+         ["single runtime", c.single_runtime],
+         ["feed quality", JSON.stringify(c.feed_quality_counts || {})],
+         ["cycles (completed / aborted)",
+          ops.cycles + " (" + ops.cycles_completed + " / " + ops.cycles_aborted + ")"],
+         ["reconciliation", (c.reconciliation || {}).clean ? "clean"
+           : (c.reconciliation || {}).failures + " failures"],
+         ["EOD flatten", (c.eod_flatten || {}).clean ? "clean"
+           : (c.eod_flatten || {}).failures + " failures"],
+         ["emergency stops", ops.emergency_stops],
+         ["risk locks", ops.risk_locks],
+         ["duplicate order attempts", ops.duplicate_order_attempts],
+         ["stale-data refusals",
+          (c.data_rejections || {}).stale_market_data_refusals],
+         ["strategy sample (trades closed)",
+          (c.strategy || {}).trades_closed],
+         ["readiness eligibility",
+          c.evidence_class === "REAL_TIME_STRATEGY_EVIDENCE"
+            ? "may support strategy gates"
+            : "operational evidence only"]
+        ].forEach(function (row) {
+          var tr = el("tr");
+          tr.appendChild(el("th", null, row[0]));
+          tr.appendChild(el("td", null, fmt(row[1])));
+          t.appendChild(tr);
+        });
+        box.appendChild(t);
+      });
+      box.appendChild(el("p", "co-prov", d.rule || ""));
+    }).catch(function (e) { showError(box, e); });
+  }
+
   // ---- boot ------------------------------------------------------------
   if (!API) {
     document.getElementById("paperDetail").textContent =
       "AGENT_API_BASE is not configured; no data will load.";
   }
   loadReadiness();
+  loadWhyNoTrade();
+  loadCohorts();
   loadAutonomy();
   setInterval(loadAutonomy, 60000);
   loadSwitches();
