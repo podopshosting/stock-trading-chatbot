@@ -70,13 +70,17 @@ def main() -> int:
         return report_out(args, None, None, None)
     check("session report retrieved", True)
 
-    body = report.get("report") or report
-    if not body or body.get("detail"):
+    # `written` is the cycle's own flag for "the close-out report exists".
+    # Checking only that a body came back passed mid-session, when the
+    # payload is {"report": null, "written": false} - a vacuous check.
+    written = report.get("written")
+    body = report.get("report")
+    if not written or not isinstance(body, dict):
         check("session finalised at the close", False,
-              str(body.get("detail") or "no report written yet"))
-        return report_out(args, body, None, None)
+              f"written={written}; the cycle writes this at MARKET_CLOSED")
+        return report_out(args, None, None, None)
     check("session finalised at the close", True,
-          str(body.get("session_date", "")))
+          str(report.get("session_date", "")))
 
     # --- the things that must be true -------------------------------
     for name, key in (("all positions flattened", "positions_flat"),
@@ -147,7 +151,7 @@ def report_out(args, body, auto, cohort) -> int:
 
     if args.write and body:
         path = (REPO / "docs" / "progress" /
-                f"SESSION-{body.get('session_date', 'unknown')}.md")
+                f"SESSION-{body.get('session_date') or 'unknown'}.md")
         path.write_text(render(body, auto, cohort, failed))
         print(f"written: {path.relative_to(REPO)}")
     return 1 if failed else 0
