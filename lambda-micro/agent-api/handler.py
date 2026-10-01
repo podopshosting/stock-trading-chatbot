@@ -63,6 +63,8 @@ from agent.journal import DynamoDBJournal, describe as describe_perf
 from agent.risk import RiskContext, RiskLimits
 from agent.risk import evaluate as evaluate_risk
 from agent.risk import DynamoDBHaltStore
+from agent.evaluation import assess as calibrate
+from agent import readiness
 from agent.state import (
     AgentState, AgentStateService, DynamoDBStateStore, MarketSession,
 )
@@ -1057,6 +1059,46 @@ def handle_pipeline(event) -> Dict:
     })
 
 
+def handle_readiness(event) -> Dict:
+    """May this system place a real-money order?
+
+    The answer is derived from gates that each default to UNKNOWN, and
+    UNKNOWN counts as unmet - so this endpoint cannot return a
+    permissive answer because a data source was unavailable.
+    """
+    session_date = _query(event).get("date") or today_market_date()
+    try:
+        trades = _journal().list_trades(session_date=session_date)
+    except Exception:                                     # noqa: BLE001
+        trades = []
+
+    # Described rather than assessed, because this Lambda imports no
+    # broker at all and must keep it that way - a test asserts that no
+    # module capable of reaching a broker is importable here, and that
+    # guarantee is worth more than a live adapter count. The absence IS
+    # the finding: there is no adapter in this deployment, so the gate
+    # is unmet by construction.
+    adapter = {
+        "adapter_name": "none (this API imports no broker)",
+        "is_paper": True,
+        "ready_for_real_money": False,
+        "unmet_count": None,
+    }
+
+    report = readiness.assess(
+        performance=describe_perf(trades),
+        calibration=calibrate(trades),
+        adapter_assessment=adapter,
+        switches={"kill_switch_cancels_working_orders": False},
+        pilot={"sessions_completed": None,
+               "live_data_path_exercised": None,
+               "reconciliation_clean_sessions": None},
+        authorisation={"explicit_user_authorisation": False,
+                       "capital_at_risk_agreed": False},
+        assessed_at=session_date)
+    return _response(200, report.as_dict())
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
@@ -1082,6 +1124,7 @@ ROUTES = {
     ("GET", "/agent/journal"): handle_journal,
     ("GET", "/agent/performance"): handle_performance,
     ("GET", "/agent/pipeline"): handle_pipeline,
+    ("GET", "/agent/readiness"): handle_readiness,
 }
 
 

@@ -81,6 +81,9 @@ DASHBOARD = REPO / "web" / "agent" / "index.html"
 BRK_STORE = REPO / "agent" / "broker" / "store.py"
 POS_STORE = REPO / "agent" / "positions" / "store.py"
 
+EVAL_CAL = REPO / "agent" / "evaluation" / "calibration.py"
+EVAL_SWEEP = REPO / "agent" / "evaluation" / "sweep.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
@@ -88,7 +91,7 @@ SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_positions", "tests.test_journal",
           "tests.test_replay", "tests.test_orchestration",
           "tests.test_agent_dashboard", "tests.test_persistence",
-          "tests.test_pilot_integration"]
+          "tests.test_pilot_integration", "tests.test_evaluation"]
 
 
 @dataclass
@@ -1204,6 +1207,108 @@ MUTATIONS = [
             "            ) from exc",
         new="            return []  # MUTATION",
         expect=["unreadable", "raise", "positions"],
+    ),
+    # --- Milestone 16: evaluation and calibration ------------------------
+    Mutation(
+        name="compare-tiny-strength-bands",
+        description="read a trend from bands of two or three trades",
+        path=EVAL_CAL,
+        old="MIN_BUCKET_SIZE = 15",
+        new="MIN_BUCKET_SIZE = 1  # MUTATION",
+        expect=["INSUFFICIENT", "band", "comparable"],
+    ),
+    Mutation(
+        name="ignore-interval-overlap-in-calibration",
+        description="call an ordering significant when the intervals overlap",
+        path=EVAL_CAL,
+        old="        significant = bool(monotonic and overlap is False)",
+        new="        significant = bool(monotonic)  # MUTATION",
+        expect=["significant", "overlap", "chance"],
+    ),
+    Mutation(
+        name="bin-unknown-strength-at-zero",
+        description="fabricate a strength reading the system never made",
+        path=EVAL_CAL,
+        old="            if t.hypothesis_strength is not None",
+        new="            if True  # MUTATION",
+        expect=["strength", "exclud", "zero"],
+    ),
+    Mutation(
+        name="report-a-correlation-without-an-interval",
+        description="quote a coefficient from a handful of points",
+        path=EVAL_CAL,
+        old="        ci_low = math.tanh(lo)\n        ci_high = math.tanh(hi)",
+        new="        ci_low = ci_high = None  # MUTATION",
+        expect=["interval", "correlation", "ci_low"],
+    ),
+    Mutation(
+        name="treat-no-variation-as-zero-correlation",
+        description="claim no relationship when the question is undefined",
+        path=EVAL_CAL,
+        old="    if var_x <= 0 or var_y <= 0:",
+        new="    if False:  # MUTATION",
+        expect=["variation", "undefined", "not zero"],
+    ),
+    Mutation(
+        name="ignore-the-selection-noise-floor",
+        description="report the best of many arms as an improvement",
+        path=EVAL_SWEEP,
+        old="        if gap <= noise_floor:",
+        new="        if False:  # MUTATION",
+        expect=["noise", "identical", "selection"],
+    ),
+    Mutation(
+        name="pretend-selection-has-no-cost",
+        description="set the expected best-of-n gap to zero",
+        path=EVAL_SWEEP,
+        old="    return spread * max(0.0, root - correction)",
+        new="    return 0.0  # MUTATION",
+        expect=["noise", "arms", "selection", "floor"],
+    ),
+    Mutation(
+        name="accept-a-winner-without-a-holdout",
+        description="confirm a result on the data that selected it",
+        path=EVAL_SWEEP,
+        old="        elif holdout_data is None:",
+        new="        elif False:  # MUTATION",
+        expect=["holdout", "selected it"],
+    ),
+    Mutation(
+        name="accept-a-winner-that-failed-out-of-sample",
+        description="ignore a negative holdout result",
+        path=EVAL_SWEEP,
+        old="            elif winner.holdout_expectancy_r <= 0:",
+        new="            elif False:  # MUTATION",
+        expect=["out of sample", "holdout", "overfit", "fitted"],
+    ),
+    Mutation(
+        name="compare-arms-below-the-minimum",
+        description="rank sampling variation across tiny arms",
+        path=EVAL_SWEEP,
+        old="MIN_TRADES_PER_ARM = 30",
+        new="MIN_TRADES_PER_ARM = 1  # MUTATION",
+        expect=["INSUFFICIENT", "arm", "comparable"],
+    ),
+    Mutation(
+        name="let-a-sweep-authorise-a-change",
+        description="treat any recommendation as permission",
+        path=EVAL_SWEEP,
+        old="        return self is Recommendation.CANDIDATE_FOR_CHANGE",
+        new="        return True  # MUTATION",
+        expect=["permits_change", "recommendation"],
+    ),
+    Mutation(
+        name="split-the-holdout-randomly",
+        description="contaminate the holdout with the selection regime",
+        path=EVAL_SWEEP,
+        old="    cut = int(len(items) * (1.0 - holdout))\n"
+            "    return list(items[:cut]), list(items[cut:])",
+        new="    import random  # MUTATION\n"
+            "    shuffled = list(items)\n"
+            "    random.Random(0).shuffle(shuffled)\n"
+            "    cut = int(len(shuffled) * (1.0 - holdout))\n"
+            "    return shuffled[:cut], shuffled[cut:]",
+        expect=["chronolog", "random", "split"],
     ),
 ]
 

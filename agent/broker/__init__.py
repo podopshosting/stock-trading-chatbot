@@ -5,6 +5,10 @@ The strategy and risk layers never know which broker is underneath,
 which is what makes the paper record comparable with a live one.
 """
 from .base import BrokerAdapter
+from .live_contract import (
+    REQUIREMENT_RATIONALE, AdapterAssessment, Requirement,
+    assess_adapter,
+)
 from .store import (
     BrokerStateError, BrokerStateStore, ConcurrentBrokerUpdate,
     DynamoDBBrokerStateStore, InMemoryBrokerStateStore, restore,
@@ -21,6 +25,8 @@ from .models import (
 from .paper import PaperBroker, PaperBrokerConfig
 
 __all__ = [
+    "REQUIREMENT_RATIONALE", "AdapterAssessment", "Requirement",
+    "assess_adapter",
     "BrokerStateError", "BrokerStateStore", "ConcurrentBrokerUpdate",
     "DynamoDBBrokerStateStore", "InMemoryBrokerStateStore",
     "restore", "serialise",

@@ -164,6 +164,12 @@
       there is no combined score.</p>
   </header>
 
+  <!-- Readiness: the answer that matters most -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Real-money readiness</h2>
+    <div id="readiness"><p class="empty">Loading…</p></div>
+  </section>
+
   <!-- Switches and limits -->
   <div class="grid cols-2" style="margin-bottom:var(--gap)">
     <section class="card">
@@ -656,11 +662,53 @@
     }).catch(function (e) { showError(box, e); });
   }
 
+  // ---- readiness -------------------------------------------------------
+  function loadReadiness() {
+    var box = document.getElementById("readiness");
+    get("/agent/readiness").then(function (d) {
+      box.innerHTML = "";
+      /* Only one value is green here, and it requires EVERY gate. A
+         proportion would invite reading 10-of-11 as nearly ready, when
+         each gate is an independent way to lose money. */
+      box.appendChild(pill(d.verdict,
+        d.ready_for_real_money ? "up" : "down"));
+      box.appendChild(el("p", "note warn", d.summary || ""));
+
+      var dl = el("dl", "kv");
+      box.appendChild(dl);
+      kv(dl, [
+        ["gates met", d.gates_met + " of " + d.gates_total],
+        ["blocked", d.gates_blocked]
+      ]);
+
+      var unmet = d.unmet || [];
+      if (unmet.length) {
+        box.appendChild(el("h3", null, "What is not met"));
+        var ul = el("ul", "reasons");
+        unmet.forEach(function (g) {
+          var li = el("li", g.status === "BLOCKED" ? "blocking" : "major");
+          li.appendChild(el("code", null, g.name));
+          li.appendChild(document.createTextNode(
+            " [" + g.status + "] — " + g.why));
+          if (g.to_satisfy) {
+            var fix = el("div", "muted");
+            fix.style.marginTop = "4px";
+            fix.textContent = "To satisfy: " + g.to_satisfy;
+            li.appendChild(fix);
+          }
+          ul.appendChild(li);
+        });
+        box.appendChild(ul);
+      }
+    }).catch(function (e) { showError(box, e); });
+  }
+
   // ---- boot ------------------------------------------------------------
   if (!API) {
     document.getElementById("paperDetail").textContent =
       "AGENT_API_BASE is not configured; no data will load.";
   }
+  loadReadiness();
   loadSwitches();
   loadLimits();
   loadPositions();
