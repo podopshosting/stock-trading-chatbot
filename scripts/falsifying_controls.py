@@ -58,6 +58,14 @@ BRK_EXEC = REPO / "agent" / "broker" / "execution.py"
 BRK_MODELS = REPO / "agent" / "broker" / "models.py"
 
 POS_MODELS = REPO / "agent" / "positions" / "models.py"
+
+CO_EARNINGS = REPO / "agent" / "company" / "earnings.py"
+CO_FUND = REPO / "agent" / "company" / "fundamentals.py"
+CO_PEERS = REPO / "agent" / "company" / "peers.py"
+CO_DIVS = REPO / "agent" / "company" / "dividends.py"
+CO_SPLITS = REPO / "agent" / "company" / "splits.py"
+CO_MODELS = REPO / "agent" / "company" / "models.py"
+CO_EVIDENCE = REPO / "agent" / "autonomy" / "evidence_class.py"
 POS_EXITS = REPO / "agent" / "positions" / "exits.py"
 POS_MANAGER = REPO / "agent" / "positions" / "manager.py"
 
@@ -1383,6 +1391,127 @@ MUTATIONS = [
         new='        "execution_venue_available", GateCategory.EXECUTION,\n'
             "        GateStatus.MET,  # MUTATION",
         expect=["BLOCKED", "venue", "blocked"],
+    ),
+    # --- company intelligence and evidence class ----------------------
+    Mutation(
+        name='swap-eps-estimate-and-actual',
+        description='read reportedEPS as the estimate and estimatedEPS as the actual',
+        path=CO_EARNINGS,
+        old='            report_timing=timing, eps_actual=num(row.get("reportedEPS")),\n            eps_estimate=num(row.get("estimatedEPS")), provenance=prov))',
+        new='            report_timing=timing, eps_actual=num(row.get("estimatedEPS")),  # MUTATION\n            eps_estimate=num(row.get("reportedEPS")), provenance=prov))',
+        expect=['swap', 'surprise', 'actual'],
+    ),
+    Mutation(
+        name='invent-a-missing-estimate',
+        description='treat a missing consensus estimate as zero, so every quarter beats',
+        path=CO_EARNINGS,
+        old='            return None if v in (None, "", "None") else float(v)',
+        new='            return 0.0 if v in (None, "", "None") else float(v)  # MUTATION',
+        expect=['missing', 'none', 'estimate', 'invent'],
+    ),
+    Mutation(
+        name='compare-mismatched-fiscal-periods',
+        description='call any two periods aligned, comparing unrelated fiscal quarters',
+        path=CO_FUND,
+        old='    return abs((_d(a.period_end) - _d(b.period_end)).days) <= ALIGN_DAYS \\\n        and kind(a) == kind(b)',
+        new='    return True  # MUTATION',
+        expect=['mismatch', 'align', 'period'],
+    ),
+    Mutation(
+        name='ttm-from-any-four-rows',
+        description='sum any four observations as a TTM, without sequence checks',
+        path=CO_FUND,
+        old='    qs = collapse(periods, "Q")\n    if len(qs) < 4:',
+        new='    qs = collapse(periods, "Q") or list(periods)[-4:]  # MUTATION\n    if len(qs) < 4:',
+        expect=['ttm', 'quarter', 'overlap', 'annual'],
+    ),
+    Mutation(
+        name='stale-fundamentals-read-as-current',
+        description='ignore the period age so a three-year-old statement reads CURRENT',
+        path=CO_FUND,
+        old='    age = (today - _d(period_end)).days',
+        new='    age = 0  # MUTATION',
+        expect=['stale', 'fresh', 'aging'],
+    ),
+    Mutation(
+        name='accept-an-unrelated-peer',
+        description='accept a candidate on sector or market cap alone',
+        path=CO_PEERS,
+        old='    if not (set(reasons) & INDUSTRY_REASONS):\n        if subject.sector and c.sector and subject.sector != c.sector:\n            return None, ["UNRELATED_BUSINESS", "DIFFERENT_INDUSTRY"]\n        return None, ["DIFFERENT_INDUSTRY"]',
+        new='    if not (set(reasons) & INDUSTRY_REASONS):\n        return reasons or ["SAME_SECTOR"], None  # MUTATION',
+        expect=['unrelated', 'peer', 'industry', 'sector'],
+    ),
+    Mutation(
+        name='persist-an-llm-invented-peer',
+        description="let a language model's suggestion become a stored peer",
+        path=CO_PEERS,
+        old='        if sym in structured:\n            if s.get("note"):\n                ps.llm_notes[sym] = str(s["note"])[:300]\n        else:',
+        new='        if True:  # MUTATION\n            ps.peers.append({"symbol": sym,\n                             "reasons": ["SAME_INDUSTRY"]})\n        else:',
+        expect=['llm', 'invent', 'structured'],
+    ),
+    Mutation(
+        name='peer-validation-accepts-any-reason',
+        description='let a peer through on any reason string at all',
+        path=CO_PEERS,
+        old='        if not reasons <= STRUCTURED_REASONS or not (reasons & INDUSTRY_REASONS):',
+        new='        if False:  # MUTATION',
+        expect=['unstructured', 'invent', 'peer'],
+    ),
+    Mutation(
+        name='one-payment-establishes-a-dividend',
+        description='call a single observed payment an ACTIVE dividend',
+        path=CO_DIVS,
+        old='    if len(regular) < 3:',
+        new='    if False:  # MUTATION',
+        expect=['one payment', 'single', 'pattern', 'establish'],
+    ),
+    Mutation(
+        name='special-dividends-count-as-regular',
+        description='fold special distributions into the regular series',
+        path=CO_DIVS,
+        old='    regular = sorted((e for e in events if e.kind == "REGULAR"),\n                     key=lambda e: _d(e.ex_date))',
+        new='    regular = sorted(events, key=lambda e: _d(e.ex_date))  # MUTATION',
+        expect=['special', 'regular', 'irregular'],
+    ),
+    Mutation(
+        name='empty-history-means-no-dividend',
+        description='treat an empty provider result as proof the company pays nothing',
+        path=CO_DIVS,
+        old='        if history_complete:',
+        new='        if True:  # MUTATION',
+        expect=['unknown', 'partial', 'complete', 'absence'],
+    ),
+    Mutation(
+        name='any-spacing-is-a-regular-dividend',
+        description='skip the cadence check, so erratic payments read ACTIVE',
+        path=CO_DIVS,
+        old='    if near < CADENCE_MAJORITY * len(gaps):',
+        new='    if False:  # MUTATION',
+        expect=['irregular', 'cadence', 'erratic', 'spacing'],
+    ),
+    Mutation(
+        name='reverse-split-read-as-forward',
+        description='report every split as a forward split',
+        path=CO_MODELS,
+        old='        return SplitType.REVERSE_SPLIT if self.ratio < 1 \\\n            else SplitType.FORWARD_SPLIT',
+        new='        return SplitType.FORWARD_SPLIT  # MUTATION',
+        expect=['reverse', 'forward', 'split', 'direction'],
+    ),
+    Mutation(
+        name='delayed-data-counts-as-real-time',
+        description='let delayed-feed paper fills satisfy a strategy performance gate',
+        path=CO_EVIDENCE,
+        old='    if quality is DataQuality.REAL_TIME:',
+        new='    if True:  # MUTATION',
+        expect=['delayed', 'real_time', 'strategy', 'operational'],
+    ),
+    Mutation(
+        name='redeploy-spanning-session-is-countable',
+        description='count a session that ran under two code SHAs as one measurement',
+        path=CO_EVIDENCE,
+        old='    if len(shas) > 1:',
+        new='    if False:  # MUTATION',
+        expect=['redeploy', 'void', 'span', 'runtime'],
     ),
 ]
 
