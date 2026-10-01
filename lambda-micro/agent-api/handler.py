@@ -65,6 +65,12 @@ from agent.risk import evaluate as evaluate_risk
 from agent.risk import DynamoDBHaltStore
 from agent.evaluation import assess as calibrate
 from agent import readiness
+from agent.autonomy import (
+    DynamoDBAlertSink, DynamoDBDecisionLog, DynamoDBHealthStore,
+    DynamoDBSessionStore, DynamoDBSnapshotStore, aggregate_evidence,
+    explain as explain_question, next_cycle_time,
+)
+from agent.positions import DynamoDBPositionStore
 from agent.state import (
     AgentState, AgentStateService, DynamoDBStateStore, MarketSession,
 )
@@ -1065,18 +1071,34 @@ def handle_readiness(event) -> Dict:
     The answer is derived from gates that each default to UNKNOWN, and
     UNKNOWN counts as unmet - so this endpoint cannot return a
     permissive answer because a data source was unavailable.
+
+    The gates themselves are unchanged. What changed is what feeds them:
+    session evidence now comes from the accumulated, per-cohort session
+    tallies instead of hardcoded unknowns. Evidence from a DIFFERENT
+    behavioural cohort is never pooled in.
     """
-    session_date = _query(event).get("date") or today_market_date()
-    try:
-        trades = _journal().list_trades(session_date=session_date)
-    except Exception:                                     # noqa: BLE001
-        trades = []
+    cfg, journal_table = _autonomy_tables()
+    tallies, _ = _safe(lambda: DynamoDBSessionStore(
+        table_name=journal_table).list(), [])
+    snapshot, _ = _safe(lambda: DynamoDBSnapshotStore(
+        table_name=cfg.storage.state_table).get())
+    cohort = _current_cohort(snapshot, tallies)
+    evidence = (aggregate_evidence(tallies, cohort) if cohort else None)
+
+    # Trades from the CURRENT cohort's sessions only.
+    trades = []
+    if cohort:
+        for tally in tallies:
+            if tally.cohort != cohort:
+                continue
+            got, _ = _safe(lambda d=tally.session_date: _journal()
+                           .list_trades(session_date=d), [])
+            trades.extend(got)
 
     # Described rather than assessed, because this Lambda imports no
     # broker at all and must keep it that way - a test asserts that no
-    # module capable of reaching a broker is importable here, and that
-    # guarantee is worth more than a live adapter count. The absence IS
-    # the finding: there is no adapter in this deployment, so the gate
+    # module capable of reaching a broker is importable here. The absence
+    # IS the finding: there is no adapter in this deployment, so the gate
     # is unmet by construction.
     adapter = {
         "adapter_name": "none (this API imports no broker)",
@@ -1090,13 +1112,213 @@ def handle_readiness(event) -> Dict:
         calibration=calibrate(trades),
         adapter_assessment=adapter,
         switches={"kill_switch_cancels_working_orders": False},
-        pilot={"sessions_completed": None,
-               "live_data_path_exercised": None,
-               "reconciliation_clean_sessions": None},
+        pilot=({"sessions_completed": evidence["sessions_completed"],
+                "live_data_path_exercised":
+                    evidence["live_data_path_exercised"],
+                "reconciliation_clean_sessions":
+                    evidence["reconciliation_clean_sessions"]}
+               if evidence else
+               {"sessions_completed": None,
+                "live_data_path_exercised": None,
+                "reconciliation_clean_sessions": None}),
         authorisation={"explicit_user_authorisation": False,
                        "capital_at_risk_agreed": False},
-        assessed_at=session_date)
-    return _response(200, report.as_dict())
+        assessed_at=today_market_date())
+    body = report.as_dict()
+    body["evidence"] = evidence
+    body["current_cohort"] = cohort
+    return _response(200, body)
+
+
+# --- Milestone 19A: autonomous paper operation -----------------------------
+
+def _autonomy_tables():
+    cfg = _config()
+    journal = os.environ.get("AGENT_JOURNAL_TABLE", "stock-agent-dev-journal")
+    return cfg, journal
+
+
+def _safe(fn, default=None):
+    """Run a read; a failure becomes `default` plus a marker, never a 500.
+
+    A dashboard that errors when one table is cold is indistinguishable
+    from a broken agent, so each panel degrades on its own.
+    """
+    try:
+        return fn(), None
+    except Exception as exc:                              # noqa: BLE001
+        return default, f"{type(exc).__name__}: {str(exc)[:120]}"
+
+
+def _current_cohort(snapshot, tallies):
+    """The behavioural cohort in force: the last cycle's, else the most
+    recent session's. None when neither exists - and then NO sessions
+    count toward the evidence, rather than pooling unknown ones."""
+    if snapshot and snapshot.get("cohort"):
+        return snapshot["cohort"]
+    for t in reversed(tallies):
+        if t.cohort:
+            return t.cohort
+    return None
+
+
+def _autonomy_context(session_date):
+    """Everything the dashboard and the chat answer from. Every field
+    comes from a STORED record; nothing is recomputed here."""
+    cfg, journal_table = _autonomy_tables()
+    ctx, errors = {"session_date": session_date}, {}
+
+    snapshot, e = _safe(lambda: DynamoDBSnapshotStore(
+        table_name=cfg.storage.state_table).get())
+    ctx["last_cycle"] = snapshot
+    errors["last_cycle"] = e
+
+    health, e = _safe(lambda: DynamoDBHealthStore(
+        table_name=cfg.storage.state_table).snapshot().as_dict())
+    if e:
+        # Fail closed in the REPORT: an unreadable health record is not
+        # a clean one.
+        health = {"state": "HALTED", "entries_permitted": False,
+                  "exits_permitted": True, "active": [],
+                  "blocking_reasons": [f"health unreadable: {e}"]}
+    ctx["health"] = health
+    errors["health"] = e
+
+    sessions = DynamoDBSessionStore(table_name=journal_table)
+    tally, e = _safe(lambda: sessions.get(session_date))
+    ctx["tally"] = tally.as_dict() if tally else None
+    errors["tally"] = e
+    report, e = _safe(lambda: sessions.get_report(session_date))
+    ctx["report"] = report
+    errors["report"] = e
+
+    rows, e = _safe(lambda: DynamoDBDecisionLog(
+        table_name=journal_table).for_session(session_date), [])
+    ctx["decisions"] = rows
+    errors["decisions"] = e
+    trades, e = _safe(lambda: _journal().list_trades(
+        session_date=session_date), [])
+    ctx["trades"] = [t.as_dict() for t in trades]
+    errors["trades"] = e
+
+    positions, e = _safe(lambda: DynamoDBPositionStore(
+        table_name=os.environ.get("AGENT_POSITIONS_TABLE",
+                                  "stock-agent-dev-positions"))
+        .load_open(session_date), [])
+    ctx["positions"] = [p.as_dict() for p in positions]
+    errors["positions"] = e
+
+    alerts, e = _safe(lambda: DynamoDBAlertSink(
+        table_name=cfg.storage.state_table).recent(
+            session_date=session_date), [])
+    ctx["alerts"] = [a.as_dict() for a in alerts]
+    errors["alerts"] = e
+
+    state, e = _safe(lambda: _state_service().get_session(
+        session_date).as_dict())
+    ctx["agent_state"] = (state or {}).get("agent_state")
+    ctx["regime"] = ({k: state.get(k) for k in (
+        "market_regime", "market_regime_confidence", "risk_posture",
+        "regime_updated_at")} if state else None)
+    errors["agent_state"] = e
+
+    limits = RiskLimits()
+    ctx["limits"] = {k: v for k, v in vars(limits).items()}
+    ctx["daily"] = (snapshot or {}).get("daily")
+    ctx["mode"] = (snapshot or {}).get("execution_mode") or "UNKNOWN"
+    ctx["errors"] = {k: v for k, v in errors.items() if v}
+    return ctx
+
+
+def handle_autonomy(event) -> Dict:
+    """What the agent is doing, in one read. Placed beside nothing that
+    can place an order: every field is a stored record."""
+    session_date = _query(event).get("date") or today_market_date()
+    ctx = _autonomy_context(session_date)
+    nxt = next_cycle_time()
+    return _response(200, {
+        "banner": "AUTONOMOUS PAPER MODE",
+        "real_money": "DISABLED",
+        "execution_mode": ctx["mode"],
+        "live_trading_enabled": False,
+        "can_place_orders": False,
+        "overnight_positions": "DISABLED",
+        "session_date": session_date,
+        "agent_state": ctx["agent_state"],
+        "health": ctx["health"],
+        "regime": ctx["regime"],
+        "last_cycle": ctx["last_cycle"],
+        "tally": ctx["tally"],
+        "report": ctx["report"],
+        "positions": ctx["positions"],
+        "daily": ctx["daily"],
+        "limits": ctx["limits"],
+        "alerts": ctx["alerts"],
+        "decisions": ctx["decisions"][-25:],
+        "trades": ctx["trades"],
+        "next_cycle_at": nxt.isoformat(),
+        "read_errors": ctx["errors"],
+    })
+
+
+def handle_decisions(event) -> Dict:
+    q = _query(event)
+    date = q.get("date") or today_market_date()
+    cfg, journal_table = _autonomy_tables()
+    rows, e = _safe(lambda: DynamoDBDecisionLog(
+        table_name=journal_table).for_session(
+            date, symbol=(q.get("symbol") or "").upper() or None), [])
+    return _response(200, {"session_date": date, "count": len(rows),
+                           "decisions": rows, "read_error": e})
+
+
+def handle_sessions(event) -> Dict:
+    """Every session tally, and the evidence the readiness gate reads."""
+    cfg, journal_table = _autonomy_tables()
+    tallies, e = _safe(lambda: DynamoDBSessionStore(
+        table_name=journal_table).list(), [])
+    snapshot, _ = _safe(lambda: DynamoDBSnapshotStore(
+        table_name=cfg.storage.state_table).get())
+    cohort = _current_cohort(snapshot, tallies)
+    evidence = aggregate_evidence(tallies, cohort) if cohort else None
+    return _response(200, {
+        "current_cohort": cohort,
+        "sessions": [t.as_dict() for t in tallies][-60:],
+        "evidence": evidence,
+        "note": ("Sessions from other cohorts are listed and counted but "
+                 "never pooled into the evidence: they ran different "
+                 "behaviour."),
+        "read_error": e,
+    })
+
+
+def handle_session_report(event) -> Dict:
+    date = _query(event).get("date") or today_market_date()
+    cfg, journal_table = _autonomy_tables()
+    report, e = _safe(lambda: DynamoDBSessionStore(
+        table_name=journal_table).get_report(date))
+    return _response(200, {"session_date": date, "report": report,
+                           "written": report is not None, "read_error": e})
+
+
+def handle_ask(event) -> Dict:
+    """Answer a question from STORED records. GET, because the API's
+    invariant is exactly one POST.
+
+    Deterministic: no language model is involved, so no model can alter
+    a stored decision. Each answer names the records it was built from,
+    and an answer for something the record does not contain says so.
+    """
+    q = _query(event)
+    query = (q.get("q") or "").strip()
+    if not query:
+        return _response(400, {"error": "q is required"})
+    session_date = q.get("date") or today_market_date()
+    ctx = _autonomy_context(session_date)
+    answer = explain_question(query, ctx)
+    answer["session_date"] = session_date
+    answer["read_errors"] = ctx["errors"]
+    return _response(200, answer)
 
 
 ROUTES = {
@@ -1125,6 +1347,12 @@ ROUTES = {
     ("GET", "/agent/performance"): handle_performance,
     ("GET", "/agent/pipeline"): handle_pipeline,
     ("GET", "/agent/readiness"): handle_readiness,
+    # Milestone 19A
+    ("GET", "/agent/autonomy"): handle_autonomy,
+    ("GET", "/agent/decisions"): handle_decisions,
+    ("GET", "/agent/sessions"): handle_sessions,
+    ("GET", "/agent/session-report"): handle_session_report,
+    ("GET", "/agent/ask"): handle_ask,
 }
 
 

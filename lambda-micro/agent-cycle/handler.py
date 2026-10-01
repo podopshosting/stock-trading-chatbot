@@ -33,7 +33,7 @@ from typing import Dict, List, Optional
 
 from agent.autonomy import (
     Alert, AlertKind, Condition, DynamoDBAlertSink,
-    DynamoDBDecisionLog,
+    DynamoDBDecisionLog, DynamoDBSnapshotStore,
     DynamoDBHealthStore, DynamoDBSessionStore, ExecutionMode,
     aggregate_evidence, cohort_key, current_versions, daily_counters,
     finalize_session, policy_from_environment, record_cycle,
@@ -255,6 +255,13 @@ def _run(session_date: str) -> Dict:
         payload["session_tally_error"] = str(exc)[:160]
 
     payload["state_sync"] = sync_state(state_service, payload, session_date)
+
+    # Written where the dashboard and the chat can read it. Best effort:
+    # failing to record this must never be a reason a cycle fails.
+    try:
+        DynamoDBSnapshotStore(table_name=cfg.storage.state_table).put(payload)
+    except Exception as exc:                              # noqa: BLE001
+        payload["snapshot_error"] = str(exc)[:120]
     return payload
 
 

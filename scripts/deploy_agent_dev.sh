@@ -113,6 +113,42 @@ deploy_cycle() {
   aws lambda wait function-updated \
     --function-name "$CYCLE_FUNCTION" --region "$REGION" --profile "$PROFILE"
 
+  # Pin the code SHA and the execution mode. The environment is MERGED,
+  # not replaced: update-function-configuration overwrites every
+  # variable, and a replace would silently drop the table names.
+  #
+  # AGENT_TRADING_ENABLED and AGENT_EXECUTION_AVAILABLE are REMOVED. They
+  # were two booleans that between them meant both "trading is on" and
+  # "this can reach real money"; AGENT_EXECUTION_MODE replaces them and
+  # nothing reads the old ones any more.
+  local sha dirty=""
+  sha="$(git -C "$REPO" rev-parse --short HEAD)"
+  if [ -n "$(git -C "$REPO" status --porcelain -- agent lambda-micro)" ]; then
+    dirty="-dirty"
+    echo "    WARNING: uncommitted changes under agent/ or lambda-micro/;" >&2
+    echo "    the pinned SHA will read $sha$dirty so results cannot be" >&2
+    echo "    mistaken for a clean commit." >&2
+  fi
+  aws lambda get-function-configuration \
+    --function-name "$CYCLE_FUNCTION" --region "$REGION" --profile "$PROFILE" \
+    --query 'Environment.Variables' --output json > /tmp/cycle-env-current.json
+  SHA="$sha$dirty" python3 - <<'PY'
+import json, os
+env = json.load(open("/tmp/cycle-env-current.json")) or {}
+env.pop("AGENT_TRADING_ENABLED", None)
+env.pop("AGENT_EXECUTION_AVAILABLE", None)
+env["AGENT_EXECUTION_MODE"] = os.environ.get("AGENT_EXECUTION_MODE_OVERRIDE", "PAPER")
+env["AGENT_CODE_SHA"] = os.environ["SHA"]
+json.dump({"Variables": env}, open("/tmp/cycle-env-new.json", "w"))
+PY
+  aws lambda update-function-configuration \
+    --function-name "$CYCLE_FUNCTION" --region "$REGION" --profile "$PROFILE" \
+    --environment file:///tmp/cycle-env-new.json \
+    --query 'Environment.Variables.{mode:AGENT_EXECUTION_MODE,sha:AGENT_CODE_SHA}' \
+    --output json
+  aws lambda wait function-updated \
+    --function-name "$CYCLE_FUNCTION" --region "$REGION" --profile "$PROFILE"
+
   # A cycle that cannot even report its phase is not deployed.
   echo "==> verifying"
   aws lambda invoke --function-name "$CYCLE_FUNCTION" \

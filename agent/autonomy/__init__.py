@@ -22,6 +22,11 @@ from .policy import (
     FORBIDDEN, PERMITTED, Action, AutonomyPolicy, ExecutionMode,
     LiveExecutionRefused, PolicyViolation, policy_from_environment,
 )
+from .explain import explain, classify as classify_question, extract_symbol
+from .schedule import CRON as CYCLE_CRON, next_cycle_time
+from .snapshot import (
+    DynamoDBSnapshotStore, InMemorySnapshotStore, SnapshotStore,
+)
 from .sessions import (
     DynamoDBSessionStore, InMemorySessionStore, SessionStore, SessionTally,
     aggregate_evidence, build_report, finalize_session, record_cycle,

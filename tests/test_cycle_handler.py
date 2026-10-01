@@ -27,7 +27,7 @@ sys.path.insert(0, REPO_ROOT)
 
 from agent.autonomy import (                                      # noqa: E402
     Condition, InMemoryAlertSink, InMemoryDecisionLog,
-    InMemoryHealthStore, InMemorySessionStore,
+    InMemoryHealthStore, InMemorySessionStore, InMemorySnapshotStore,
 )
 from agent.broker import InMemoryBrokerStateStore                  # noqa: E402
 from agent.journal import InMemoryJournal                         # noqa: E402
@@ -114,6 +114,7 @@ class World:
         self.lock = InMemoryCycleLock()
         self.scanner_store = InMemoryScannerStore()
         self.state_store = InMemoryStateStore()
+        self.snapshot = InMemorySnapshotStore()
         from agent.risk import RiskLimits
         self.limits = RiskLimits()
 
@@ -189,6 +190,7 @@ class World:
             "DynamoDBSignalStore": lambda **kw: None,
             "SignalService": lambda *a, **k: FakeSignalService(self),
             "DynamoDBStateStore": lambda *a, **k: self.state_store,
+            "DynamoDBSnapshotStore": lambda **kw: self.snapshot,
             "today_market_date": lambda: self.date,
             "RiskLimits": lambda: self.limits,
         }
