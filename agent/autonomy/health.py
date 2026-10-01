@@ -269,7 +269,11 @@ class DynamoDBHealthStore(HealthStore):
         item = response.get("Item")
         if not item:
             return {}
-        rows = json.loads(item["conditions"]["S"])
+        # A record created by set_streak (update_item) has a streak but no
+        # conditions attribute yet. That is "no active conditions", not an
+        # unreadable record; indexing it raised KeyError and aborted every
+        # live cycle after the first.
+        rows = json.loads((item.get("conditions") or {"S": "[]"})["S"])
         return {Condition(r["condition"]): ActiveCondition(
             condition=Condition(r["condition"]), since=r["since"],
             detail=r.get("detail", ""), count=r.get("count", 1))

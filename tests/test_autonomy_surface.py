@@ -540,5 +540,53 @@ class TestStoresUseTablesWithTheirKeySchema(unittest.TestCase):
                         self.assertNotIn("state_table", m.group(1))
 
 
+class TestHealthRecordCreatedByTheStreakWrite(unittest.TestCase):
+    """Live defect 2026-10-01: the first cycle's record_cycle() created the
+    health item with only `streak`; the next cycle's snapshot() raised
+    KeyError('conditions') and aborted every cycle for the session."""
+
+    class FakeDynamo:
+        class exceptions:
+            class ConditionalCheckFailedException(Exception):
+                pass
+
+        def __init__(self):
+            self.item = None
+
+        def update_item(self, **kw):
+            self.item = self.item or {}
+            vals = kw["ExpressionAttributeValues"]
+            if ":s" in vals:
+                self.item["streak"] = vals[":s"]
+            if ":c" in vals:
+                self.item["conditions"] = vals[":c"]
+
+        def get_item(self, **kw):
+            return {"Item": self.item} if self.item else {}
+
+    def store(self):
+        from agent.autonomy.health import DynamoDBHealthStore
+        return DynamoDBHealthStore(table_name="t", client=self.FakeDynamo())
+
+    def test_a_streak_only_record_reads_as_healthy_not_as_an_error(self):
+        st = self.store()
+        st.record_cycle(True)                      # creates streak, no conditions
+        self.assertEqual(str(st.snapshot().state), "HEALTHY")
+
+    def test_conditions_and_streak_coexist_in_either_write_order(self):
+        from agent.autonomy.health import Condition
+        st = self.store()
+        st.record_cycle(False)
+        st.raise_condition(Condition.UNCERTAIN_ORDER_STATE, "x")
+        self.assertEqual(st.get_streak(), 1)
+        self.assertEqual(str(st.snapshot().state), "HALTED")
+
+    def test_a_genuinely_unreadable_record_still_fails_closed(self):
+        st = self.store()
+        st.client.item = {"conditions": {"S": "not json"}}
+        with self.assertRaises(Exception):
+            st.snapshot()
+
+
 if __name__ == "__main__":
     unittest.main()
