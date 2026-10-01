@@ -22,7 +22,8 @@ from agent.replay import (                                        # noqa: E402
     Bar, LookaheadError, PointInTimeEvidence, PointInTimeSeries,
     ReplayBroker, ReplayClock, ReplayConfig, ReplayResult, run,
     UnadjustedCorporateAction, adjust_bars_for_splits, find_discontinuities,
-    PointInTimeFundamentals,
+    PointInTimeFundamentals, Universe, SURVIVORSHIP_BIASED,
+    SURVIVORSHIP_POINT_IN_TIME, SURVIVORSHIP_UNKNOWN,
 )
 
 
@@ -730,3 +731,60 @@ class TestFundamentalsAreGatedOnFilingDate(unittest.TestCase):
         f = PointInTimeFundamentals(self.FACTS, ReplayClock())
         self.assertEqual(f.visible(), [])
         self.assertIsNone(f.latest())
+
+
+class TestSurvivorshipIsDeclaredNotAssumed(unittest.TestCase):
+    """A universe drawn from the symbols that exist today cannot contain
+    the ones that failed. Replaying 2020 against the index as constituted
+    in 2026 reads the selection, not the strategy. Code cannot fix it -
+    the missing symbols are missing - so it has to be disclosed."""
+
+    def u(self, declared, delisted=()):
+        return Universe(["AAPL", "MSFT"], as_of_listing_date=declared,
+                        delisted=delisted, source="test")
+
+    def test_an_undeclared_universe_is_unknown(self):
+        self.assertEqual(self.u(None).survivorship, SURVIVORSHIP_UNKNOWN)
+
+    def test_unknown_counts_as_biased(self):
+        """Not knowing how a universe was built is not the same as
+        knowing it was built correctly, and the consequence for reading
+        the result is identical."""
+        self.assertTrue(self.u(None).is_biased)
+
+    def test_a_universe_taken_after_the_window_is_biased(self):
+        self.assertEqual(self.u(False).survivorship, SURVIVORSHIP_BIASED)
+        self.assertTrue(self.u(False).is_biased)
+
+    def test_a_point_in_time_universe_is_not_biased(self):
+        """The control: without it, is_biased could simply be True
+        always, which would carry no information."""
+        pit = self.u(True, delisted=("ENRN",))
+        self.assertEqual(pit.survivorship, SURVIVORSHIP_POINT_IN_TIME)
+        self.assertFalse(pit.is_biased)
+
+    def test_the_verdict_cannot_be_overridden(self):
+        """Derived with no setter, so a run cannot be made to look
+        cleaner than its declaration supports."""
+        with self.assertRaises(AttributeError):
+            self.u(False).survivorship = SURVIVORSHIP_POINT_IN_TIME
+
+    def test_the_universe_itself_is_immutable(self):
+        with self.assertRaises(Exception):
+            self.u(True).symbols = ["XYZ"]
+
+    def test_each_verdict_carries_a_caveat_a_reader_can_act_on(self):
+        self.assertIn("biased upward", self.u(False).as_dict()["caveat"])
+        self.assertIn("not declared", self.u(None).as_dict()["caveat"])
+        self.assertIn("not inflated",
+                      self.u(True, ("ENRN",)).as_dict()["caveat"])
+
+    def test_a_point_in_time_universe_reports_its_delisted_names(self):
+        d = self.u(True, delisted=("ENRN", "LEHM")).as_dict()
+        self.assertEqual(d["delisted_included"], ["ENRN", "LEHM"])
+        self.assertIn("2 name(s) since delisted", d["caveat"])
+
+    def test_the_caveat_is_never_empty(self):
+        for declared in (None, True, False):
+            with self.subTest(declared=declared):
+                self.assertTrue(self.u(declared).as_dict()["caveat"])

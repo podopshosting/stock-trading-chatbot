@@ -361,3 +361,80 @@ class PointInTimeFundamentals:
                 "gated_on": self._key,
                 "note": ("gated on filing date, not period end: a quarter "
                          "is not public on the day it ends")}
+
+
+# --- survivorship ----------------------------------------------------
+#
+# A universe drawn from the symbols that exist today cannot contain the
+# ones that failed. Replaying 2020 against the S&P 500 as constituted in
+# 2026 is a backtest of the companies that made it, which is not a
+# strategy result - it is a reading of the selection.
+#
+# This cannot be fixed by code: the missing symbols are missing. It can
+# only be disclosed, so a result is never read as cleaner than its
+# universe. Hence a declaration that the caller must make, and a verdict
+# carried alongside the numbers.
+
+SURVIVORSHIP_UNKNOWN = "UNKNOWN"
+SURVIVORSHIP_POINT_IN_TIME = "POINT_IN_TIME"
+SURVIVORSHIP_BIASED = "SURVIVORSHIP_BIASED"
+
+
+@dataclass(frozen=True)
+class Universe:
+    """The symbols a run may consider, and what is known about them.
+
+    `as_of_listing_date` is the declaration that matters: True means the
+    membership was taken as it stood at the start of the replay window,
+    including names since delisted. False means it was taken later, so
+    the failures are absent.
+    """
+    symbols: Sequence[str]
+    as_of_listing_date: Optional[bool] = None
+    delisted: Sequence[str] = field(default_factory=tuple)
+    source: Optional[str] = None
+
+    @property
+    def survivorship(self) -> str:
+        """Derived, with no setter, so it cannot be overridden to look
+        better than the declaration supports."""
+        if self.as_of_listing_date is None:
+            return SURVIVORSHIP_UNKNOWN
+        if not self.as_of_listing_date:
+            return SURVIVORSHIP_BIASED
+        return SURVIVORSHIP_POINT_IN_TIME
+
+    @property
+    def is_biased(self) -> bool:
+        """UNKNOWN counts as biased. Not knowing how a universe was
+        built is not the same as knowing it was built correctly, and the
+        consequence for reading the result is identical."""
+        return self.survivorship != SURVIVORSHIP_POINT_IN_TIME
+
+    def as_dict(self) -> Dict:
+        return {
+            "symbols": list(self.symbols),
+            "symbol_count": len(self.symbols),
+            "delisted_included": list(self.delisted),
+            "survivorship": self.survivorship,
+            "is_biased": self.is_biased,
+            "source": self.source,
+            "caveat": self._caveat(),
+        }
+
+    def _caveat(self) -> str:
+        if self.survivorship == SURVIVORSHIP_POINT_IN_TIME:
+            return (
+                f"membership as at the start of the window, including "
+                f"{len(self.delisted)} name(s) since delisted; results are "
+                f"not inflated by selection")
+        if self.survivorship == SURVIVORSHIP_BIASED:
+            return (
+                "membership taken after the window, so companies that "
+                "failed are absent; returns are biased upward by an "
+                "unknown amount and are not comparable with a "
+                "point-in-time run")
+        return (
+            "how this universe was constructed was not declared, so "
+            "whether it excludes failed companies is unknown; treat it as "
+            "biased, because not knowing is not the same as being right")

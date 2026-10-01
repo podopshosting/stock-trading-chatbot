@@ -23,6 +23,8 @@ from .broker import ReplayBroker
 from .clock import LookaheadError, ReplayClock
 from .data import (Bar, PointInTimeEvidence, PointInTimeFundamentals,
                    PointInTimeSeries, UnadjustedCorporateAction,
+                   SURVIVORSHIP_BIASED, SURVIVORSHIP_POINT_IN_TIME,
+                   SURVIVORSHIP_UNKNOWN, Universe,
                    adjust_bars_for_splits, find_discontinuities)
 from .engine import (
     CONFIG_VERSION, DEFAULT_WARMUP_BARS, ReplayConfig, ReplayResult, run,
@@ -34,5 +36,6 @@ __all__ = [
     "PointInTimeSeries", "ReplayBroker",
     "ReplayClock", "ReplayConfig", "ReplayResult", "run",
     "UnadjustedCorporateAction", "adjust_bars_for_splits",
-    "find_discontinuities",
+    "find_discontinuities", "Universe", "SURVIVORSHIP_BIASED",
+    "SURVIVORSHIP_POINT_IN_TIME", "SURVIVORSHIP_UNKNOWN",
 ]
