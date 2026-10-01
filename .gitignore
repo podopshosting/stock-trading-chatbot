@@ -59,3 +59,9 @@ package-lock.json
 # Lambda deployment packages
 *.zip
 lambda-packages/
+
+# Stray credential files: never commit a key dropped into the tree.
+*Key*.txt
+*key*.txt
+*secret*.json
+*credentials*.json
