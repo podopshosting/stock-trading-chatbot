@@ -146,6 +146,21 @@
   .err { color: var(--down); font-size: 14px; font-family: var(--mono); }
   .stage-sep { border: 0; border-top: 1px solid var(--border); margin: 18px 0 14px; }
   .muted { color: var(--text-dim); }
+
+  .co-tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+  .co-tabs button { padding:5px 11px; font-size:13px; cursor:pointer; }
+  .co-tabs button[aria-selected="true"] { font-weight:700;
+    outline:2px solid #4a7; }
+  .co-badge { display:inline-block; padding:3px 10px; border-radius:4px;
+    font-weight:700; font-size:15px; }
+  .co-badge.yes { background:#1b5e20; color:#fff; }
+  .co-badge.no { background:#424242; color:#fff; }
+  .co-badge.unknown { background:#6d4c00; color:#fff; }
+  .co-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .co-table th, .co-table td { text-align:left; padding:4px 8px;
+    border-bottom:1px solid #333; }
+  .co-table td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .co-prov { font-size:11px; color:#999; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -181,6 +196,26 @@
       <button type="submit">Ask</button></form>
     <p id="askA" class="note"></p>
     <p class="muted">Answers are read from stored decisions; nothing is generated.</p>
+  </section>
+
+
+  <!-- Company intelligence: longer horizon, deliberately separate from
+       the intraday execution card above. -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Company intelligence
+      <span class="muted" style="font-size:12px;font-weight:400">
+        &mdash; research context, not a trading signal</span>
+    </h2>
+    <form id="coForm" style="margin-bottom:10px">
+      <input id="coSymbol" type="text" placeholder="GIS" maxlength="6"
+             style="width:120px;text-transform:uppercase">
+      <button type="submit">Look up</button>
+      <label class="muted" style="margin-left:10px">
+        <input type="checkbox" id="coRefresh"> re-read provider
+      </label>
+    </form>
+    <div id="coTabs" class="co-tabs"></div>
+    <div id="coBody"><p class="empty">Enter a symbol.</p></div>
   </section>
 
   <!-- Readiness: the answer that matters most -->
