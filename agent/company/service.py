@@ -260,10 +260,11 @@ class CompanyService:
                 "error": err, "count": len(stored),
                 "window_years": HISTORY_YEARS}
 
-    def _action_objects(self, symbol) -> List[CorporateAction]:
+    def _action_objects(self, symbol, refresh: bool = False
+                        ) -> List[CorporateAction]:
         from .models import ActionType as T
         out = []
-        for d in self.corporate_actions(symbol)["actions"]:
+        for d in self.corporate_actions(symbol, refresh=refresh)["actions"]:
             prov = d.get("provenance")
             out.append(CorporateAction(
                 type=T(d["type"]), symbol=d["symbol"], event_id=d.get("event_id"),
@@ -278,9 +279,9 @@ class CompanyService:
         return out
 
     # -- dividends / splits --------------------------------------------------
-    def dividends(self, symbol: str) -> Dict:
+    def dividends(self, symbol: str, refresh: bool = False) -> Dict:
         symbol = symbol.upper()
-        ca = self.corporate_actions(symbol)
+        ca = self.corporate_actions(symbol, refresh=refresh)
         if ca["error"] and not ca["actions"]:
             return {"symbol": symbol, "status": "UNKNOWN", "pays_dividend": None,
                     "reason": "corporate-actions provider unavailable",
@@ -316,9 +317,9 @@ class CompanyService:
         self._save(symbol, "DIVPROFILE", out)
         return out
 
-    def splits(self, symbol: str) -> Dict:
+    def splits(self, symbol: str, refresh: bool = False) -> Dict:
         symbol = symbol.upper()
-        acts = self._action_objects(symbol)
+        acts = self._action_objects(symbol, refresh=refresh)
         events = to_split_events(acts)
         s = spl.summarise(events, self._today())
         s["symbol"] = symbol

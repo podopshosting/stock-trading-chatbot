@@ -8,9 +8,12 @@ from test_company_service import svc, FakeActions, QUARTERLY, FakeFacts  # noqa
 
 def call(path, method="GET", service=None):
     service = service or svc(FakeActions(QUARTERLY))[0]
+    path, _, query = path.partition("?")
+    params = dict(p.split("=", 1) for p in query.split("&")) if query else None
     with mock.patch.object(api, "_company_service", lambda: service):
         r = api.lambda_handler({"requestContext": {"http": {
-            "method": method, "path": path}}}, None)
+            "method": method, "path": path}},
+            "queryStringParameters": params}, None)
     return r["statusCode"], json.loads(r["body"])
 
 
@@ -80,3 +83,32 @@ class TestIsolationFromTheTradingPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRefreshIsStillReadOnly(unittest.TestCase):
+    """`?refresh=1` re-reads the provider. It must not become a write
+    surface, and it must only reach sections that accept it."""
+
+    def test_refresh_reaches_the_provider_again(self):
+        from test_company_service import FakeActions, QUARTERLY, svc
+        acts = FakeActions(QUARTERLY)
+        service, _store = svc(acts)
+        code, _b = call("/agent/company/GIS/dividends", service=service)
+        self.assertEqual(code, 200)
+        first = acts.calls
+        call("/agent/company/GIS/dividends", service=service)
+        self.assertEqual(acts.calls, first)            # cached
+        call("/agent/company/GIS/dividends?refresh=1", service=service)
+        self.assertEqual(acts.calls, first + 1)
+
+    def test_refresh_on_a_section_that_does_not_take_it_is_harmless(self):
+        code, body = call("/agent/company/GIS/fundamentals?refresh=1")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["execution"]["real_money"], "DISABLED")
+
+    def test_refresh_does_not_turn_a_write_method_into_a_route(self):
+        for method in ("POST", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                self.assertEqual(
+                    call("/agent/company/GIS/dividends?refresh=1", method)[0],
+                    405)

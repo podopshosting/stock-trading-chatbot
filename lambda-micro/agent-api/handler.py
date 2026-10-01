@@ -1398,8 +1398,18 @@ def handle_company(method: str, path: str, event) -> Dict:
                                                   for s in COMPANY_SECTIONS)})
     if method != "GET":
         return _response(405, {"error": "company endpoints are read-only"})
+    # `?refresh=1` re-reads the provider for the sections that cache
+    # provider history, so a corrected fetch window or a newly announced
+    # action does not wait out a 24-hour TTL. Read-only either way.
+    want_refresh = str((_query(event) or {}).get("refresh", "")).lower() \
+        in ("1", "true", "yes")
     try:
-        body = getattr(_company_service(), fn)(symbol)
+        method = getattr(_company_service(), fn)
+        import inspect
+        if want_refresh and "refresh" in inspect.signature(method).parameters:
+            body = method(symbol, refresh=True)
+        else:
+            body = method(symbol)
     except ProviderError as e:
         return _response(502, {"error": "provider unavailable",
                                "detail": str(e)[:200]})
