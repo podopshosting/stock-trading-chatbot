@@ -656,3 +656,90 @@ class TestReadinessCarriesTheEvidenceClass(unittest.TestCase):
         self.assertEqual(len(voided), 1)
         self.assertEqual(voided[0]["code_shas"], ["8674df7", "66989c4"])
         self.assertEqual(body["evidence"]["sessions_completed"], 0)
+
+
+class TestCohortsAreTrackedSeparately(unittest.TestCase):
+    """
+    Operational reliability and strategy performance are different
+    claims. A cohort can be flawless operationally and prove nothing
+    about the strategy - which is exactly the delayed-data case - so the
+    two are never reported as one number.
+    """
+
+    def world_with_cohorts(self):
+        world = World()
+        world.invoke()
+        world.at("20:30", status="CLOSED")
+        world.invoke()
+        tally = world.sessions.get(world.date)
+        tally.feed_quality_counts = {"DELAYED_SIP": 12}
+        tally.code_shas = ["66989c4"]
+        world.sessions.put(tally)
+        from agent.autonomy import SessionTally
+        world.sessions.put(SessionTally(
+            session_date="2026-10-02", cohort="cohort-realtime",
+            finalized=True, cycles_total=40, cycles_live_market=40,
+            cycles_completed=40, code_shas=["abc1234"],
+            feed_quality_counts={"REALTIME_SIP": 40},
+            reconciliation_checks=40, versions={"code_sha": "abc1234"}))
+        return world
+
+    def test_each_cohort_is_reported_on_its_own(self):
+        _c, body = call(self.world_with_cohorts(), "/agent/cohorts")
+        self.assertGreaterEqual(body["count"], 2)
+        names = {c["cohort"] for c in body["cohorts"]}
+        self.assertIn("cohort-realtime", names)
+
+    def test_a_delayed_cohort_is_operational_only(self):
+        _c, body = call(self.world_with_cohorts(), "/agent/cohorts")
+        delayed = [c for c in body["cohorts"]
+                   if "DELAYED_SIP" in c["feed_quality_counts"]]
+        self.assertTrue(delayed)
+        self.assertEqual(delayed[0]["evidence_class"],
+                         "OPERATIONAL_VALIDATION_ONLY")
+
+    def test_a_real_time_cohort_can_be_strategy_evidence(self):
+        """The control: without it, the label above could be the only
+        one the endpoint ever produces."""
+        _c, body = call(self.world_with_cohorts(), "/agent/cohorts")
+        rt = [c for c in body["cohorts"] if c["cohort"] == "cohort-realtime"]
+        self.assertEqual(rt[0]["evidence_class"],
+                         "REAL_TIME_STRATEGY_EVIDENCE")
+
+    def test_operational_and_strategy_are_separate_blocks(self):
+        _c, body = call(self.world_with_cohorts(), "/agent/cohorts")
+        for cohort in body["cohorts"]:
+            with self.subTest(cohort=cohort["cohort"]):
+                self.assertIn("operational", cohort)
+                self.assertIn("strategy", cohort)
+                self.assertIn("reconciliation", cohort)
+                self.assertIn("eod_flatten", cohort)
+                self.assertIn("data_rejections", cohort)
+
+    def test_stale_data_refusals_are_tracked(self):
+        _c, body = call(self.world_with_cohorts(), "/agent/cohorts")
+        for cohort in body["cohorts"]:
+            self.assertIn("stale_market_data_refusals",
+                          cohort["data_rejections"])
+
+    def test_profitability_carries_its_sample_adequacy(self):
+        _c, body = call(self.world_with_cohorts(), "/agent/cohorts")
+        for cohort in body["cohorts"]:
+            with self.subTest(cohort=cohort["cohort"]):
+                self.assertIn("sample", str(cohort["strategy"]["note"]))
+                self.assertIn("performance", cohort["strategy"])
+
+    def test_a_redeploy_spanning_cohort_is_void(self):
+        world = self.world_with_cohorts()
+        tally = world.sessions.get(world.date)
+        tally.code_shas = ["8674df7", "66989c4"]
+        world.sessions.put(tally)
+        _c, body = call(world, "/agent/cohorts")
+        spanned = [c for c in body["cohorts"] if len(c["code_shas"]) > 1]
+        self.assertTrue(spanned)
+        self.assertEqual(spanned[0]["evidence_class"], "VOID")
+        self.assertIs(spanned[0]["single_runtime"], False)
+
+    def test_the_rule_against_combining_cohorts_is_stated(self):
+        _c, body = call(self.world_with_cohorts(), "/agent/cohorts")
+        self.assertIn("never combined", body["rule"])

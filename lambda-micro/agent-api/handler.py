@@ -1454,6 +1454,116 @@ def handle_company(method: str, path: str, event) -> Dict:
     return _response(200, body)
 
 
+def handle_cohorts(event) -> Dict:
+    """Every evidence cohort, with the dimensions tracked separately.
+
+    Operational reliability and strategy performance are different
+    claims and are reported apart: a cohort can be perfectly reliable
+    and prove nothing about the strategy, which is exactly the position
+    after a delayed-data session. Profitability is reported with its
+    sample adequacy attached and without a verdict until the sample
+    supports one.
+
+    Cohorts are never combined. A cohort that spanned a redeploy, or ran
+    on anything but the real-time consolidated tape, is labelled rather
+    than quietly folded in.
+    """
+    from agent.autonomy.evidence_class import classify_session
+    cfg, journal_table = _autonomy_tables()
+    tallies, read_error = _safe(lambda: DynamoDBSessionStore(
+        table_name=journal_table).list(), [])
+
+    groups: Dict[str, list] = {}
+    for tally in tallies or []:
+        groups.setdefault(tally.cohort or "unversioned", []).append(tally)
+
+    out = []
+    for cohort, rows in sorted(groups.items()):
+        rows.sort(key=lambda t: t.session_date)
+        trades = []
+        for tally in rows:
+            got, _ = _safe(lambda d=tally.session_date: _journal()
+                           .list_trades(session_date=d), [])
+            trades.extend(got)
+        classes = [classify_session(t) for t in rows]
+        feeds: Dict[str, int] = {}
+        for tally in rows:
+            for feed, count in (tally.feed_quality_counts or {}).items():
+                feeds[feed] = feeds.get(feed, 0) + count
+        rejections: Dict[str, int] = {}
+        for tally in rows:
+            for code, count in (tally.rejections_by_code or {}).items():
+                rejections[code] = rejections.get(code, 0) + count
+        shas = sorted({sha for t in rows for sha in (t.code_shas or [])
+                       if sha})
+        out.append({
+            "cohort": cohort,
+            "sessions": len(rows),
+            "first_session": rows[0].session_date,
+            "last_session": rows[-1].session_date,
+            "versions": rows[-1].versions,
+            "code_shas": shas or ["not recorded"],
+            "single_runtime": (len(shas) == 1 if shas else None),
+            # What this cohort may be used to claim.
+            "evidence_class": (
+                "VOID" if any(c["evidence_class"] == "VOID" for c in classes)
+                else "REAL_TIME_STRATEGY_EVIDENCE"
+                if classes and all(c["counts_toward_strategy_gates"]
+                                   for c in classes)
+                else "OPERATIONAL_VALIDATION_ONLY"),
+            "feed_quality_counts": feeds or {"not recorded": 0},
+            # --- operational reliability -------------------------------
+            "operational": {
+                "cycles": sum(t.cycles_total for t in rows),
+                "cycles_live_market": sum(t.cycles_live_market for t in rows),
+                "cycles_completed": sum(t.cycles_completed for t in rows),
+                "cycles_aborted": sum(t.cycles_aborted for t in rows),
+                "cycles_halted": sum(t.cycles_halted for t in rows),
+                "duplicate_order_attempts": sum(t.duplicate_attempts
+                                                for t in rows),
+                "provider_quote_failures": sum(t.quotes_missing for t in rows),
+                "emergency_stops": sum(t.emergency_stops for t in rows),
+                "risk_locks": sum(t.risk_locks for t in rows),
+            },
+            "reconciliation": {
+                "checks": sum(t.reconciliation_checks for t in rows),
+                "failures": sum(t.reconciliation_failures for t in rows),
+                "clean": all(t.reconciliation_failures == 0 for t in rows),
+            },
+            "eod_flatten": {
+                "failures": sum(t.eod_flatten_failures for t in rows),
+                "clean": all(t.eod_flatten_failures == 0 for t in rows),
+            },
+            "data_rejections": {
+                "stale_or_unknown_quotes": sum(t.quotes_stale for t in rows),
+                "stale_market_data_refusals":
+                    rejections.get("STALE_MARKET_DATA", 0),
+                "all_refusal_codes": rejections,
+            },
+            # --- strategy performance, separately ----------------------
+            "strategy": {
+                "hypotheses": sum(t.hypotheses for t in rows),
+                "risk_approvals": sum(t.risk_approvals for t in rows),
+                "entries": sum(t.entries for t in rows),
+                "trades_closed": len(trades),
+                "performance": describe_perf(trades),
+                "note": ("Profitability is not meaningful until the sample "
+                         "adequacy gates pass, and it cannot support a "
+                         "readiness gate unless the cohort is "
+                         "REAL_TIME_STRATEGY_EVIDENCE."),
+            },
+        })
+
+    return _response(200, {
+        "cohorts": out,
+        "count": len(out),
+        "read_error": read_error,
+        "rule": ("Cohorts are never combined: different behaviour, feed or "
+                 "runtime makes a different experiment, and adding them "
+                 "produces a number describing neither."),
+    })
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
@@ -1484,6 +1594,7 @@ ROUTES = {
     ("GET", "/agent/autonomy"): handle_autonomy,
     ("GET", "/agent/decisions"): handle_decisions,
     ("GET", "/agent/sessions"): handle_sessions,
+    ("GET", "/agent/cohorts"): handle_cohorts,
     ("GET", "/agent/session-report"): handle_session_report,
     ("GET", "/agent/ask"): handle_ask,
 }
