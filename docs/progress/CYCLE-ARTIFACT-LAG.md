@@ -1,70 +1,96 @@
-# The live cycle is running a pre-fix artifact
+# Today's session spans two runtimes, and cannot tell
 
-Observed 2026-10-01 during read-only Track A observation. No change was
-made to the cycle: it is frozen for the duration of the paper session by
-design, and this note records what that freeze is currently costing.
+Observed 2026-10-01 by read-only Track A observation. Nothing was
+changed: the cycle is frozen for the duration of the session by design.
 
-## What happened
+**This file previously claimed the deployed cycle still carried a
+staleness-comparison defect. That was wrong, and the error is recorded
+below rather than quietly replaced, because the way I got it wrong is
+the more useful finding.**
 
-One cycle of 66 aborted. From CloudWatch:
+## What actually happened
+
+One cycle of 66 aborted:
 
 ```
-{"event": "cycle_aborted", "cycle_id": "cycle_e6429e2eab0a43a4",
- "detail": "'>' not supported between instances of 'method' and 'float'"}
-{"event": "cycle_complete", "outcome": "ABORTED",
- "risk_was_managed": true, "exits_submitted": 0, "entries_submitted": 0,
- "halt_reasons": ["UNHANDLED_ERROR"]}
+13:32:42  COMPLETED  cycle_3c68f2557adc4c
+13:38:44  ABORTED    cycle_e6429e2eab0a43   <- UNHANDLED_ERROR
+13:39:50  COMPLETED  cycle_6c926afe9fa54e
+13:42:44  COMPLETED  cycle_a84029d4980244
 ```
 
-`risk_was_managed: true` and nothing submitted, so the abort was safe:
-the cycle stopped rather than acting on a comparison it could not make.
+The abort detail was `'>' not supported between instances of 'method'
+and 'float'` — a bound method compared with a float, because
+`Provenance.age_seconds` is a method and was being returned uncalled.
+`risk_was_managed: true` and nothing was submitted, so the abort was
+safe: the cycle stopped rather than acting on a comparison it could not
+make.
 
-## Why it is already fixed, and still happening
+The cycle Lambda was redeployed at **13:39:39** — 55 seconds after that
+abort — carrying the fix. Every one of the 64 cycles since has
+completed, and reconciliation is 66/66 clean. The defect is not live.
 
-The message is a bound method compared with a float.
-`Provenance.age_seconds` is a method, and returning it uncalled put the
-method object itself into the staleness comparison. That was found and
-fixed earlier in this branch; `lambda-micro/agent-cycle/handler.py` at
-HEAD carries the fix with the reason written at the call site, and the
-Risk Governor now compares `context.source_age_seconds`.
+## The error I made
 
-The deployed cycle predates it. Its `versions.code_sha` reads `8674df7`
-and the session tally reports `sha_source: versions.code_sha (single
-value; per-cycle SHAs not recorded)`, which is itself evidence of age:
-per-cycle SHA recording was added in the same body of work as the fix,
-so an artifact that cannot report per-cycle SHAs necessarily predates
-it.
+I read the session tally, which reports `code_shas: ["8674df7"]`, and
+concluded that the running artifact was `8674df7` and therefore predated
+the fix. The deployed configuration actually reads:
 
-So the defect is fixed in the repository and live in production-equivalent
-dev. Nothing about the fix helps until the artifact is replaced.
+```
+LastModified  2026-10-01T13:39:39Z
+AGENT_CODE_SHA  66989c4
+```
 
-## Why it was not deployed on finding it
+The tally was not lying; it was answering a different question. It
+records the SHA it saw when the session opened at 13:32:42, which was
+indeed `8674df7`. I inferred what was *running now* from a value that
+describes what was running *then*, when the deployed configuration was
+one read away.
 
-Track A holds the cycle, scanner, signal engine, Risk Governor, broker,
-position manager and schedules frozen for the duration of the session. A
-redeploy mid-session would also void the session as evidence, because a
-runtime version change inside a session is recorded as
-`RUNTIME_VERSION_CHANGED_MID_SESSION` and the session is then excluded
-from aggregation. Trading one aborted cycle in 66 for a voided session
-would be a poor exchange, and the abort is safe.
+A session tally is a record of a session. The authority on what is
+deployed is the deployment.
 
-## What clears it
+## The real finding, which is worse
 
-The scheduled cutover. Deploying the cycle with `ALPACA_QUOTE_FEED=sip`
-and `AGENT_BROKER=alpaca_paper` replaces the artifact, so the fix lands
-as part of a change that was already going to happen at a cohort
-boundary. That is the right moment: a new artifact starts a new evidence
-cohort either way.
+Today's session spans **two artifacts**: two cycles on `8674df7`, then
+64 on `66989c4` after the 13:39:39 redeploy. A runtime change inside a
+session is precisely the condition `RUNTIME_VERSION_CHANGED_MID_SESSION`
+exists to catch, and such a session is excluded from aggregation as
+unattributable.
 
-This is therefore a second, independent reason for the cutover, beyond
-the feed. Worth stating plainly, because "the data feed was not
-recorded" was the only reason on file, and it understates what the
-current artifact is missing.
+It was not caught. The tally reports `single_runtime_version: null` and
+`sha_source: "versions.code_sha (single value; per-cycle SHAs not
+recorded)"`, and its classification gives exactly one reason — "the data
+feed was not recorded". The runtime change is absent from the reasons.
+
+The cause is self-referential: per-cycle SHA recording was added in the
+same body of work as the staleness fix, so the artifact running when the
+session opened could not record per-cycle SHAs. **The guard against
+mid-session redeploys could not see the mid-session redeploy that
+installed the guard.**
+
+## Consequences for the close-out
+
+- The practical outcome is unchanged: the session is already
+  `counts_toward_strategy_gates: false`, so nothing downstream treats it
+  as strategy evidence.
+- The **reason** on file is wrong, or at least incomplete. The session
+  should be read as unattributable because it ran on two runtimes, not
+  merely as delayed-data. The close-out states this explicitly, since
+  the tally cannot.
+- `OPERATIONAL_VALIDATION_ONLY` remains a fair label for the operational
+  numbers — 66 cycles, 66/66 reconciliation, zero emergency stops, zero
+  risk locks, zero EOD flatten failures — because those are claims about
+  whether the machinery ran, and it did, on both artifacts.
+- This is a one-off. From the next cohort the running artifact records
+  per-cycle SHAs, so a mid-session redeploy will flag itself.
 
 ## The general point
 
-A green suite and a fixed repository say nothing about what is running.
-The gap between `git log` and the deployed artifact is invisible from the
-code, and here it was visible only in a CloudWatch line and a missing
-field in a session tally. Any claim about agent behaviour has to name the
-artifact it is a claim about.
+A green suite and a fixed repository say nothing about what is running,
+and a session's own record of itself is not an authority on its runtime.
+Both gaps were invisible from the code and visible in one CloudWatch
+line, one deployed-configuration field, and one missing entry in a list
+of reasons. Any claim about agent behaviour has to name the artifact it
+is a claim about — and check that name against the deployment rather
+than against the claim.
