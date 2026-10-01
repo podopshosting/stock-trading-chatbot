@@ -608,6 +608,41 @@
 
   // ---- positions -------------------------------------------------------
   function loadPositions() {
+    // /agent/positions reads a store this Lambda does not wire, and said
+    // "nothing is scheduled yet" while two positions were open. The
+    // autonomy record already carries them.
+    var box = document.getElementById("positions");
+    get("/agent/autonomy").then(function (d) {
+      var rows = d.positions || [];
+      box.innerHTML = "";
+      if (!rows.length) {
+        box.appendChild(el("p", "empty",
+          "No open position in the latest recorded cycle."));
+        return;
+      }
+      var t = el("table", "co-table");
+      var head = el("tr");
+      ["Symbol", "Qty", "Entry", "Last", "Stop", "Target", "Unrealised"]
+        .forEach(function (h) { head.appendChild(el("th", null, h)); });
+      t.appendChild(head);
+      rows.forEach(function (p) {
+        var plan = p.plan || {};
+        var tr = el("tr");
+        [p.symbol, p.quantity, p.entry_price, p.current_price,
+         plan.stop_price, plan.target_price, p.unrealized_pnl]
+          .forEach(function (v, i) {
+            tr.appendChild(el("td", i ? "num" : null, fmt(v)));
+          });
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+      box.appendChild(el("p", "co-prov",
+        "Stops are polled by the agent each cycle, not resting at a " +
+        "broker, which is why positions are flattened before the close."));
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  function loadPositionsLegacy() {
     var box = document.getElementById("positions");
     get("/agent/positions").then(function (d) {
       box.innerHTML = "";
@@ -769,7 +804,8 @@
         ["health", h.state, h.state === "HEALTHY" ? "up" : "down"],
         ["entries permitted", h.entries_permitted ? "yes" : "NO"],
         ["agent state", d.agent_state || "no cycle recorded"],
-        ["regime", d.regime || "unknown"],
+        ["regime", (d.regime || {}).market_regime || "unknown"],
+        ["risk posture", (d.regime || {}).risk_posture || "unknown"],
         ["last cycle", c.finished_at || "none yet"],
         ["next cycle", d.next_cycle_at],
         ["overnight positions", d.overnight_positions],
@@ -831,6 +867,16 @@
     return get(base + (document.getElementById("coRefresh").checked
                        ? "?refresh=1" : ""));
   }
+  function coMoney(v) {
+    if (typeof v !== "number") return fmt(v);
+    var units = [["T", 1e12], ["B", 1e9], ["M", 1e6]];
+    for (var i = 0; i < units.length; i++) {
+      if (Math.abs(v) >= units[i][1]) {
+        return "$" + (v / units[i][1]).toFixed(2) + units[i][0];
+      }
+    }
+    return "$" + v.toFixed(2);
+  }
   function row(table, label, value, cls) {
     var tr = el("tr");
     tr.appendChild(el("th", null, label));
@@ -861,7 +907,7 @@
       ["Name", p.name], ["Symbol", p.symbol], ["Exchange", p.exchange],
       ["Sector", p.sector], ["Industry", p.industry],
       ["SIC", p.sic], ["CIK", p.cik],
-      ["Market cap", p.market_cap, "num"],
+      ["Market cap", coMoney(p.market_cap), "num"],
       ["Dividend status", d.dividend_status],
       ["Last split", d.last_split ? (d.last_split.ex_date + " " +
         d.last_split.type) : "none recorded"]
@@ -949,7 +995,7 @@
                           ? "unavailable" : r.eps_estimate));
         tr.appendChild(el("td", "num", r.eps_surprise === null
                           ? "—" : r.eps_surprise));
-        tr.appendChild(el("td", "num", fmt(r.revenue_actual)));
+        tr.appendChild(el("td", "num", coMoney(r.revenue_actual)));
         t.appendChild(tr);
       });
       box.appendChild(t);
@@ -983,7 +1029,7 @@
         var tr = el("tr");
         tr.appendChild(el("th", null, k));
         if (v && typeof v === "object") {
-          tr.appendChild(el("td", "num", fmt(v.value)));
+          tr.appendChild(el("td", "num", coMoney(v.value)));
           tr.appendChild(el("td", null, (v.period_end || "") +
             (v.form ? " (" + v.form + ")" : "")));
         } else {
@@ -1007,7 +1053,7 @@
     box.appendChild(dt);
     ["ttm_revenue", "ttm_net_income"].forEach(function (k) {
       var t = d[k] || {};
-      prov(box, k + ": " + fmt(t.value) + " — " + (t.reason || ""));
+      prov(box, k + ": " + coMoney(t.value) + " — " + (t.reason || ""));
     });
   }
 
