@@ -71,6 +71,7 @@ from agent.autonomy import (
     classify_question, explain as explain_question, next_cycle_time,
 )
 from agent.positions import DynamoDBPositionStore
+from agent.broker.shadow_store import DynamoDBShadowStore
 from agent.company.service import CompanyService
 from agent.company.store import DynamoDBCompanyStore
 from agent.company.providers.alpaca_corporate_actions import AlpacaCorporateActions
@@ -1589,6 +1590,44 @@ def handle_why_no_trade(event) -> Dict:
     return _response(200, body)
 
 
+def handle_shadow(event) -> Dict:
+    """Internal expected fill against the external paper fill.
+
+    Empty until a cohort runs with an external venue. An empty result
+    says so rather than implying agreement: "no differences recorded"
+    and "no comparisons exist" are not the same claim, and only one of
+    them is evidence that the simulator is calibrated.
+    """
+    from agent.broker.shadow import summarise
+    session_date = _query(event).get("date") or today_market_date()
+    cfg, journal_table = _autonomy_tables()
+    rows, read_error = _safe(lambda: DynamoDBShadowStore(
+        table_name=journal_table).for_session(session_date), [])
+    rows = rows or []
+    body = {
+        "session_date": session_date,
+        "comparisons": rows,
+        "count": len(rows),
+        "read_error": read_error,
+        "fields": ["symbol", "requested_notional", "requested_quantity",
+                   "internal_fill_price", "internal_fill_quantity",
+                   "broker_fill_price", "broker_fill_quantity",
+                   "price_difference", "slippage_bps", "partial_fill",
+                   "rejection", "latency_ms"],
+    }
+    if not rows:
+        body["state"] = "NO_COMPARISONS_RECORDED"
+        body["detail"] = (
+            "No external paper venue has executed in this session, so "
+            "there is nothing to compare. This is not a report that the "
+            "simulator and the venue agree.")
+        body["summary"] = None
+    else:
+        body["state"] = "RECORDED"
+        body["summary"], _ = _safe(lambda: summarise(rows))
+    return _response(200, body)
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
@@ -1621,6 +1660,7 @@ ROUTES = {
     ("GET", "/agent/sessions"): handle_sessions,
     ("GET", "/agent/cohorts"): handle_cohorts,
     ("GET", "/agent/why-no-trade"): handle_why_no_trade,
+    ("GET", "/agent/shadow"): handle_shadow,
     ("GET", "/agent/session-report"): handle_session_report,
     ("GET", "/agent/ask"): handle_ask,
 }
