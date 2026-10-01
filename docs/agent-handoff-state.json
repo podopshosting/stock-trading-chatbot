@@ -1,18 +1,24 @@
 {
-  "handoff_boundary_utc": "2026-10-01T13:45:00Z",
+  "handoff_boundary_utc": "2026-10-01T19:15:00Z",
   "branch": "feature/trading-agent-v1",
-  "last_code_commit": "66989c4",
-  "head_sha": "resolve with: git rev-list -n1 agent-handoff-2026-10-01",
+  "last_code_commit": "145c2cc",
+  "head_sha": "145c2cc",
   "handoff_tag": "agent-handoff-2026-10-01",
   "repo_path": "/Users/Brian 1/Documents/GitHub/stock-trading-chatbot",
   "remote": "git@github.com:podopshosting/stock-trading-chatbot.git",
   "tests": {
-    "passed": 1737,
+    "passed": 2018,
     "failed": 0,
     "skipped": 1,
-    "total": 1738
+    "total": 2019
   },
-  "mutation_controls_last_full_run": 140,
+  "mutation_controls_last_full_run": {
+    "mutations": 162,
+    "status": "STALE - needs a full re-run",
+    "why": "the suite has grown from 1738 to 2019 tests and peers, holding_context, dividends, evidence_class and replay all changed today; a re-run was started and deliberately stopped rather than left to race a deploy",
+    "note": "a run on 2026-10-01 was VOID: the tree was edited while the harness was rewriting it. The harness now refuses a dirty tree and discards any verdict from a concurrently modified file. See docs/progress/MUTATION-HARNESS-CONCURRENCY-INCIDENT.md",
+    "partial_rerun": "5 of 162, all CAUGHT, before being stopped"
+  },
   "production": {
     "chatbot_untouched": true,
     "real_money_enabled": false,
@@ -28,26 +34,28 @@
     "real_money": "DISABLED",
     "overnight_positions": "DISABLED",
     "broker": "internal PaperBroker",
-    "alpaca_paper_broker": "adapter exists, unwired, credential scope unverified",
+    "alpaca_paper_broker": "wired behind AGENT_BROKER=alpaca_paper, NOT yet selected; credentials verified against the live service (paper /v2/account 200 ACTIVE; SIP is_delayed=false, data age 0.1-0.2s; saved key fingerprint-matches the pair already in Secrets Manager); adapter refuses every live host",
     "scheduler": {
       "cycle": "stock-agent-dev-pilot-cycle cron(2/5 13-21 ? * MON-FRI *)",
       "scanner": "stock-agent-dev-scanner-schedule cron(0/5 13-21 ? * MON-FRI *)"
     },
-    "code_sha": "66989c4",
+    "code_sha": "66989c4 (deployed 2026-10-01T13:39:39Z)",
     "strategy": "hypothesis-v1.0.0",
     "risk": "risk-v1.0.0",
     "exits": "exits-v1.0.0",
     "orchestration": "orchestration-v1.1.0",
     "cohort_1": "VOID (sha 8674df7; two live defects)",
     "cohort_2_started": "2026-10-01T13:39:39Z",
-    "first_session": "IN_PROGRESS; 0 trades so far; see docs/AGENT-HANDOFF.md section 8",
+    "first_session": "2026-10-01: 66+ cycles, reconciliation clean throughout, 2 entries, 0 exits, 1 aborted cycle at 13:38:44 on the PREVIOUS artifact. STRADDLES two artifacts (8674df7 then 66989c4), so it is unattributable and counts toward no cohort's strategy evidence - and its own tally cannot say so, because per-cycle SHA recording shipped in the same redeploy. See docs/progress/CYCLE-ARTIFACT-LAG.md",
     "completed_paper_trades": 0,
-    "readiness": "NOT_READY_BLOCKED 0/11"
+    "readiness": "NOT_READY_BLOCKED 0/11",
+    "preflight_realtime_cohort": "16/16 PASS at 18:57Z",
+    "cutover": "NOT DONE. Blocked: the deploy command was refused by the sandbox permission classifier as a production deploy, though it targets stock-agent-dev-*. Runbook ready at docs/progress/REALTIME-COHORT-CUTOVER.md; needs the account holder to run ./scripts/deploy_agent_dev.sh"
   },
   "company_intelligence": {
     "status": "IN_PROGRESS",
     "last_checkpoint": "fdc09c0",
-    "latest_commit_in_scope": "e8ad1a7",
+    "latest_commit_in_scope": "145c2cc",
     "done": [
       "models",
       "dividends",
@@ -66,12 +74,7 @@
       "dev API endpoints",
       "isolation tests"
     ],
-    "live_validated": [
-      "GIS dividends",
-      "GIS fundamentals",
-      "GIS profile",
-      "GIS peers"
-    ],
+    "live_validated": "GIS, AAPL, NVDA, TSLA, GE, COST on 2026-10-01. Found and fixed two defects a green 1952-test suite had not: peer selection matched on the 2-digit SIC major group (AAPL->CAT/DE, NVDA<->GE), and a FAVORABLE holding verdict rested on AGING or unknown-age fundamentals. See docs/progress/COMPANY-INTELLIGENCE-VALIDATION.md",
     "remaining": [
       "peer-comparison exceeds 90s cold",
       "live validation AAPL/NVDA/non-dividend/split/reverse-split/special-dividend",
@@ -80,7 +83,8 @@
       "docs/HOLDING-STRATEGY-INPUTS.md",
       "falsifying-control mutations for 5 remaining controls",
       "earnings calendar/consensus source decision"
-    ]
+    ],
+    "earnings_calendar": "NO provider wired, by instruction. Upcoming earnings and consensus estimates stay UNKNOWN. Alpha Vantage excluded from Company Intelligence entirely (production's key, 25 req/day), enforced by tests/test_company_quota_boundary.py. Finnhub is the preferred next candidate pending a licensing/terms review; FMP off the shortlist unless a paid plan is chosen deliberately. See docs/EARNINGS-CALENDAR-SOURCES.md"
   },
   "blockers": [
     "paper evidence uses 15-minute delayed_sip quotes; quote-age guard measures retrieval time",
@@ -110,5 +114,11 @@
     "overnight holds",
     "redeploying the cycle Lambda except for a proven blocker",
     "force-push or history rewrite"
-  ]
+  ],
+  "replay_hardening": {
+    "lookahead": "already structural (clock, next_open, evidence gating)",
+    "splits": "PointInTimeSeries refuses to construct over a split-shaped price gap, on by default; adjust_bars_for_splits() back-adjusts",
+    "filing_leakage": "PointInTimeFundamentals gates on filing date, never period end; undated facts never served; an unstarted clock serves nothing",
+    "survivorship": "Universe declares it; UNKNOWN counts as biased; the verdict is derived with no setter"
+  }
 }
