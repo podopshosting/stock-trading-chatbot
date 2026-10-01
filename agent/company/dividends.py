@@ -7,9 +7,10 @@ price it used.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
-from .models import DividendEvent, DividendProfile, DividendStatus
+from .models import (DividendEvent, DividendProfile, DividendStatus,
+                     SplitEvent)
 
 
 # A payment counts as "on cadence" within this fraction of the typical
@@ -109,3 +110,106 @@ def with_metrics(profile: DividendProfile, events: Sequence[DividendEvent],
             "no upcoming ex-dividend date, and none expected: no regular "
             "dividend was found")
     return profile
+
+
+# Growth windows, in years. 1 is a simple change; longer spans are
+# annualised so they are comparable with each other.
+GROWTH_YEARS = (1, 3, 5)
+# A prior window must hold a comparable number of payments. A payer that
+# moved from four payments to three in a window has not cut its dividend
+# by a quarter; the window merely clipped a payment, and reporting that
+# as growth would be an artefact of the boundary rather than a fact.
+MIN_PAYMENT_RATIO = 0.75
+
+
+def _split_factor(splits: Sequence[SplitEvent], after: str) -> float:
+    """Cumulative split ratio applied strictly after `after`.
+
+    Historical dividends are per-share amounts as declared, in the share
+    count of their own day. Comparing them with today's amount without
+    this restatement turns Apple's 4-for-1 split into a 75% dividend cut.
+    """
+    factor = 1.0
+    for s in splits or ():
+        if s.ex_date > after:
+            factor *= s.ratio
+    return factor
+
+
+def _window_sum(events: Sequence[DividendEvent],
+                splits: Sequence[SplitEvent],
+                start: date, end: date) -> tuple:
+    total, count = 0.0, 0
+    for e in events:
+        if e.kind != "REGULAR":
+            continue
+        d = _d(e.ex_date)
+        if start < d <= end:
+            total += e.amount / _split_factor(splits, e.ex_date)
+            count += 1
+    return round(total, 6), count
+
+
+def growth(events: Optional[Sequence[DividendEvent]],
+           splits: Optional[Sequence[SplitEvent]],
+           today: date) -> Dict:
+    """Dividend growth over 1, 3 and 5 years, in current share terms.
+
+    Every span reports either a number or a reason it is unknown. A span
+    the history does not reach is UNKNOWN, never zero: a company with
+    four years of data has not held its dividend flat for five.
+    """
+    events = list(events or ())
+    splits = list(splits or ())
+    regular = [e for e in events if e.kind == "REGULAR"]
+    out: Dict = {"split_adjusted": True, "spans": {}}
+    if not regular:
+        out["note"] = "no regular dividends, so growth is not defined"
+        for n in GROWTH_YEARS:
+            out["spans"][f"{n}y"] = {"growth_pct": None,
+                                     "reason": "no regular dividends"}
+        return out
+
+    earliest = min(_d(e.ex_date) for e in regular)
+    now_total, now_count = _window_sum(events, splits,
+                                       today - timedelta(days=365), today)
+    out["trailing_12m_adjusted"] = now_total
+
+    for n in GROWTH_YEARS:
+        key = f"{n}y"
+        span = {"growth_pct": None, "annualised": n > 1}
+        prior_end = today - timedelta(days=365 * n)
+        prior_start = prior_end - timedelta(days=365)
+        if earliest > prior_start:
+            span["reason"] = (
+                f"history begins {earliest.isoformat()}, which does not "
+                f"cover the 12 months to {prior_end.isoformat()}")
+            out["spans"][key] = span
+            continue
+        then_total, then_count = _window_sum(events, splits,
+                                             prior_start, prior_end)
+        if not then_total or not now_total:
+            span["reason"] = "one of the two windows holds no payment"
+            out["spans"][key] = span
+            continue
+        if now_count and then_count < now_count * MIN_PAYMENT_RATIO:
+            span["reason"] = (
+                f"the earlier window holds {then_count} payment(s) against "
+                f"{now_count} now, so a comparison would measure the "
+                f"window boundary rather than the dividend")
+            out["spans"][key] = span
+            continue
+        ratio = now_total / then_total
+        pct = (ratio ** (1.0 / n) - 1.0) * 100 if n > 1 else (ratio - 1) * 100
+        span.update({"growth_pct": round(pct, 4),
+                     "from_amount": then_total, "to_amount": now_total,
+                     "from_window": f"{prior_start.isoformat()}..{prior_end.isoformat()}",
+                     "payments": {"then": then_count, "now": now_count}})
+        out["spans"][key] = span
+
+    if splits:
+        out["note"] = (
+            f"{len(splits)} split(s) in the window; historical amounts are "
+            "restated into current share terms, without which a 4-for-1 "
+            "split reads as a 75% cut")
+    return out

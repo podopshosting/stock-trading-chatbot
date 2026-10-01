@@ -3,7 +3,7 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent.company import (DividendEvent, DividendStatus, SplitEvent,
                            SplitType, classify, with_metrics, summarise,
-                           explains_price_drop)
+                           explains_price_drop, growth)
 
 TODAY = date(2026, 10, 1)
 
@@ -205,3 +205,101 @@ class TestNextExDateAlwaysCarriesAReason(unittest.TestCase):
     def test_the_date_itself_is_unchanged_by_the_note(self):
         """The control: a note must not alter what is reported."""
         self.assertEqual(self.build(True, True).days_until_ex, 8)
+
+
+class TestDividendGrowth(unittest.TestCase):
+    """Growth over 1, 3 and 5 years, in current share terms."""
+
+    def series(self, rate=0.10, start=2016, base=0.20, split=None):
+        """Quarterly payments compounding at `rate` a year. When `split`
+        is given, amounts before it are expressed in their own day's
+        share terms, as a provider reports them."""
+        out = []
+        for yr in range(start, 2027):
+            amt = base * ((1 + rate) ** (yr - start))
+            for mo in (2, 5, 8, 11):
+                ex = f"{yr}-{mo:02d}-10"
+                if date(yr, mo, 10) <= TODAY:
+                    if split and ex < split[0]:
+                        amt_ = amt * split[1]
+                    else:
+                        amt_ = amt
+                    out.append(DividendEvent(ex, round(amt_, 6)))
+        return out
+
+    def g(self, events, splits=None):
+        return growth(events, splits or [], TODAY)
+
+    def test_a_flat_dividend_grows_at_zero(self):
+        spans = self.g(self.series(rate=0.0))["spans"]
+        for key in ("1y", "3y", "5y"):
+            with self.subTest(key):
+                self.assertAlmostEqual(spans[key]["growth_pct"], 0.0, places=2)
+
+    def test_longer_spans_are_annualised_not_cumulative(self):
+        """A dividend growing 10% a year reads 10% at every span. Were
+        the long spans cumulative, 5y would read about 61%."""
+        spans = self.g(self.series(rate=0.10))["spans"]
+        for key in ("1y", "3y", "5y"):
+            with self.subTest(key):
+                self.assertAlmostEqual(spans[key]["growth_pct"], 10.0,
+                                       places=1)
+        self.assertFalse(spans["1y"]["annualised"])
+        self.assertTrue(spans["5y"]["annualised"])
+
+    def test_a_split_does_not_read_as_a_dividend_cut(self):
+        ev = self.series(rate=0.10, split=("2024-06-01", 4.0))
+        spans = self.g(ev, [SplitEvent("2024-06-01", 4.0, 1.0)])["spans"]
+        self.assertAlmostEqual(spans["3y"]["growth_pct"], 10.0, places=1)
+
+    def test_the_same_series_unadjusted_would_invent_a_cut(self):
+        """The control. Without it, the test above could pass because the
+        series happens to be flat rather than because adjustment works:
+        unadjusted, this reads about -31% a year."""
+        ev = self.series(rate=0.10, split=("2024-06-01", 4.0))
+        self.assertLess(self.g(ev, [])["spans"]["3y"]["growth_pct"], -20)
+
+    def test_a_reverse_split_is_adjusted_in_the_other_direction(self):
+        ev = self.series(rate=0.0, split=("2024-06-01", 0.1))
+        spans = self.g(ev, [SplitEvent("2024-06-01", 1.0, 10.0)])["spans"]
+        self.assertAlmostEqual(spans["3y"]["growth_pct"], 0.0, places=2)
+
+    def test_history_that_does_not_reach_is_unknown_not_zero(self):
+        """A company with four years of payments has not held its
+        dividend flat for five."""
+        span = self.g(self.series(rate=0.10, start=2023))["spans"]["5y"]
+        self.assertIsNone(span["growth_pct"])
+        self.assertIn("does not cover", span["reason"])
+
+    def test_a_reachable_span_still_reports_when_a_longer_one_cannot(self):
+        spans = self.g(self.series(rate=0.10, start=2023))["spans"]
+        self.assertIsNotNone(spans["1y"]["growth_pct"])
+        self.assertIsNone(spans["5y"]["growth_pct"])
+
+    def test_special_dividends_are_excluded(self):
+        ev = self.series(rate=0.0)
+        with_special = ev + [DividendEvent("2026-06-01", 50.0,
+                                           kind="SPECIAL")]
+        self.assertAlmostEqual(
+            self.g(with_special)["spans"]["1y"]["growth_pct"], 0.0, places=2)
+
+    def test_a_clipped_window_is_refused_rather_than_reported(self):
+        """Dropping two of four earlier payments is a boundary artefact,
+        not a 50% rise."""
+        ev = [e for e in self.series(rate=0.0)
+              if not ("2023-05-10" <= e.ex_date <= "2023-08-10")]
+        span = self.g(ev)["spans"]["3y"]
+        self.assertIsNone(span["growth_pct"])
+        self.assertIn("window boundary", span["reason"])
+
+    def test_a_non_payer_has_no_growth_and_says_so(self):
+        out = self.g([])
+        self.assertIsNone(out["spans"]["1y"]["growth_pct"])
+        self.assertIn("no regular dividends", out["spans"]["1y"]["reason"])
+
+    def test_every_span_carries_a_number_or_a_reason(self):
+        for ev in ([], self.series(rate=0.10), self.series(start=2023)):
+            for key, span in self.g(ev)["spans"].items():
+                with self.subTest(key=key, n=len(ev)):
+                    self.assertTrue(span["growth_pct"] is not None
+                                    or span.get("reason"))

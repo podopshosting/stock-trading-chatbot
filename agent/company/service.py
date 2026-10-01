@@ -313,6 +313,10 @@ class CompanyService:
             "special_dividends": [e.ex_date for e in events if e.kind == "SPECIAL"],
             "frequency_days": _median_gap([e for e in events if e.kind == "REGULAR"]),
             "window_years": HISTORY_YEARS,
+            # Splits are passed in because dividend history is reported in
+            # the share terms of its own day: without them a 4-for-1 split
+            # reads as a 75% cut.
+            "growth": div.growth(events, to_split_events(acts), today),
         })
         self._save(symbol, "DIVPROFILE", out)
         return out
