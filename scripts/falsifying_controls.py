@@ -1663,6 +1663,39 @@ def main() -> int:
         print("=" * 74)
         return 3
 
+    # --- pre-flight: refuse to run against a dirty working tree ------
+    #
+    # Also from a real incident. This harness rewrites source files in
+    # place and restores them from an in-memory snapshot, so anything
+    # uncommitted in a mutated file is destroyed by the first restore -
+    # and, worse, an edit made DURING a run silently replaces the
+    # mutation, so the suite is then run against something that is
+    # neither the original nor the mutation and the verdict is
+    # meaningless. On 2026-10-01 a concurrent edit produced exactly
+    # that: an unrelated test failure attributed to a mutation, and a
+    # `pass  # MUTATION` left in agent/journal/models.py.
+    #
+    # A committed tree makes both impossible to lose and trivial to
+    # detect.
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain", "--"] + [str(t) for t in targets],
+        cwd=REPO, capture_output=True, text=True).stdout.strip()
+    if dirty:
+        print("=" * 74)
+        print("HARNESS ABORTED: uncommitted changes in files this harness "
+              "rewrites.")
+        print("The first restore would destroy them, and an edit made while "
+              "the run is in")
+        print("progress replaces the mutation, making every later verdict "
+              "meaningless.")
+        for line in dirty.splitlines():
+            print(f"   {line}")
+        print("\nCommit or stash them, then run this alone and do not edit "
+              "the tree until it")
+        print("finishes.")
+        print("=" * 74)
+        return 3
+
     originals = {p: p.read_text() for p in targets}
     original_sums = {p: checksum(p) for p in originals}
 
@@ -1707,7 +1740,20 @@ def main() -> int:
                 continue
 
             outcome = run_suites()
+            # The mutation must still be the thing on disk. If something
+            # else wrote to the file while the suite ran, the suite
+            # measured neither the original nor the mutation, and the
+            # verdict - either verdict - means nothing.
+            after = mutation.path.read_text()
             restore()
+            if after != mutated:
+                print(f"  {mutation.name:34} HARNESS ERROR: the file "
+                      f"changed while the suite was running")
+                print(f"    something else wrote to "
+                      f"{mutation.path.relative_to(REPO)}; this verdict is "
+                      f"discarded rather than reported")
+                results.append((mutation, None, "concurrent-write"))
+                continue
 
             caught = not outcome["passed"]
             matched = []
