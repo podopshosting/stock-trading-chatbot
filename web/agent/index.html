@@ -164,6 +164,25 @@
       there is no combined score.</p>
   </header>
 
+  <!-- Autonomous paper operation -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2 id="autoTitle">AUTONOMOUS PAPER MODE — REAL MONEY DISABLED</h2>
+    <div class="grid cols-2">
+      <div><dl class="kv" id="autoStatus"><dd class="empty">Loading…</dd></dl></div>
+      <div><dl class="kv" id="autoLimits"><dd class="empty">Loading…</dd></dl></div>
+    </div>
+    <h3>Latest decisions</h3>
+    <div id="autoDecisions"><p class="empty">Loading…</p></div>
+    <h3>Alerts</h3>
+    <div id="autoAlerts"><p class="empty">Loading…</p></div>
+    <h3>Ask the agent</h3>
+    <form id="askForm"><input id="askQ" type="text" style="width:70%"
+      placeholder="Why haven't you traded? Are you healthy?">
+      <button type="submit">Ask</button></form>
+    <p id="askA" class="note"></p>
+    <p class="muted">Answers are read from stored decisions; nothing is generated.</p>
+  </section>
+
   <!-- Readiness: the answer that matters most -->
   <section class="card" style="margin-bottom:var(--gap)">
     <h2>Real-money readiness</h2>
@@ -703,12 +722,70 @@
     }).catch(function (e) { showError(box, e); });
   }
 
+
+  // ---- autonomy --------------------------------------------------------
+  function loadAutonomy() {
+    var st = document.getElementById("autoStatus");
+    get("/agent/autonomy").then(function (d) {
+      var h = d.health || {}, c = d.last_cycle || {}, t = d.tally || {};
+      document.getElementById("autoTitle").textContent =
+        d.banner + " — REAL MONEY " + d.real_money;
+      kv(st, [
+        ["health", h.state, h.state === "HEALTHY" ? "up" : "down"],
+        ["entries permitted", h.entries_permitted ? "yes" : "NO"],
+        ["agent state", d.agent_state || "no cycle recorded"],
+        ["regime", d.regime || "unknown"],
+        ["last cycle", c.finished_at || "none yet"],
+        ["next cycle", d.next_cycle_at],
+        ["overnight positions", d.overnight_positions],
+        ["live cycles today", t.cycles_live_market],
+        ["open positions", (d.positions || []).length]
+      ]);
+      (h.blocking_reasons || []).forEach(function (r) {
+        st.appendChild(el("dd", "err", r));
+      });
+      var lim = d.limits || {};
+      kv(document.getElementById("autoLimits"),
+        Object.keys(lim).map(function (k) { return [k, String(lim[k])]; })
+          .concat([["emergency stop", c.emergency_stop_engaged ? "ENGAGED" : "clear"],
+                   ["positions reconciled", c.positions_reconciled === undefined ? "no record" : String(c.positions_reconciled)],
+                   ["last outcome", c.outcome || "no record"]]));
+      var dec = document.getElementById("autoDecisions");
+      dec.innerHTML = "";
+      var rows = (d.decisions || []).slice(-8).reverse();
+      if (!rows.length) { dec.appendChild(el("p", "empty", "No decisions yet.")); }
+      var ul = el("ul", "reasons");
+      rows.forEach(function (r) {
+        ul.appendChild(el("li", null, r.symbol + " — " + r.outcome +
+          (r.risk && r.risk.reasons && r.risk.reasons.length
+            ? ": " + r.risk.reasons.join("; ") : "")));
+      });
+      dec.appendChild(ul);
+      var al = document.getElementById("autoAlerts");
+      al.innerHTML = "";
+      if (!(d.alerts || []).length) { al.appendChild(el("p", "empty", "None.")); }
+      (d.alerts || []).forEach(function (a) {
+        al.appendChild(el("p", "err", a.kind + ": " + (a.detail || "")));
+      });
+    }).catch(function (e) { showError(st, e); });
+  }
+  document.getElementById("askForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var q = document.getElementById("askQ").value;
+    var out = document.getElementById("askA");
+    get("/agent/ask?q=" + encodeURIComponent(q)).then(function (d) {
+      out.textContent = d.answer + (d.grounded ? "" : " (not grounded in a record)");
+    }).catch(function (e) { out.textContent = "Could not ask: " + e.message; });
+  });
+
   // ---- boot ------------------------------------------------------------
   if (!API) {
     document.getElementById("paperDetail").textContent =
       "AGENT_API_BASE is not configured; no data will load.";
   }
   loadReadiness();
+  loadAutonomy();
+  setInterval(loadAutonomy, 60000);
   loadSwitches();
   loadLimits();
   loadPositions();
