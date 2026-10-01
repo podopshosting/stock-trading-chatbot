@@ -1,0 +1,114 @@
+{
+  "handoff_boundary_utc": "2026-10-01T13:45:00Z",
+  "branch": "feature/trading-agent-v1",
+  "last_code_commit": "66989c4",
+  "head_sha": "resolve with: git rev-list -n1 agent-handoff-2026-10-01",
+  "handoff_tag": "agent-handoff-2026-10-01",
+  "repo_path": "/Users/Brian 1/Documents/GitHub/stock-trading-chatbot",
+  "remote": "git@github.com:podopshosting/stock-trading-chatbot.git",
+  "tests": {
+    "passed": 1737,
+    "failed": 0,
+    "skipped": 1,
+    "total": 1738
+  },
+  "mutation_controls_last_full_run": 140,
+  "production": {
+    "chatbot_untouched": true,
+    "real_money_enabled": false,
+    "frontend_bucket": "stock-chatbot-web",
+    "frontend_index_etag": "dcbc02f151a223fbec6a5e4ebc794678",
+    "router_code_sha256": "W4mlJEFVHdGMIoPC7azqBzJMkq2uQ7Wt29HPf6sEyGE=",
+    "router_last_modified": "2026-09-30T18:20:31Z",
+    "PRODUCTION_FIX_PENDING_APPROVAL": "RSI flat-series correction not deployed"
+  },
+  "paper_trading": {
+    "enabled": true,
+    "execution_mode": "PAPER",
+    "real_money": "DISABLED",
+    "overnight_positions": "DISABLED",
+    "broker": "internal PaperBroker",
+    "alpaca_paper_broker": "adapter exists, unwired, credential scope unverified",
+    "scheduler": {
+      "cycle": "stock-agent-dev-pilot-cycle cron(2/5 13-21 ? * MON-FRI *)",
+      "scanner": "stock-agent-dev-scanner-schedule cron(0/5 13-21 ? * MON-FRI *)"
+    },
+    "code_sha": "66989c4",
+    "strategy": "hypothesis-v1.0.0",
+    "risk": "risk-v1.0.0",
+    "exits": "exits-v1.0.0",
+    "orchestration": "orchestration-v1.1.0",
+    "cohort_1": "VOID (sha 8674df7; two live defects)",
+    "cohort_2_started": "2026-10-01T13:39:39Z",
+    "first_session": "IN_PROGRESS; 0 trades so far; see docs/AGENT-HANDOFF.md section 8",
+    "completed_paper_trades": 0,
+    "readiness": "NOT_READY_BLOCKED 0/11"
+  },
+  "company_intelligence": {
+    "status": "IN_PROGRESS",
+    "last_checkpoint": "fdc09c0",
+    "latest_commit_in_scope": "e8ad1a7",
+    "done": [
+      "models",
+      "dividends",
+      "splits",
+      "alpaca corporate actions provider",
+      "crosscheck",
+      "sec companyfacts provider",
+      "fundamentals/TTM/freshness/alignment",
+      "earnings (SEC actuals)",
+      "peers (structured)",
+      "peer comparison",
+      "price performance",
+      "holding context",
+      "store",
+      "service",
+      "dev API endpoints",
+      "isolation tests"
+    ],
+    "live_validated": [
+      "GIS dividends",
+      "GIS fundamentals",
+      "GIS profile",
+      "GIS peers"
+    ],
+    "remaining": [
+      "peer-comparison exceeds 90s cold",
+      "live validation AAPL/NVDA/non-dividend/split/reverse-split/special-dividend",
+      "dashboard Company area",
+      "chat grounding",
+      "docs/HOLDING-STRATEGY-INPUTS.md",
+      "falsifying-control mutations for 5 remaining controls",
+      "earnings calendar/consensus source decision"
+    ]
+  },
+  "blockers": [
+    "paper evidence uses 15-minute delayed_sip quotes; quote-age guard measures retrieval time",
+    "AlpacaPaperBroker credential scope unverified (user action)"
+  ],
+  "user_actions": [
+    "revoke old Alpha Vantage key",
+    "authorize/verify Alpaca paper credential scope",
+    "optional alert transport",
+    "optional separate dev IAM role"
+  ],
+  "next_tasks": [
+    "verify live paper session health; collect session report after 20:00 UTC; do not retune",
+    "raise delayed-quote evidence validity with user",
+    "make peer-comparison fit Lambda budget; live-validate GIS fully",
+    "live-validate AAPL, NVDA, non-dividend, forward-split, reverse-split, special-dividend",
+    "dashboard Company area",
+    "chat grounding for company questions",
+    "write docs/HOLDING-STRATEGY-INPUTS.md",
+    "add 5 remaining falsifying controls (harness pre-flight discipline)",
+    "dev-only deployment",
+    "then 19B and Milestone 20"
+  ],
+  "never_without_user_approval": [
+    "real-money execution",
+    "production deploy",
+    "overnight holds",
+    "redeploying the cycle Lambda except for a proven blocker",
+    "force-push or history rewrite"
+  ]
+}
