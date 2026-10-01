@@ -65,6 +65,8 @@ from agent.state import AgentStateService, DynamoDBStateStore
 from agent.state.store import today_market_date
 
 # Asserted, not configured: nothing here can flip it.
+JOURNAL_TABLE = os.environ.get("AGENT_JOURNAL_TABLE", "stock-agent-dev-journal")
+
 IS_LIVE = False
 
 ACCOUNT_ID = os.environ.get("AGENT_PAPER_ACCOUNT", "paper")
@@ -140,8 +142,8 @@ def _run(session_date: str) -> Dict:
     requested_live = (os.environ.get("AGENT_EXECUTION_MODE", "")
                       .strip().upper() == "LIVE")
 
-    alerts = DynamoDBAlertSink(table_name=cfg.storage.state_table)
-    health = DynamoDBHealthStore(table_name=cfg.storage.state_table)
+    alerts = DynamoDBAlertSink(table_name=JOURNAL_TABLE)
+    health = DynamoDBHealthStore(table_name=JOURNAL_TABLE)
     versions = current_versions()
     cohort = cohort_key(versions)
 
@@ -207,10 +209,10 @@ def _run(session_date: str) -> Dict:
         "AGENT_JOURNAL_TABLE", "stock-agent-dev-journal"))
     orchestrator = MarketDayOrchestrator(
         broker=broker, position_manager=manager, journal=journal,
-        halt_store=DynamoDBHaltStore(table_name=cfg.storage.state_table,
+        halt_store=DynamoDBHaltStore(table_name=JOURNAL_TABLE,
                                      region=cfg.storage.region),
         limits=RiskLimits(),
-        cycle_lock=DynamoDBCycleLock(table_name=cfg.storage.state_table),
+        cycle_lock=DynamoDBCycleLock(table_name=JOURNAL_TABLE),
         autonomy=policy, health=health, alerts=alerts, decisions=decisions,
         versions=versions)
 
@@ -259,7 +261,7 @@ def _run(session_date: str) -> Dict:
     # Written where the dashboard and the chat can read it. Best effort:
     # failing to record this must never be a reason a cycle fails.
     try:
-        DynamoDBSnapshotStore(table_name=cfg.storage.state_table).put(payload)
+        DynamoDBSnapshotStore(table_name=JOURNAL_TABLE).put(payload)
     except Exception as exc:                              # noqa: BLE001
         payload["snapshot_error"] = str(exc)[:120]
     return payload

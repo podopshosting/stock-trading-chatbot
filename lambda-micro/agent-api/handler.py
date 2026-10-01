@@ -808,7 +808,7 @@ def handle_switches(event) -> Dict:
     try:
         cfg = _config()
         state = DynamoDBHaltStore(
-            table_name=cfg.storage.state_table,
+            table_name=_autonomy_tables()[1],
             region=cfg.storage.region).get()
         halt = bool(getattr(state, "halted", True))
         halt_detail = getattr(state, "reason", "") or ""
@@ -1081,7 +1081,7 @@ def handle_readiness(event) -> Dict:
     tallies, _ = _safe(lambda: DynamoDBSessionStore(
         table_name=journal_table).list(), [])
     snapshot, _ = _safe(lambda: DynamoDBSnapshotStore(
-        table_name=cfg.storage.state_table).get())
+        table_name=_autonomy_tables()[1]).get())
     cohort = _current_cohort(snapshot, tallies)
     evidence = (aggregate_evidence(tallies, cohort) if cohort else None)
 
@@ -1169,12 +1169,12 @@ def _autonomy_context(session_date):
     ctx, errors = {"session_date": session_date}, {}
 
     snapshot, e = _safe(lambda: DynamoDBSnapshotStore(
-        table_name=cfg.storage.state_table).get())
+        table_name=_autonomy_tables()[1]).get())
     ctx["last_cycle"] = snapshot
     errors["last_cycle"] = e
 
     health, e = _safe(lambda: DynamoDBHealthStore(
-        table_name=cfg.storage.state_table).snapshot().as_dict())
+        table_name=_autonomy_tables()[1]).snapshot().as_dict())
     if e:
         # Fail closed in the REPORT: an unreadable health record is not
         # a clean one.
@@ -1209,7 +1209,7 @@ def _autonomy_context(session_date):
     errors["positions"] = e
 
     alerts, e = _safe(lambda: DynamoDBAlertSink(
-        table_name=cfg.storage.state_table).recent(
+        table_name=_autonomy_tables()[1]).recent(
             session_date=session_date), [])
     ctx["alerts"] = [a.as_dict() for a in alerts]
     errors["alerts"] = e
@@ -1278,7 +1278,7 @@ def handle_sessions(event) -> Dict:
     tallies, e = _safe(lambda: DynamoDBSessionStore(
         table_name=journal_table).list(), [])
     snapshot, _ = _safe(lambda: DynamoDBSnapshotStore(
-        table_name=cfg.storage.state_table).get())
+        table_name=_autonomy_tables()[1]).get())
     cohort = _current_cohort(snapshot, tallies)
     evidence = aggregate_evidence(tallies, cohort) if cohort else None
     return _response(200, {

@@ -526,6 +526,19 @@ class TestStoresUseTablesWithTheirKeySchema(unittest.TestCase):
                 self.assertNotIn("stock-agent-dev-state", body)
                 self.assertNotIn("AGENT_STATE_TABLE", body)
 
+    def test_pk_sk_stores_in_the_handlers_never_get_the_state_table(self):
+        """The halt store and cycle lock write PK/SK records too."""
+        import re
+        for name in ("agent-cycle", "agent-api"):
+            body = open(os.path.join(REPO_ROOT, "lambda-micro", name,
+                                     "handler.py")).read()
+            for store in ("DynamoDBHaltStore", "DynamoDBCycleLock",
+                          "DynamoDBHealthStore", "DynamoDBAlertSink",
+                          "DynamoDBSnapshotStore"):
+                for m in re.finditer(store + r"\((.{0,80})", body, re.S):
+                    with self.subTest(handler=name, store=store):
+                        self.assertNotIn("state_table", m.group(1))
+
 
 if __name__ == "__main__":
     unittest.main()
