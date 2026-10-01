@@ -523,16 +523,41 @@ class TestExecutionModeIsEnforced(unittest.TestCase):
     def test_the_handler_is_paper_by_assertion(self):
         self.assertFalse(cycle.IS_LIVE)
 
-    def test_no_real_broker_is_imported_by_the_handler(self):
+    def test_the_handler_reaches_no_live_trading_venue(self):
         """
-        The handler constructs the INTERNAL paper broker directly. The
-        Alpaca paper adapter is deliberately not wired in because the
-        credential scope was not verified.
+        The Alpaca PAPER adapter is wired (credential scope verified
+        2026-10-01: paper /v2/account returned 200 ACTIVE). What must
+        remain impossible is reaching the LIVE venue, so the live
+        trading host must not appear in the handler at all.
         """
+        from urllib.parse import urlparse
         source = open(HANDLER_PATH).read()
-        self.assertNotIn("AlpacaPaperBroker", source)
-        self.assertNotIn("alpaca_paper", source)
-        self.assertIn("PaperBroker(", source)
+        for live in ("https://api.alpaca.markets", "api.alpaca.markets/v2"):
+            self.assertNotIn(live, source)
+        self.assertIn("AlpacaPaperBroker", source)
+        self.assertIn("PaperBroker(", source)      # the internal shadow
+
+        from agent.broker.alpaca_paper import AlpacaPaperBroker
+        adapter = AlpacaPaperBroker(transport=object())
+        self.assertEqual(urlparse(adapter.base_url).hostname,
+                         "paper-api.alpaca.markets")
+        self.assertTrue(adapter.capabilities()["is_paper"])
+
+    def test_the_paper_adapter_refuses_the_live_domain(self):
+        from agent.broker.alpaca_paper import (AlpacaPaperBroker,
+                                               NotPaperEndpoint)
+        for url in ("https://api.alpaca.markets",
+                    "https://api.alpaca.markets/v2",
+                    "https://broker-api.alpaca.markets"):
+            with self.subTest(url=url):
+                with self.assertRaises(NotPaperEndpoint):
+                    AlpacaPaperBroker(transport=object(), base_url=url)
+
+    def test_the_internal_simulator_is_the_default(self):
+        """The external venue is opt-in: an unset or unknown AGENT_BROKER
+        must not silently reach Alpaca."""
+        source = open(HANDLER_PATH).read()
+        self.assertIn('os.environ.get("AGENT_BROKER", "internal")', source)
 
 
 class TestPinnedVersions(unittest.TestCase):

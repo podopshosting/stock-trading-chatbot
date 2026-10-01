@@ -44,6 +44,7 @@ from agent.broker import (
     BrokerStateError, ConcurrentBrokerUpdate, DynamoDBBrokerStateStore,
     PaperBroker, PaperBrokerConfig, Quote,
 )
+from agent.broker.alpaca_paper import AlpacaPaperBroker, RequestsTransport
 from agent.broker.store import restore as restore_broker
 from agent.config import AgentConfig
 from agent.hypothesis import generate as generate_hypothesis
@@ -183,14 +184,42 @@ def _run(session_date: str) -> Dict:
 
     broker_store = DynamoDBBrokerStateStore(table_name=os.environ.get(
         "AGENT_BROKER_TABLE", "stock-agent-dev-broker"))
-    broker = PaperBroker(PaperBrokerConfig(
+    internal = PaperBroker(PaperBrokerConfig(
         starting_cash=float(os.environ.get("AGENT_PAPER_CASH", "100")),
         slippage_bps=float(os.environ.get("AGENT_SLIPPAGE_BPS", "5")),
         partial_fill_probability=0.0, seed=None))
-    broker.is_live = IS_LIVE
+    internal.is_live = IS_LIVE
     snapshot, revision = broker_store.load(ACCOUNT_ID)
     if snapshot:
-        restore_broker(broker, snapshot)
+        restore_broker(internal, snapshot)
+
+    # Alpaca's PAPER venue, when configured. It becomes authoritative for
+    # broker facts - fills, positions, cash - and the internal simulator
+    # stays available as a shadow so its expected fill can be compared
+    # with what the venue actually did. The adapter refuses any base URL
+    # but the paper domain, so this cannot reach real money.
+    broker = internal
+    external = None
+    if os.environ.get("AGENT_BROKER", "internal").lower() == "alpaca_paper":
+        try:
+            external = AlpacaPaperBroker(
+                transport=RequestsTransport(creds["api_key_id"],
+                                            creds["api_secret_key"]))
+            broker = external
+            log_event("broker_selected", broker="alpaca_paper",
+                      base_url=external.base_url, authoritative=True)
+        except Exception as exc:                          # noqa: BLE001
+            # Fall back to the internal simulator rather than trading
+            # against an adapter in an unknown state, and say so loudly:
+            # a silent downgrade would put delayed-grade evidence into a
+            # cohort labelled external.
+            log_event("broker_unavailable", broker="alpaca_paper",
+                      error=f"{type(exc).__name__}: {exc}"[:200])
+            alerts.send(Alert(
+                kind=AlertKind.BROKER_UNAVAILABLE,
+                detail=f"alpaca paper adapter unavailable: "
+                       f"{type(exc).__name__}", session_date=session_date))
+            broker = internal
 
     position_store = DynamoDBPositionStore(table_name=os.environ.get(
         "AGENT_POSITIONS_TABLE", "stock-agent-dev-positions"))
