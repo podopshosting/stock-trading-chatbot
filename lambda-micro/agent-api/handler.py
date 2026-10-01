@@ -71,6 +71,10 @@ from agent.autonomy import (
     explain as explain_question, next_cycle_time,
 )
 from agent.positions import DynamoDBPositionStore
+from agent.company.service import CompanyService
+from agent.company.store import DynamoDBCompanyStore
+from agent.company.providers.alpaca_corporate_actions import AlpacaCorporateActions
+from agent.company.providers.sec_companyfacts import SECCompanyFacts
 from agent.state import (
     AgentState, AgentStateService, DynamoDBStateStore, MarketSession,
 )
@@ -1321,6 +1325,78 @@ def handle_ask(event) -> Dict:
     return _response(200, answer)
 
 
+# ---------------------------------------------------------------------------
+# Company intelligence (read-only, off the intraday path)
+# ---------------------------------------------------------------------------
+
+_COMPANY = None
+COMPANY_SECTIONS = {
+    "": "overview", "dividends": "dividends", "splits": "splits",
+    "corporate-actions": "corporate_actions", "earnings": "earnings",
+    "fundamentals": "fundamentals", "peers": "peers",
+    "peer-comparison": "peer_comparison",
+    "holding-context": "holding_context",
+}
+
+
+def _company_service() -> CompanyService:
+    global _COMPANY
+    if _COMPANY is None:
+        cfg = _config()
+        creds = _load_alpaca_credentials(cfg.storage.alpaca_secret_id,
+                                         cfg.storage.region)
+        inner, cached = _provider()
+        sec = SECProvider(user_agent=SEC_USER_AGENT,
+                          cache=getattr(cached, "cache", None)
+                          or getattr(cached, "backend", None))
+
+        def submissions(symbol):
+            cik, _name = sec.cik_for(symbol)
+            sub = dict(sec._submissions(cik))
+            sub["cik"] = cik
+            return sub
+
+        def price(symbol):
+            q = cached.get_quote(symbol)
+            prov = getattr(q, "provenance", None)
+            return q.price, (getattr(prov, "as_of", None)
+                             or q.latest_trading_day or "latest quote")
+
+        _COMPANY = CompanyService(
+            store=DynamoDBCompanyStore(),
+            actions=AlpacaCorporateActions(inner),
+            facts=SECCompanyFacts(SEC_USER_AGENT, sec.cik_for),
+            submissions=submissions, price=price, cik_for=sec.cik_for)
+    return _COMPANY
+
+
+def handle_company(method: str, path: str, event) -> Dict:
+    """GET /agent/company/{symbol}[/section]. Read-only: nothing here can
+    place, change or cancel an order, and none of it feeds the cycle."""
+    parts = [p for p in path.split("/") if p][2:]       # after agent/company
+    if not parts:
+        return _response(400, {"error": "symbol required"})
+    symbol = parts[0].upper()
+    section = parts[1] if len(parts) > 1 else ""
+    if not symbol.isalpha() or len(symbol) > 6 or len(parts) > 2:
+        return _response(400, {"error": "invalid symbol"})
+    fn = COMPANY_SECTIONS.get(section)
+    if fn is None:
+        return _response(404, {"error": "unknown company section",
+                               "sections": sorted(s or "(overview)"
+                                                  for s in COMPANY_SECTIONS)})
+    if method != "GET":
+        return _response(405, {"error": "company endpoints are read-only"})
+    try:
+        body = getattr(_company_service(), fn)(symbol)
+    except ProviderError as e:
+        return _response(502, {"error": "provider unavailable",
+                               "detail": str(e)[:200]})
+    body["execution"] = {"mode": "PAPER", "real_money": "DISABLED",
+                         "overnight_positions": "DISABLED"}
+    return _response(200, body)
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
@@ -1361,6 +1437,15 @@ def lambda_handler(event, context):
 
     if method == "OPTIONS":
         return {"statusCode": 200, "headers": dict(CORS_HEADERS), "body": ""}
+
+    if path.startswith("/agent/company/"):
+        try:
+            return handle_company(method, path, event)
+        except Exception as e:
+            log_event("provider_error", operation=f"{method} {path}",
+                      error=str(e)[:300])
+            return _response(500, {"error": "internal error",
+                                   "detail": type(e).__name__})
 
     handler = ROUTES.get((method, path))
     if handler is None:
