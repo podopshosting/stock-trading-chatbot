@@ -235,7 +235,10 @@ class TestContinuityAcrossCycles(unittest.TestCase):
         """
         pilot = Pilot()
         pilot.cycle()
-        pilot.prices["XYZ"] = 50.0
+        # Through the stop but INSIDE the daily loss limit. A drop to 50
+        # is a $15 loss against a $5 limit, which correctly locks the
+        # day and would make this test assert on the lock instead.
+        pilot.prices["XYZ"] = 97.5
         pilot.cycle(hypothesis_for=no_hypothesis)
         after = pilot.cycle(hypothesis_for=no_hypothesis)
         self.assertEqual(after.open_positions, 0)

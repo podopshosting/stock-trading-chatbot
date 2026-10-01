@@ -17,7 +17,7 @@ positions while something is wrong.
 """
 from .day import (
     CONFIG_VERSION, OPENING_MINUTES, PRE_CLOSE_MINUTES,
-    MarketDayOrchestrator, resolve_phase,
+    MarketDayOrchestrator, phase_from_session, resolve_phase,
 )
 from .lock import (
     DEFAULT_TTL_SECONDS, CycleLock, DynamoDBCycleLock, InMemoryCycleLock,
@@ -30,5 +30,6 @@ __all__ = [
     "CONFIG_VERSION", "DEFAULT_TTL_SECONDS", "OPENING_MINUTES",
     "PRE_CLOSE_MINUTES", "CycleLock", "CycleOutcome", "CyclePhase",
     "CycleResult", "CycleStep", "DynamoDBCycleLock", "HaltReason",
-    "InMemoryCycleLock", "MarketDayOrchestrator", "resolve_phase",
+    "InMemoryCycleLock", "MarketDayOrchestrator", "phase_from_session",
+    "resolve_phase",
 ]

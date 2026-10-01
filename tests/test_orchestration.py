@@ -49,6 +49,18 @@ def falling_quote(symbol):
             "age_seconds": 5.0}
 
 
+def stopping_quote(symbol):
+    """Through the stop, but a loss INSIDE the daily loss limit.
+
+    falling_quote drops to 90, a $10 loss against a $5 daily limit, which
+    now correctly engages the daily risk lock and blocks entries. Tests
+    about OTHER behaviour need a position that stops out without
+    tripping that lock, or they are silently testing the lock instead.
+    """
+    return {"price": 96.0, "spread_pct": 0.05, "dollar_volume": 5e8,
+            "age_seconds": 5.0}
+
+
 def hypothesis_for(symbol):
     """A hypothesis strong enough to be approved."""
     signal = {"direction": "BUY", "signal_agreement": 1.0,
@@ -512,7 +524,7 @@ class TestFailureContainment(unittest.TestCase):
         orchestrator._consider_entries = exploding
         result = orchestrator.run_cycle(
             session_date="2026-09-30", phase=CyclePhase.INTRADAY,
-            candidates=["XYZ"], quote_for=falling_quote,
+            candidates=["XYZ"], quote_for=stopping_quote,
             hypothesis_for=hypothesis_for, minutes_to_close=200)
         self.assertEqual(result.outcome, CycleOutcome.ABORTED)
         self.assertGreater(result.exits_submitted, 0)

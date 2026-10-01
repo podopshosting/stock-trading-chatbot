@@ -334,6 +334,17 @@ class ReconciliationResult:
     broker_only: List[str] = field(default_factory=list)
     quantity_mismatches: List[Dict] = field(default_factory=list)
     detail: str = ""
+    # True when the broker could not be READ, as opposed to being read
+    # and found to disagree. The two call for different responses: an
+    # outage is transient and blocks entries, while a disagreement means
+    # the risk arithmetic is wrong in an unknown direction and is an
+    # emergency stop.
+    unreadable: bool = False
+
+    @property
+    def mismatched(self) -> bool:
+        """Read successfully, and the two views differ. Derived."""
+        return not self.matched and not self.unreadable
 
     @property
     def safe_to_trade(self) -> bool:
@@ -344,6 +355,8 @@ class ReconciliationResult:
         return {
             "matched": self.matched,
             "safe_to_trade": self.safe_to_trade,
+            "unreadable": self.unreadable,
+            "mismatched": self.mismatched,
             "checked_at": self.checked_at,
             "agent_only": self.agent_only,
             "broker_only": self.broker_only,

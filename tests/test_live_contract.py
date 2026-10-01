@@ -256,12 +256,40 @@ class TestNoExecutionRouteExists(unittest.TestCase):
         broker_dir = os.path.join(REPO_ROOT, "agent", "broker")
         modules = sorted(f for f in os.listdir(broker_dir)
                          if f.endswith(".py"))
+        # alpaca_paper.py and shadow.py were added in milestone 19A. Both
+        # are paper-only: the first pins the paper host and refuses any
+        # other, the second only compares. The next test checks that
+        # claim against the SOURCE rather than trusting this list.
         self.assertEqual(
             modules,
-            ["__init__.py", "base.py", "execution.py", "live_contract.py",
-             "models.py", "paper.py", "store.py"],
+            ["__init__.py", "alpaca_paper.py", "base.py", "execution.py",
+             "live_contract.py", "models.py", "paper.py", "shadow.py",
+             "store.py"],
             "a new module appeared in agent/broker; if it is a live "
             "adapter, the readiness gate must be reconsidered")
+
+    def test_no_broker_module_can_reach_a_non_paper_host(self):
+        """
+        The module list above only notices a NEW file. This notices a
+        live endpoint appearing in ANY broker file, including an
+        existing one: every broker host must be the paper host.
+        """
+        import re
+        broker_dir = os.path.join(REPO_ROOT, "agent", "broker")
+        hosts = set()
+        for name in os.listdir(broker_dir):
+            if not name.endswith(".py"):
+                continue
+            body = open(os.path.join(broker_dir, name)).read()
+            hosts.update(re.findall(r"https?://([A-Za-z0-9.-]+)", body))
+        self.assertEqual(hosts, {"paper-api.alpaca.markets"},
+                         f"broker modules reference hosts: {sorted(hosts)}")
+
+    def test_falsifying_control_the_host_scan_finds_a_live_host(self):
+        import re
+        found = re.findall(r"https?://([A-Za-z0-9.-]+)",
+                           'BASE = "https://api.alpaca.markets"')
+        self.assertEqual(found, ["api.alpaca.markets"])
 
     def test_the_only_broker_that_can_fill_is_the_paper_one(self):
         """

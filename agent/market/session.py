@@ -109,6 +109,43 @@ class MarketSessionResult:
         hours."""
         return self.session is MarketSession.OPEN
 
+    def _minutes_from_now_to(self, wall_time) -> Optional[float]:
+        """Minutes from `as_of` to a market-time wall clock time today.
+
+        None whenever it cannot be established - no trading day, no
+        timestamp, an unparseable one. None, never a guess: callers
+        treat an unknown time-to-close as "do not open positions", and a
+        fabricated number would defeat that.
+        """
+        if wall_time is None or not self.as_of or not self.trading_day:
+            return None
+        try:
+            zone = _market_zone()
+            now = datetime.fromisoformat(
+                str(self.as_of).replace("Z", "+00:00"))
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=zone)
+            now = now.astimezone(zone)
+            target = datetime.combine(now.date(), wall_time, tzinfo=zone)
+            return (target - now).total_seconds() / 60.0
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def minutes_to_close(self) -> Optional[float]:
+        """Minutes until the regular close. Negative after it."""
+        if not self.trading_day:
+            return None
+        return self._minutes_from_now_to(self.trading_day.regular_close)
+
+    @property
+    def minutes_since_open(self) -> Optional[float]:
+        """Minutes since the regular open. Negative before it."""
+        if not self.trading_day or self.trading_day.regular_open is None:
+            return None
+        to_open = self._minutes_from_now_to(self.trading_day.regular_open)
+        return None if to_open is None else -to_open
+
     def as_dict(self) -> Dict:
         return {
             "session": self.session.value,
@@ -116,6 +153,8 @@ class MarketSessionResult:
             "is_open": self.is_open,
             "is_trading_day": self.is_trading_day,
             "is_early_close": self.is_early_close,
+            "minutes_to_close": self.minutes_to_close,
+            "minutes_since_open": self.minutes_since_open,
             "regular_open": (self.trading_day.regular_open.isoformat()
                              if self.trading_day and self.trading_day.regular_open
                              else None),

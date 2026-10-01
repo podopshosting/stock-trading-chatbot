@@ -87,6 +87,10 @@ class HaltReason(str, enum.Enum):
     UNHANDLED_ERROR = "UNHANDLED_ERROR"
     CAPITAL_EXHAUSTED = "CAPITAL_EXHAUSTED"
     CONCURRENT_CYCLE = "CONCURRENT_CYCLE"
+    HEALTH_NOT_PERMITTING = "HEALTH_NOT_PERMITTING"
+    HEALTH_UNREADABLE = "HEALTH_UNREADABLE"
+    EMERGENCY_STOP = "EMERGENCY_STOP"
+    UNCERTAIN_ORDER = "UNCERTAIN_ORDER"
 
     def __str__(self) -> str:
         return self.value
@@ -144,6 +148,19 @@ class CycleResult:
     capital_deployed: float = 0.0
     errors: List[str] = field(default_factory=list)
     config_version: str = ""
+
+    # Autonomy (19A)
+    execution_mode: str = ""
+    health_state: str = ""
+    emergency_stop_engaged: bool = False
+    alerts_raised: List[str] = field(default_factory=list)
+    decisions_recorded: int = 0
+    quotes_requested: int = 0
+    quotes_missing: int = 0
+    quotes_stale: int = 0
+    duplicate_attempts: int = 0
+    eod_flatten_failed: bool = False
+    versions: Dict = field(default_factory=dict)
 
     @staticmethod
     def make_id() -> str:
@@ -217,4 +234,15 @@ class CycleResult:
             "capital_deployed": round(self.capital_deployed, 2),
             "errors": self.errors,
             "config_version": self.config_version,
+            "execution_mode": self.execution_mode,
+            "health_state": self.health_state,
+            "emergency_stop_engaged": self.emergency_stop_engaged,
+            "alerts_raised": self.alerts_raised,
+            "decisions_recorded": self.decisions_recorded,
+            "quotes_requested": self.quotes_requested,
+            "quotes_missing": self.quotes_missing,
+            "quotes_stale": self.quotes_stale,
+            "duplicate_attempts": self.duplicate_attempts,
+            "eod_flatten_failed": self.eod_flatten_failed,
+            "versions": self.versions,
         }

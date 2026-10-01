@@ -171,7 +171,7 @@ class PositionManager:
         """
         if self.broker is None:
             result = ReconciliationResult(
-                matched=False,
+                matched=False, unreadable=True,
                 detail="no broker attached; brokerage state is unknown")
             self._engage_halt(result.detail)
             return result
@@ -183,7 +183,7 @@ class PositionManager:
             # An unreadable broker is an unknown brokerage state, which
             # the operating rules treat as a halt condition.
             result = ReconciliationResult(
-                matched=False,
+                matched=False, unreadable=True,
                 detail=f"could not read broker positions: {exc}")
             self._engage_halt(result.detail)
             return result

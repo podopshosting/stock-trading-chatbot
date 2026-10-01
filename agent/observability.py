@@ -120,6 +120,22 @@ EVENTS = frozenset({
     "position_state_saved",
     "state_restored",
     "state_restore_failed",
+    # autonomy (milestone 19A)
+    "uncertain_order_state",
+    "duplicate_order_attempt",
+    "shadow_comparison",
+    "alert_raised",
+    "alert_persist_failed",
+    "health_condition_raised",
+    "health_condition_cleared",
+    "autonomy_mode_resolved",
+    "live_mode_refused",
+    "emergency_stop_engaged",
+    "session_report_written",
+    "reconciliation_authoritative",
+    "unexpected_broker_position",
+    "eod_flatten_result",
+    "cycle_failure_recorded",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")
