@@ -129,3 +129,51 @@ class TestCrossCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestImmutabilityComparesFactsNotFetches(unittest.TestCase):
+    """
+    Verified live 2026-10-01: re-ingesting AAPL reported all 41 actions as
+    conflicting, because the request window was stored inside each
+    action's provenance and the window had changed. A HistoryConflict has
+    to mean the provider changed the fact, or it is noise that hides one.
+    """
+
+    def row(self):
+        return {"symbol": "AAPL", "rate": 0.57, "ex_date": "2016-11-03",
+                "id": "abc", "special": False}
+
+    def action(self, window, amount=0.57):
+        prov = Provenance("alpaca", f"/v1/corporate-actions?{window}", "t1")
+        row = self.row()
+        row["rate"] = amount
+        return normalise("cash_dividends", row, "AAPL", prov)
+
+    def test_the_same_dividend_fetched_twice_is_not_a_conflict(self):
+        from agent.company.store import InMemoryCompanyStore
+        store = InMemoryCompanyStore()
+        a = self.action("start=2016&end=2026")
+        b = self.action("start=2016&end=2027")        # window changed
+        self.assertTrue(store.put_fact("AAPL", "ACTION", "k", a.as_dict()))
+        self.assertFalse(store.put_fact("AAPL", "ACTION", "k", b.as_dict()))
+
+    def test_a_changed_amount_is_still_a_conflict(self):
+        from agent.company.store import HistoryConflict, InMemoryCompanyStore
+        store = InMemoryCompanyStore()
+        store.put_fact("AAPL", "ACTION", "k",
+                       self.action("w1").as_dict())
+        with self.assertRaises(HistoryConflict):
+            store.put_fact("AAPL", "ACTION", "k",
+                           self.action("w1", amount=0.99).as_dict())
+
+    def test_provenance_period_describes_the_action_not_the_query(self):
+        a = self.action("start=2016&end=2026")
+        self.assertEqual(a.provenance.period, "2016-11-03")
+        self.assertIn("start=2016", a.provenance.source)
+
+    def test_provenance_is_still_stored(self):
+        from agent.company.store import InMemoryCompanyStore
+        store = InMemoryCompanyStore()
+        store.put_fact("AAPL", "ACTION", "k", self.action("w1").as_dict())
+        [stored] = store.facts("AAPL", "ACTION")
+        self.assertEqual(stored["provenance"]["provider"], "alpaca")

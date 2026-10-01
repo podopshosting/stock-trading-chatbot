@@ -60,11 +60,20 @@ def _canon(payload: Dict) -> str:
 
 
 def _strip_volatile(payload: Dict) -> Dict:
-    """Retrieval time differs on every fetch of the same fact; it is
-    provenance, not content, so it must not make a re-fetch a 'conflict'."""
+    """Compare facts, not the circumstances of fetching them.
+
+    Provenance describes a retrieval: when we asked, and over what window.
+    Two fetches of the same dividend legitimately differ there, and
+    comparing it made a conflict out of every row whenever the request
+    window changed - 41 of 41 on AAPL, which would have buried a real
+    history change in noise. A HistoryConflict should mean the PROVIDER
+    changed the fact: a different amount, a different date. Provenance is
+    still stored with the first write.
+    """
     def strip(x):
         if isinstance(x, dict):
-            return {k: strip(v) for k, v in x.items() if k != "retrieved_at"}
+            return {k: strip(v) for k, v in x.items()
+                    if k not in ("retrieved_at", "provenance")}
         if isinstance(x, list):
             return [strip(v) for v in x]
         return x

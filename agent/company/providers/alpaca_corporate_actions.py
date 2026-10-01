@@ -58,6 +58,10 @@ def normalise(bucket: str, row: Dict, symbol_hint: Optional[str],
     detail = {}
     if typ is ActionType.OTHER:
         detail = {"bucket": bucket, "raw": dict(row)}
+    prov = Provenance(provider=prov.provider, source=prov.source,
+                      retrieved_at=prov.retrieved_at,
+                      period=_s(row.get("ex_date"))
+                      or _s(row.get("effective_date")))
     common = dict(
         symbol=symbol, event_id=_s(row.get("id")),
         announcement_date=_s(row.get("declaration_date")),
@@ -110,9 +114,12 @@ class AlpacaCorporateActions:
         self._clock = wall_clock
 
     def _prov(self, start: str, end: str) -> Provenance:
+        # `period` is the period the FACT describes, filled in per action
+        # below. The request window belongs to the ingest record, not to
+        # each dividend.
         return Provenance(
-            provider="alpaca", source=f"{PATH}",
-            retrieved_at=_iso(self._clock()), period=f"{start}..{end}")
+            provider="alpaca", source=f"{PATH}?start={start}&end={end}",
+            retrieved_at=_iso(self._clock()))
 
     def fetch(self, symbol: str, start: str, end: str,
               types: Optional[Iterable[str]] = None) -> List[CorporateAction]:
