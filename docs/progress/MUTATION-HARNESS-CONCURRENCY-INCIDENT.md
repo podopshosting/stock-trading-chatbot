@@ -18,10 +18,19 @@ problems:
 
 1. **Edits "reverting".** I patched
    `agent/autonomy/evidence_class.py`, confirmed the patch had been
-   written, and found the function unchanged moments later. I attributed
-   this to iCloud, which does genuinely revert files in this directory,
-   and which had done so earlier in the day. So the explanation was
-   plausible and wrong.
+   written, and found the function unchanged moments later. Earlier the
+   same thing had happened to `web/agent/index.html`. I attributed both
+   to iCloud, which does genuinely revert files in this directory and
+   had done so earlier in the day.
+
+   **Both were the harness.** It snapshots every target file at startup
+   and restores from that snapshot after each mutation, so any edit made
+   during a run is erased on the next restore. I confirmed this only
+   afterwards, by listing the targets: there are 45, and they include
+   `web/agent/index.html` as well as every module I was editing. The
+   iCloud explanation was plausible, had precedent the same day, and was
+   wrong about the mechanism — which is why it held for as long as it
+   did.
 2. **An unrelated test failure.** `test_positions` began failing on a
    test I had not touched. That was a mutation, applied by the harness,
    live on disk while I ran the suite.
@@ -78,10 +87,20 @@ in the background" described where its output went, not what it was
 doing — it was mutating the same files I was editing, and I had read the
 code that does so.
 
-And the diagnostic lesson: I had a plausible cause for the first symptom
-(iCloud, previously observed, same directory) and stopped looking. Two
-causes were active at once, and the plausible one was the lesser. The
-symptom that broke it open was the one I could not explain away — a file
-I had never opened appearing in `git status` — which is the symptom I
-should have gone looking for sooner instead of re-applying a patch and
-hoping.
+And the diagnostic lesson, which is the one that cost the time: I had a
+plausible cause for the first symptom — iCloud, observed earlier the
+same day, same directory — and stopped looking. It was the wrong cause.
+A known prior explained the *shape* of what I saw, so I never checked
+the *mechanism*, and checking it was one command: list what the harness
+rewrites.
+
+The symptom that finally broke it open was the one I could not explain
+away, a file I had never opened appearing in `git status`. That is the
+symptom I should have gone hunting for immediately instead of
+re-applying a patch and hoping, because "my edit vanished" has several
+possible causes and `git status` distinguishes them in a second.
+
+A corollary worth keeping: a committed file is safe, but the working
+tree is not. The harness's final restore puts its startup snapshot back,
+so commits made mid-run leave the tree behind HEAD afterwards. Check
+`git status` and `git checkout --` the tree when a run ends.
