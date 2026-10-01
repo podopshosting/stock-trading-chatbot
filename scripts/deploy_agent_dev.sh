@@ -15,6 +15,7 @@ set -euo pipefail
 REGION="${AWS_REGION:-us-east-2}"
 PROFILE="${AWS_PROFILE:-mypodops}"
 FUNCTION="stock-agent-dev-api"
+CYCLE_FUNCTION="stock-agent-dev-cycle"
 BUCKET="stock-agent-dev-ui"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$(mktemp -d)"
@@ -86,6 +87,51 @@ deploy_lambda() {
   echo "    done"
 }
 
+deploy_cycle() {
+  echo "==> packaging $CYCLE_FUNCTION"
+  local build
+  build="$(mktemp -d)"
+  cp "$REPO/lambda-micro/agent-cycle/handler.py" "$build/"
+  rsync -a --exclude '__pycache__' --exclude '*.pyc' "$REPO/agent" "$build/"
+  python3 -m pip install --quiet --target "$build" \
+    --platform manylinux2014_x86_64 --implementation cp \
+    --python-version 3.12 --only-binary=:all: --upgrade \
+    -r "$REPO/lambda-micro/agent-cycle/requirements.txt"
+  if [ ! -d "$build/requests" ]; then
+    echo "FATAL: requests missing from the cycle package" >&2
+    rm -rf "$build"; exit 1
+  fi
+  ( cd "$build" && zip -qr function.zip . )
+
+  aws lambda update-function-code \
+    --function-name "$CYCLE_FUNCTION" \
+    --zip-file "fileb://$build/function.zip" \
+    --region "$REGION" --profile "$PROFILE" \
+    --query '{LastModified:LastModified,CodeSize:CodeSize}' --output json
+  rm -rf "$build"
+
+  aws lambda wait function-updated \
+    --function-name "$CYCLE_FUNCTION" --region "$REGION" --profile "$PROFILE"
+
+  # A cycle that cannot even report its phase is not deployed.
+  echo "==> verifying"
+  aws lambda invoke --function-name "$CYCLE_FUNCTION" \
+    --region "$REGION" --profile "$PROFILE" /tmp/cycle-verify.json \
+    --query StatusCode --output text >/dev/null
+  python3 - <<'PY'
+import json, sys
+d = json.load(open("/tmp/cycle-verify.json"))
+body = json.loads(d["body"]) if "body" in d else d
+if body.get("error"):
+    print(f"    FATAL: {body['error']}: {body.get('detail','')[:200]}",
+          file=sys.stderr)
+    sys.exit(1)
+print(f"    ran={body.get('ran')} phase={body.get('phase')} "
+      f"outcome={body.get('outcome','n/a')}")
+PY
+  echo "    done"
+}
+
 deploy_ui() {
   echo "==> uploading dashboard to s3://$BUCKET/agent/"
   # no-cache so a dev dashboard never serves a stale build while
@@ -103,7 +149,8 @@ deploy_ui() {
 
 case "$target" in
   lambda) deploy_lambda ;;
+  cycle)  deploy_cycle ;;
   ui)     deploy_ui ;;
-  all)    deploy_lambda; deploy_ui ;;
-  *) echo "usage: $0 [lambda|ui|all]" >&2; exit 2 ;;
+  all)    deploy_lambda; deploy_cycle; deploy_ui ;;
+  *) echo "usage: $0 [lambda|cycle|ui|all]" >&2; exit 2 ;;
 esac

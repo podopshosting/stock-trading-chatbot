@@ -110,10 +110,16 @@ EVENTS = frozenset({
     "cycle_complete",
     "cycle_aborted",
     "cycle_skipped_duplicate",
+    "cycle_skipped_market_closed",
     "cycle_lock_contended",
     "exit_failed_position_at_risk",
     "journal_failed_after_exit",
     "position_unmanaged_after_fill",
+    # persistence
+    "broker_state_saved",
+    "position_state_saved",
+    "state_restored",
+    "state_restore_failed",
 })
 
 _REDACT_HINTS = ("key", "secret", "token", "password", "credential", "apikey")

@@ -78,13 +78,17 @@ ORC_LOCK = REPO / "agent" / "orchestration" / "lock.py"
 API_HANDLER = REPO / "lambda-micro" / "agent-api" / "handler.py"
 DASHBOARD = REPO / "web" / "agent" / "index.html"
 
+BRK_STORE = REPO / "agent" / "broker" / "store.py"
+POS_STORE = REPO / "agent" / "positions" / "store.py"
+
 SUITES = ["tests.test_signal_engine", "tests.test_signal_statistics",
           "tests.test_signal_equivalence", "tests.test_evidence",
           "tests.test_evidence_service", "tests.test_hypothesis",
           "tests.test_risk", "tests.test_broker",
           "tests.test_positions", "tests.test_journal",
           "tests.test_replay", "tests.test_orchestration",
-          "tests.test_agent_dashboard"]
+          "tests.test_agent_dashboard", "tests.test_persistence",
+          "tests.test_pilot_integration"]
 
 
 @dataclass
@@ -1106,6 +1110,100 @@ MUTATIONS = [
             "        \"agent is not running, that stop does not exist.\"));",
         new="        \"Stops are active.\"));  // MUTATION",
         expect=["ENGINE_POLLED", "does not exist"],
+    ),
+    # --- Milestone 15: persistence and the pilot -------------------------
+    Mutation(
+        name="persist-only-open-orders",
+        description="lose terminal orders so a retry after restart doubles up",
+        path=BRK_STORE,
+        old='        "orders": [_order_dict(o) for o in broker._orders.values()],',
+        new='        "orders": [_order_dict(o) for o in broker._orders.values()\n'
+            '                   if o.is_open],  # MUTATION',
+        expect=["terminal", "orders", "idempot", "persist"],
+    ),
+    Mutation(
+        name="drop-the-client-order-id-map",
+        description="lose idempotency across a cold start",
+        path=BRK_STORE,
+        old='        "client_order_ids": dict(broker._client_ids),',
+        new='        "client_order_ids": {},  # MUTATION',
+        expect=["client", "idempot", "duplicate"],
+    ),
+    Mutation(
+        name="reset-cash-on-restore",
+        description="restore the starting cash instead of the actual balance",
+        path=BRK_STORE,
+        old='        cash=float(acct.get("cash", 0.0)),',
+        new='        cash=float(acct.get("starting_cash", 0.0)),  # MUTATION',
+        expect=["cash", "reset", "starting"],
+    ),
+    Mutation(
+        name="drop-reserved-cash-on-restore",
+        description="release working-order reservations across a restart",
+        path=BRK_STORE,
+        old='        reserved_cash=float(acct.get("reserved_cash", 0.0)),',
+        new="        reserved_cash=0.0,  # MUTATION",
+        expect=["reserved", "cash"],
+    ),
+    Mutation(
+        name="treat-an-unreadable-account-as-empty",
+        description="return a fresh broker when state cannot be read",
+        path=BRK_STORE,
+        old="            raise BrokerStateError(\n"
+            "                f\"could not read broker state for {account_id}: {exc}\"\n"
+            "            ) from exc",
+        new="            return None, 0  # MUTATION",
+        expect=["unreadable", "raise", "empty"],
+    ),
+    Mutation(
+        name="ignore-the-revision-guard",
+        description="let a stale writer overwrite newer state",
+        path=BRK_STORE,
+        old="        if expected_revision is not None and expected_revision != current:",
+        new="        if False:  # MUTATION",
+        expect=["revision", "stale", "concurrent"],
+    ),
+    Mutation(
+        name="default-a-missing-stop-on-restore",
+        description="reconstruct a position with a stop nobody chose",
+        path=POS_STORE,
+        old='    if "stop_price" not in plan_data:',
+        new="    if False:  # MUTATION",
+        expect=["stop", "plan", "unbounded"],
+    ),
+    Mutation(
+        name="allow-a-loosened-stop-on-restore",
+        description="restore a stop wider than the position had reached",
+        path=POS_STORE,
+        old="        if drift > STOP_COMPARISON_TOLERANCE:",
+        new="        if False:  # MUTATION",
+        expect=["loosen", "wider", "stop"],
+    ),
+    Mutation(
+        name="compare-stops-exactly",
+        description="reject legitimate positions over floating point dust",
+        path=POS_STORE,
+        old="STOP_COMPARISON_TOLERANCE = 1e-4",
+        new="STOP_COMPARISON_TOLERANCE = 0.0  # MUTATION",
+        expect=["rounding", "dust", "round trip"],
+    ),
+    Mutation(
+        name="lose-the-high-water-mark",
+        description="reset the trailing stop ratchet on every restart",
+        path=POS_STORE,
+        old='        "high_water_price": position.high_water_price,',
+        new='        "high_water_price": None,  # MUTATION',
+        expect=["high_water", "ratchet", "trail"],
+    ),
+    Mutation(
+        name="treat-unreadable-positions-as-none-held",
+        description="believe nothing is held when the store cannot be read",
+        path=POS_STORE,
+        old="            raise PositionStoreError(\n"
+            "                f\"could not read positions for {session_date}: {exc}\"\n"
+            "            ) from exc",
+        new="            return []  # MUTATION",
+        expect=["unreadable", "raise", "positions"],
     ),
 ]
 

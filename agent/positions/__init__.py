@@ -12,6 +12,11 @@ from .exits import (
     trailing_stop_price, update_high_water, update_low_water,
 )
 from .manager import PositionManager, PositionManagerError
+from .store import (
+    ConcurrentPositionUpdate, DynamoDBPositionStore,
+    InMemoryPositionStore, PositionStore, PositionStoreError,
+    from_item, to_item,
+)
 from .models import (
     EXIT_PRIORITY, PROTECTIVE_REASONS, ExitIntent, ExitPlan, ExitReason,
     ManagedPosition, PositionState, ReconciliationResult, StopMechanism,
@@ -19,6 +24,9 @@ from .models import (
 )
 
 __all__ = [
+    "ConcurrentPositionUpdate", "DynamoDBPositionStore",
+    "InMemoryPositionStore", "PositionStore", "PositionStoreError",
+    "from_item", "to_item",
     "CONFIG_VERSION", "EXIT_PRIORITY", "MAX_QUOTE_AGE_SECONDS",
     "PROTECTIVE_REASONS", "TRAILING_ACTIVATION_PCT", "ExitContext",
     "ExitIntent", "ExitPlan", "ExitReason", "ManagedPosition",

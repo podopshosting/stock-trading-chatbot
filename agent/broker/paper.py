@@ -166,6 +166,23 @@ class PaperBroker(BrokerAdapter):
 
     # --- submission ------------------------------------------------------
 
+    def _reject_detached(self, symbol, side, quantity, client_order_id,
+                         reason, detail) -> Dict:
+        """A rejection for a request that never became a tracked order."""
+        return {
+            "order_id": None,
+            "client_order_id": client_order_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "status": str(OrderStatus.REJECTED),
+            "filled_quantity": 0.0,
+            "remaining_quantity": quantity,
+            "fills": [],
+            "reject_reason": str(reason),
+            "reject_detail": detail,
+        }
+
     def submit_order(self, symbol: str, side: str, quantity: float,
                      order_type: str = "MARKETABLE_LIMIT",
                      limit_price: Optional[float] = None,
@@ -199,7 +216,24 @@ class PaperBroker(BrokerAdapter):
         # order - a retried Lambda invocation would otherwise double the
         # position.
         if client_order_id in self._client_ids:
-            existing = self._orders[self._client_ids[client_order_id]]
+            known = self._client_ids[client_order_id]
+            existing = self._orders.get(known)
+            if existing is None:
+                # The id was used before but the order is gone, so the
+                # state is inconsistent - most likely a partial restore.
+                # REFUSE rather than place: this client id exists
+                # precisely to stop a retry doubling a position, and
+                # placing the order here would do the thing it prevents.
+                log_event("order_rejected", symbol=symbol, side=side,
+                          reason=str(RejectReason.DUPLICATE_CLIENT_ORDER_ID),
+                          detail=(f"client_order_id {client_order_id} maps to "
+                                  f"unknown order {known}; refusing rather "
+                                  "than risk a duplicate position"))
+                return self._reject_detached(
+                    symbol, side, quantity, client_order_id,
+                    RejectReason.DUPLICATE_CLIENT_ORDER_ID,
+                    f"client_order_id {client_order_id} is known but its "
+                    f"order {known} is missing from this broker's state")
             log_event("order_duplicate_suppressed", symbol=symbol,
                       client_order_id=client_order_id,
                       existing_order_id=existing.order_id)
