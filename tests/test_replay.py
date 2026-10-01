@@ -21,6 +21,7 @@ sys.path.insert(0, REPO_ROOT)
 from agent.replay import (                                        # noqa: E402
     Bar, LookaheadError, PointInTimeEvidence, PointInTimeSeries,
     ReplayBroker, ReplayClock, ReplayConfig, ReplayResult, run,
+    UnadjustedCorporateAction, adjust_bars_for_splits, find_discontinuities,
 )
 
 
@@ -555,3 +556,94 @@ class TestDeterminism(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnadjustedCorporateActions(unittest.TestCase):
+    """A replay over an unadjusted split is not pessimistic, it is
+    meaningless: a 10-for-1 reads as a 90% overnight fall, so every stop
+    fires and the run reports confident numbers about a crash that never
+    happened."""
+
+    def bars(self, pre=1, post=2, pre_px=1000.0, post_px=100.0):
+        out = [Bar(f"2026-06-{d:02d}T20:00:00Z", pre_px, pre_px * 1.01,
+                   pre_px * 0.99, pre_px, 100.0)
+               for d in range(1, pre + 1)]
+        out += [Bar(f"2026-06-{d:02d}T20:00:00Z", post_px, post_px * 1.01,
+                    post_px * 0.99, post_px, 1000.0)
+                for d in range(pre + 1, pre + post + 1)]
+        return out
+
+    def series(self, bars, **kw):
+        return PointInTimeSeries("NVDA", bars, ReplayClock(
+            [b.timestamp for b in bars]), **kw)
+
+    def test_an_unadjusted_split_refuses_to_construct(self):
+        with self.assertRaises(UnadjustedCorporateAction) as ctx:
+            self.series(self.bars())
+        self.assertIn("10-for-1", str(ctx.exception))
+        self.assertIn("never happened", str(ctx.exception))
+
+    def test_the_protection_is_on_by_default(self):
+        """A caller who does not know to ask for it still gets it."""
+        with self.assertRaises(UnadjustedCorporateAction):
+            PointInTimeSeries("NVDA", self.bars(), ReplayClock(
+                [b.timestamp for b in self.bars()]))
+
+    def test_the_adjusted_series_constructs(self):
+        """The control: without it, the refusal above could be any
+        construction failure rather than the split check."""
+        adj = adjust_bars_for_splits(
+            self.bars(), [{"ex_date": "2026-06-02", "ratio": 10}])
+        s = self.series(adj)
+        self.assertEqual(len(s), 3)
+        self.assertEqual(s.discontinuities, [])
+
+    def test_a_genuine_crash_is_not_refused(self):
+        """An unexplained 40% fall may be exactly what the run exists to
+        study. Raising on it would push callers to disable the check,
+        which would disable it for the real splits too."""
+        bars = self.bars(pre=1, post=2, pre_px=100.0, post_px=60.0)
+        s = self.series(bars)
+        self.assertEqual(len(s.discontinuities), 1)
+        self.assertFalse(s.discontinuities[0]["matches_plausible_split"])
+
+    def test_ordinary_volatility_is_not_flagged_at_all(self):
+        bars = self.bars(pre=1, post=2, pre_px=100.0, post_px=92.0)
+        self.assertEqual(self.series(bars).discontinuities, [])
+
+    def test_the_check_can_be_waived_but_the_gap_is_still_recorded(self):
+        s = self.series(self.bars(), require_adjusted=False)
+        self.assertEqual(len(s.discontinuities), 1)
+        self.assertEqual(s.discontinuities[0]["nearest_ratio"], 10)
+
+    def test_adjustment_restates_prices_down_and_volumes_up(self):
+        adj = adjust_bars_for_splits(
+            self.bars(), [{"ex_date": "2026-06-02", "ratio": 10}])
+        self.assertAlmostEqual(adj[0].close, 100.0)
+        self.assertAlmostEqual(adj[0].volume, 1000.0)
+        self.assertAlmostEqual(adj[0].high, 101.0)
+        self.assertAlmostEqual(adj[-1].close, 100.0, places=6)
+
+    def test_a_reverse_split_adjusts_the_other_way(self):
+        bars = self.bars(pre=1, post=2, pre_px=10.0, post_px=100.0)
+        adj = adjust_bars_for_splits(
+            bars, [{"ex_date": "2026-06-02", "ratio": 0.1}])
+        self.assertAlmostEqual(adj[0].close, 100.0)
+        self.assertEqual(self.series(adj).discontinuities, [])
+
+    def test_bars_after_the_split_are_left_alone(self):
+        adj = adjust_bars_for_splits(
+            self.bars(), [{"ex_date": "2026-06-02", "ratio": 10}])
+        self.assertAlmostEqual(adj[1].close, 100.0)
+        self.assertAlmostEqual(adj[1].volume, 1000.0)
+
+    def test_two_splits_compound(self):
+        bars = [Bar("2026-01-01T20:00:00Z", 400, 404, 396, 400, 10.0),
+                Bar("2026-06-01T20:00:00Z", 200, 202, 198, 200, 20.0),
+                Bar("2026-09-01T20:00:00Z", 100, 101, 99, 100, 40.0)]
+        adj = adjust_bars_for_splits(bars, [
+            {"ex_date": "2026-06-01", "ratio": 2},
+            {"ex_date": "2026-09-01", "ratio": 2}])
+        self.assertAlmostEqual(adj[0].close, 100.0)
+        self.assertAlmostEqual(adj[1].close, 100.0)
+        self.assertAlmostEqual(adj[2].close, 100.0)

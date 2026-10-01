@@ -21,7 +21,9 @@ system that will actually trade.
 """
 from .broker import ReplayBroker
 from .clock import LookaheadError, ReplayClock
-from .data import Bar, PointInTimeEvidence, PointInTimeSeries
+from .data import (Bar, PointInTimeEvidence, PointInTimeSeries,
+                   UnadjustedCorporateAction, adjust_bars_for_splits,
+                   find_discontinuities)
 from .engine import (
     CONFIG_VERSION, DEFAULT_WARMUP_BARS, ReplayConfig, ReplayResult, run,
 )
@@ -30,4 +32,6 @@ __all__ = [
     "CONFIG_VERSION", "DEFAULT_WARMUP_BARS", "Bar", "LookaheadError",
     "PointInTimeEvidence", "PointInTimeSeries", "ReplayBroker",
     "ReplayClock", "ReplayConfig", "ReplayResult", "run",
+    "UnadjustedCorporateAction", "adjust_bars_for_splits",
+    "find_discontinuities",
 ]
