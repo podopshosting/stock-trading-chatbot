@@ -981,10 +981,53 @@
         : d.trailing_yield_pct.toFixed(2) + "%", "num"],
       ["Typical interval", d.frequency_days ? d.frequency_days + " days" : null],
       ["Years with payments", d.years_paid, "num"],
-      ["Next ex-date", d.next_ex_date || "not yet announced"],
+      ["Next ex-date", d.next_ex_date || "none declared"],
       ["Days until ex-date", d.days_until_ex, "num"],
       ["History window", d.window_years ? d.window_years + " years" : null]
     ]);
+    // Dividend growth. Each span shows a number or the reason it has
+    // none - a blank cell would read as zero growth, which is a
+    // different claim from "the history does not reach that far".
+    var g = d.growth || {};
+    var spans = g.spans || {};
+    if (Object.keys(spans).length) {
+      box.appendChild(el("h3", null, "Dividend growth"));
+      var gt = el("table", "co-table");
+      var gh = el("tr");
+      ["Span", "Growth", "From", "To", "Basis"].forEach(function (h) {
+        gh.appendChild(el("th", null, h));
+      });
+      gt.appendChild(gh);
+      ["1y", "3y", "5y"].forEach(function (key) {
+        var sp = spans[key];
+        if (!sp) { return; }
+        var tr = el("tr");
+        tr.appendChild(el("td", null,
+          key + (sp.annualised ? " (annualised)" : "")));
+        if (sp.growth_pct === null || sp.growth_pct === undefined) {
+          var cell = el("td", null, "unknown");
+          cell.colSpan = 4;
+          cell.appendChild(el("div", "muted", sp.reason || ""));
+          tr.appendChild(cell);
+        } else {
+          tr.appendChild(el("td", "num " +
+            (sp.growth_pct > 0 ? "up" : sp.growth_pct < 0 ? "down" : ""),
+            (sp.growth_pct > 0 ? "+" : "") + sp.growth_pct.toFixed(2) + "%"));
+          tr.appendChild(el("td", "num", fmt(sp.from_amount)));
+          tr.appendChild(el("td", "num", fmt(sp.to_amount)));
+          tr.appendChild(el("td", null, sp.from_window || ""));
+        }
+        gt.appendChild(tr);
+      });
+      box.appendChild(gt);
+      // Stated, not implied: an unadjusted series turns a 4-for-1 split
+      // into a 75% cut, so whether this is adjusted is load-bearing.
+      box.appendChild(el("p", "co-prov",
+        (g.split_adjusted ? "Restated into current share terms"
+                          : "NOT split-adjusted - treat with suspicion")
+        + (g.note ? ". " + g.note : ".")));
+    }
+
     var hist = d.history || [];
     if (hist.length) {
       box.appendChild(el("h3", null, "Payment history"));
@@ -1005,6 +1048,7 @@
       });
       box.appendChild(t);
     }
+    if (d.next_ex_note) { prov(box, "Next ex-date: " + d.next_ex_note); }
     prov(box, d.yield_price_basis ? "Yield basis: " + d.yield_price_basis : "");
     prov(box, "A special distribution is never counted as a regular " +
               "dividend. The price adjusts down by about the dividend on " +
