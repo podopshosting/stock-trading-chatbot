@@ -28,6 +28,9 @@ from .universe import SEED_UNIVERSE
 ACTIONS_TTL = 24 * 3600
 FUND_TTL = 24 * 3600
 HISTORY_YEARS = 10
+# Bump when normalisation logic changes: cached derived snapshots from an
+# older method are then ignored instead of served for another 24 hours.
+FUND_METHOD = "fundamentals-v1.1"
 CANDIDATE_BUDGET = 25          # new candidate profiles per request
 
 
@@ -236,7 +239,7 @@ class CompanyService:
     def fundamentals(self, symbol: str) -> Dict:
         symbol = symbol.upper()
         cached = self._fresh(symbol, "FUNDSUMMARY", FUND_TTL)
-        if cached:
+        if cached and cached.get("method") == FUND_METHOD:
             return cached
         try:
             facts = self._facts(symbol)
@@ -244,7 +247,8 @@ class CompanyService:
             return {"symbol": symbol, "status": "UNKNOWN",
                     "error": f"{type(e).__name__}: {e}"[:200]}
         s = fund.summarise(facts, self._today())
-        s.update({"symbol": symbol, "source": "SEC Company Facts (XBRL)",
+        s.update({"symbol": symbol, "method": FUND_METHOD,
+                  "source": "SEC Company Facts (XBRL)",
                   "retrieved_at": _now_iso(self._clock)})
         self._save(symbol, "FUNDSUMMARY", s)
         return s

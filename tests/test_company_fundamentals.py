@@ -156,7 +156,37 @@ class TestSecProvider(unittest.TestCase):
 
     def test_concepts_are_not_spliced(self):
         out = normalise(self.PAYLOAD, "t", "src")
-        self.assertEqual(len(out["revenue"]), 1)   # SalesRevenueNet ignored
+        self.assertEqual(len(out["revenue"]), 1)   # older SalesRevenueNet ignored
+
+    def test_a_small_side_concept_does_not_beat_the_real_revenue_series(self):
+        """Live GIS: 'Revenues' held one old 2.0B item while the real
+        revenue sat under RevenueFromContractWithCustomer..."""
+        payload = {"facts": {"us-gaap": {
+            "Revenues": {"units": {"USD": [
+                {"start": "2023-05-29", "end": "2024-05-26", "val": 2037800000,
+                 "fy": 2024, "fp": "FY", "form": "10-K", "filed": "2024-06-26"}]}},
+            "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+                {"start": "2025-05-26", "end": "2026-05-31", "val": 19000000000,
+                 "fy": 2026, "fp": "FY", "form": "10-K", "filed": "2026-07-01"}]}}}}}
+        out = normalise(payload, "t", "s")
+        self.assertEqual(out["revenue"][0].value, 19000000000)
+
+    def test_proxy_statement_facts_are_ignored(self):
+        """Live GIS: a DEF 14A net income filed later replaced the 10-K's."""
+        payload = {"facts": {"us-gaap": {"NetIncomeLoss": {"units": {"USD": [
+            {"start": "2025-05-26", "end": "2026-05-31", "val": -2000000000,
+             "fy": 2026, "fp": "FY", "form": "10-K", "filed": "2026-07-01"},
+            {"start": "2025-05-26", "end": "2026-05-31", "val": -85000000,
+             "fy": None, "fp": None, "form": "DEF 14A", "filed": "2026-08-13"}]}}}}}
+        out = normalise(payload, "t", "s")
+        self.assertEqual([p.value for p in out["net_income"]], [-2000000000])
+
+    def test_quarter_reported_in_a_10k_does_not_keep_the_FY_label(self):
+        payload = {"facts": {"us-gaap": {"EarningsPerShareDiluted": {"units": {
+            "USD/shares": [{"start": "2025-12-01", "end": "2026-02-22", "val": 0.56,
+             "fy": 2026, "fp": "FY", "form": "10-K", "filed": "2026-07-01"}]}}}}}
+        out = normalise(payload, "t", "s")
+        self.assertIsNone(out["eps_diluted"][0].fiscal_period)
 
     def test_requires_contact_user_agent(self):
         with self.assertRaises(ValueError):

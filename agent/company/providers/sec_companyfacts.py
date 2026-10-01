@@ -51,38 +51,66 @@ CONCEPTS: Dict[str, tuple] = {
 }
 
 
+# Only forms that carry audited/reviewed financial statements. Facts a
+# company tags in a proxy (DEF 14A pay-versus-performance), a registration
+# statement or an 8-K are NOT the statements, and a later-filed one would
+# otherwise win the "latest filed" tie-break and replace the real figure.
+STATEMENT_FORMS = {"10-K", "10-K/A", "10-K405", "10-KT", "10-Q", "10-Q/A",
+                   "20-F", "20-F/A", "40-F", "40-F/A"}
+
+
 def normalise(payload: Dict, retrieved_at: str,
               source: str) -> Dict[str, List[FinancialPeriod]]:
     """Every observation of every preferred concept, as FinancialPeriod.
 
-    A concept that exists under a higher-preference name wins whole: we
-    never splice two XBRL concepts into one series.
+    One XBRL concept is chosen per canonical name and used whole: we never
+    splice two concepts into one series. The choice is the concept whose
+    series reaches the most recent period (ties: more observations, then
+    the listed preference). "First concept that has any rows" is wrong: a
+    company can tag a small side item under the preferred name and its
+    real revenue under another, and live GIS data did exactly that.
     """
     facts = (payload or {}).get("facts") or {}
     out: Dict[str, List[FinancialPeriod]] = {}
     for canon, (tax, names, unit) in CONCEPTS.items():
-        for name in names:
+        best = None
+        for rank, name in enumerate(names):
             node = (facts.get(tax) or {}).get(name)
             rows = ((node or {}).get("units") or {}).get(unit) or []
-            if not rows:
-                continue
             periods = []
             for r in rows:
                 if r.get("val") is None or not r.get("end"):
                     continue
+                if r.get("form") not in STATEMENT_FORMS:
+                    continue
                 fy = r.get("fy")
+                label = r.get("fp")
+                start = r.get("start")
+                # fp/fy describe the FILING, not the period: a quarter
+                # reported inside a 10-K carries fp="FY". A label that
+                # contradicts the period's own length is dropped.
+                if start and label == "FY":
+                    from datetime import date
+                    n = (date.fromisoformat(r["end"])
+                         - date.fromisoformat(start)).days
+                    if not 350 <= n <= 380:
+                        label = None
                 periods.append(FinancialPeriod(
                     concept=canon, value=float(r["val"]), unit=unit,
-                    period_start=r.get("start"), period_end=r["end"],
+                    period_start=start, period_end=r["end"],
                     fiscal_year=int(fy) if fy is not None else None,
-                    fiscal_period=r.get("fp"), form=r.get("form"),
+                    fiscal_period=label, form=r.get("form"),
                     filed=r.get("filed"), accession=r.get("accn"),
                     provenance=Provenance(
                         "sec_companyfacts", f"{source}#{name}", retrieved_at,
                         period=r["end"])))
-            if periods:
-                out[canon] = periods
-                break
+            if not periods:
+                continue
+            key = (max(p.period_end for p in periods), len(periods), -rank)
+            if best is None or key > best[0]:
+                best = (key, periods)
+        if best:
+            out[canon] = best[1]
     return out
 
 
