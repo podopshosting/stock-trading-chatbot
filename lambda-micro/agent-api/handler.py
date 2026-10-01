@@ -1116,11 +1116,22 @@ def handle_readiness(event) -> Dict:
         calibration=calibrate(trades),
         adapter_assessment=adapter,
         switches={"kill_switch_cancels_working_orders": False},
+        # The evidence CLASS is forwarded, not just the counts: a
+        # performance gate must be able to see that the record behind it
+        # was gathered on a delayed feed, or spanned a redeploy. Omitting
+        # these keys makes the gates fail closed rather than silently
+        # treating the record as real-time.
         pilot=({"sessions_completed": evidence["sessions_completed"],
                 "live_data_path_exercised":
                     evidence["live_data_path_exercised"],
                 "reconciliation_clean_sessions":
-                    evidence["reconciliation_clean_sessions"]}
+                    evidence["reconciliation_clean_sessions"],
+                "evidence_class": evidence["evidence_class"],
+                "data_quality": evidence["data_quality"],
+                "counts_toward_strategy_gates":
+                    evidence["counts_toward_strategy_gates"],
+                "evidence_class_reasons":
+                    evidence["evidence_class_reasons"]}
                if evidence else
                {"sessions_completed": None,
                 "live_data_path_exercised": None,

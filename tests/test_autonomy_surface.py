@@ -590,3 +590,52 @@ class TestHealthRecordCreatedByTheStreakWrite(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReadinessCarriesTheEvidenceClass(unittest.TestCase):
+    """
+    The distinction between "the machinery ran" and "the strategy works"
+    has to survive into the readiness report, not live only in a doc.
+    """
+
+    def full_day(self, world):
+        # The World's fake quotes carry no provenance, so every cycle
+        # records UNKNOWN data quality - which is the point: an
+        # unrecorded feed must not be promoted to real-time evidence.
+        world.invoke()
+        world.at("15:40")
+        world.invoke()
+        world.at("20:30", status="CLOSED")
+        world.invoke()
+
+    def test_an_unrecorded_feed_is_reported_as_operational_only(self):
+        world = World()
+        self.full_day(world)
+        _c, body = call(world, "/agent/readiness")
+        self.assertFalse(body["ready_for_real_money"])
+        self.assertEqual(body["evidence"]["evidence_class"],
+                         "OPERATIONAL_VALIDATION_ONLY")
+        self.assertFalse(body["evidence"]["counts_toward_strategy_gates"])
+
+    def test_the_report_states_why_the_evidence_is_not_strategy_grade(self):
+        """The demotion MESSAGE on a gate only appears when a gate would
+        otherwise have been met (covered in test_readiness). What must
+        always reach the report is the class and the reason for it."""
+        world = World()
+        self.full_day(world)
+        _c, body = call(world, "/agent/readiness")
+        reasons = " ".join(body["evidence"]["evidence_class_reasons"])
+        self.assertIn("not recorded", reasons)
+        self.assertEqual(body["evidence"]["data_quality"], "UNKNOWN")
+
+    def test_a_session_spanning_a_redeploy_is_named_and_not_counted(self):
+        world = World()
+        self.full_day(world)
+        tally = world.sessions.get(world.date)
+        tally.code_shas = ["8674df7", "66989c4"]
+        world.sessions.put(tally)
+        _c, body = call(world, "/agent/readiness")
+        voided = body["evidence"]["sessions_voided_by_redeploy"]
+        self.assertEqual(len(voided), 1)
+        self.assertEqual(voided[0]["code_shas"], ["8674df7", "66989c4"])
+        self.assertEqual(body["evidence"]["sessions_completed"], 0)

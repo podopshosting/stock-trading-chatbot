@@ -41,6 +41,17 @@ class SessionTally:
     session_date: str
     cohort: str = ""
     versions: Dict = field(default_factory=dict)
+    # Every code SHA this session actually ran under, in the order first
+    # seen. `versions` holds only the one the tally was OPENED with, so a
+    # session that spans a redeploy would otherwise be attributed
+    # entirely to its first runtime - which is how 14 cycles came to be
+    # recorded under a SHA that ran one of them.
+    code_shas: List[str] = field(default_factory=list)
+    # Per-cycle data quality, so a session cannot claim to be real-time
+    # evidence when its fills were computed on a delayed feed.
+    realtime_data_cycles: int = 0
+    delayed_data_cycles: int = 0
+    unknown_data_quality_cycles: int = 0
 
     cycles_total: int = 0
     cycles_live_market: int = 0
@@ -105,6 +116,16 @@ class SessionTally:
             missing = cycle.get("quotes_missing") or 0
             if requested and missing < requested:
                 self.live_cycles_with_real_quotes += 1
+                # An unreported feed is UNKNOWN, not real-time: a cycle
+                # from before the agent recorded this must not be
+                # promoted by the silence.
+                quality = cycle.get("data_quality")
+                if quality == "REAL_TIME":
+                    self.realtime_data_cycles += 1
+                elif quality == "DELAYED":
+                    self.delayed_data_cycles += 1
+                else:
+                    self.unknown_data_quality_cycles += 1
 
         self.symbols_scanned += cycle.get("symbols_scanned") or 0
         self.hypotheses += cycle.get("hypotheses_generated") or 0
@@ -149,10 +170,27 @@ class SessionTally:
     def zero_trade_day(self) -> bool:
         return self.ran_during_market_hours and self.entries == 0
 
+    @property
+    def single_runtime_version(self) -> Optional[bool]:
+        """Did one program produce this whole session?
+
+        None when no SHA was recorded at all: unknown, not yes.
+        """
+        if not self.code_shas:
+            return None
+        return len(self.code_shas) == 1
+
+    @property
+    def classification(self) -> Dict:
+        from .evidence_class import classify_session
+        return classify_session(self)
+
     def as_dict(self) -> Dict:
         d = {k: v for k, v in self.__dict__.items()}
         d["ran_during_market_hours"] = self.ran_during_market_hours
         d["zero_trade_day"] = self.zero_trade_day
+        d["single_runtime_version"] = self.single_runtime_version
+        d["classification"] = self.classification
         return d
 
     @classmethod
@@ -287,6 +325,17 @@ def record_cycle(store: SessionStore, session_date: str, cycle: Dict,
     if tally.cohort and tally.cohort != cohort_key(versions):
         tally.halt_reasons["COHORT_CHANGED_MID_SESSION"] = \
             tally.halt_reasons.get("COHORT_CHANGED_MID_SESSION", 0) + 1
+    # The code SHA is NOT part of the cohort key (a docs commit must not
+    # reset the evidence), so a redeploy inside a session is invisible to
+    # the check above. Record it here: a session with two SHAs is not a
+    # measurement of either one.
+    sha = (versions or {}).get("code_sha")
+    if sha and sha not in tally.code_shas:
+        tally.code_shas.append(sha)
+        if len(tally.code_shas) > 1:
+            tally.halt_reasons["RUNTIME_VERSION_CHANGED_MID_SESSION"] = \
+                tally.halt_reasons.get(
+                    "RUNTIME_VERSION_CHANGED_MID_SESSION", 0) + 1
     if tally.opening_cash is None and opening_cash is not None:
         tally.opening_cash = opening_cash
     tally.absorb(cycle, decisions)
@@ -390,13 +439,34 @@ def aggregate_evidence(tallies: List[SessionTally], current_cohort: str
     they ran different behaviour, so adding them would produce a number
     describing neither.
     """
+    from .evidence_class import STRATEGY_GRADE, classify_evidence, classify_session
     mine = [t for t in tallies if t.cohort == current_cohort]
     finalized = [t for t in mine if t.finalized and t.ran_during_market_hours]
+    # A session that spanned a redeploy is not a measurement of either
+    # runtime, so it is named and set aside rather than counted.
+    classified = [(t, classify_session(t)) for t in finalized]
+    void = [(t, c) for t, c in classified
+            if c["evidence_class"] == "VOID"]
+    countable = [t for t, c in classified if c["evidence_class"] != "VOID"]
+    strategy_grade = [t for t, c in classified
+                      if c["evidence_class"] == str(STRATEGY_GRADE)]
+    body = classify_evidence(countable)
     return {
         "current_cohort": current_cohort,
+        # What this body of evidence is allowed to prove. Carried into the
+        # readiness report so a performance gate cannot be satisfied by
+        # delayed-data fills or by a session with no single runtime.
+        "evidence_class": body["evidence_class"],
+        "data_quality": body["data_quality"],
+        "counts_toward_strategy_gates": body["counts_toward_strategy_gates"],
+        "evidence_class_reasons": body["reasons"],
+        "strategy_grade_sessions": len(strategy_grade),
+        "sessions_voided_by_redeploy": [
+            {"session_date": t.session_date, "code_shas": c["code_shas"]}
+            for t, c in void],
         "cohorts_seen": sorted({t.cohort for t in tallies if t.cohort}),
         "sessions_in_other_cohorts": len(tallies) - len(mine),
-        "sessions_completed": len(finalized),
+        "sessions_completed": len(countable),
         "live_data_path_exercised": any(
             t.live_cycles_with_real_quotes > 0 for t in mine),
         "reconciliation_clean_sessions": sum(

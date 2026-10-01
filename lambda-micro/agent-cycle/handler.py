@@ -38,6 +38,7 @@ from agent.autonomy import (
     aggregate_evidence, cohort_key, current_versions, daily_counters,
     finalize_session, policy_from_environment, record_cycle,
 )
+from agent.autonomy.evidence_class import quality_from_provenance
 from agent.autonomy.state_sync import sync_state
 from agent.broker import (
     BrokerStateError, ConcurrentBrokerUpdate, DynamoDBBrokerStateStore,
@@ -224,7 +225,8 @@ def _run(session_date: str) -> Dict:
     else:
         health.clear_condition(Condition.SCANNER_DEGRADED)
 
-    quotes = _quote_loader(cached, broker)
+    data_quality_seen: set = set()
+    quotes = _quote_loader(cached, broker, data_quality_seen)
     hypotheses = _hypothesis_loader(cached, cfg, session_date)
     opening_cash = broker.get_account()["cash"]
 
@@ -246,6 +248,12 @@ def _run(session_date: str) -> Dict:
         "cohort": cohort, "candidates": candidates,
         "market": session.as_dict(),
         "daily": counters,
+        # What this cycle's fills were actually computed against. Absent
+        # or mixed reads as UNKNOWN downstream, never as real-time.
+        "data_quality": (data_quality_seen.pop()
+                         if len(data_quality_seen) == 1 else
+                         ("MIXED" if data_quality_seen else "UNKNOWN")),
+        "data_qualities_seen": sorted(data_quality_seen),
     })
 
     try:
@@ -384,7 +392,10 @@ def _candidates(cfg, phase):
     return symbols[:MAX_CANDIDATES], True, ""
 
 
-def _quote_loader(cached, broker):
+def _quote_loader(cached, broker, observed: Optional[set] = None):
+    """`observed` collects the data quality of every quote actually used,
+    so the session can record what it traded on rather than leaving the
+    feed to be inferred from configuration that may change."""
     def quote_for(symbol: str) -> Optional[Dict]:
         try:
             quote = cached.get_quote(symbol)
@@ -403,6 +414,9 @@ def _quote_loader(cached, broker):
         if bid and ask and ask > 0:
             spread_pct = (ask - bid) / ((ask + bid) / 2) * 100.0
         provenance = getattr(quote, "provenance", None)
+        if observed is not None:
+            observed.add(str(quality_from_provenance(
+                getattr(provenance, "is_delayed", None))))
         # Provenance.age_seconds is a METHOD. Returning it uncalled put a
         # bound method into the Risk Governor's "> max age" comparison and
         # aborted the first live cycle that reached a hypothesis.

@@ -175,6 +175,31 @@ def assess(*, performance: Optional[Dict] = None,
 
     gates: List[Gate] = []
 
+    # Whether the evidence behind the performance gates is allowed to
+    # support a claim about the strategy at all. Paper fills computed
+    # against a 15-minute-delayed feed exercise the machinery but do not
+    # measure what the market would have given; a session spanning a
+    # redeploy measures no single program. Both are recorded as an
+    # evidence class upstream and honoured here.
+    #
+    # Fail closed: when nothing says the evidence is real-time,
+    # single-runtime evidence, it is not treated as such. Silence cannot
+    # promote a record.
+    strategy_grade = pilot.get("counts_toward_strategy_gates")
+    evidence_class = pilot.get("evidence_class") or "UNKNOWN"
+    class_reasons = "; ".join(pilot.get("evidence_class_reasons") or []) \
+        or "no evidence class recorded"
+
+    def strategy_claim(status: GateStatus, detail: str):
+        """Demote a MET performance gate that rests on evidence which is
+        not real-time, single-runtime. The measurement still happened;
+        it just cannot support this claim."""
+        if status is GateStatus.MET and strategy_grade is not True:
+            return GateStatus.UNMET, (
+                f"{detail}; NOT COUNTED: evidence_class={evidence_class} "
+                f"({class_reasons})")
+        return status, detail
+
     # --- EVIDENCE: does the strategy work? ---------------------------
     verdict = performance.get("verdict")
     counted = performance.get("trades_counted")
@@ -184,14 +209,17 @@ def assess(*, performance: Optional[Dict] = None,
         status = GateStatus.UNKNOWN
     else:
         status = GateStatus.UNMET
+    status, edge_detail = strategy_claim(
+        status, f"verdict={verdict}, trades_counted={counted}")
     gates.append(_gate(
         "demonstrated_edge", GateCategory.EVIDENCE, status,
         why=("Risking real money on a strategy whose edge has not been "
              "demonstrated is gambling with extra steps. The sample "
              "must be large enough that the result is not luck."),
-        detail=f"verdict={verdict}, trades_counted={counted}",
+        detail=edge_detail,
         to_satisfy=("a paper or live record whose expectancy interval "
-                    "excludes zero at the claim threshold")))
+                    "excludes zero at the claim threshold, gathered on "
+                    "real-time data under one runtime")))
 
     stop_integrity = performance.get("stop_integrity") or {}
     breach_rate = stop_integrity.get("breach_rate")
@@ -202,12 +230,14 @@ def assess(*, performance: Optional[Dict] = None,
         status = GateStatus.MET
     else:
         status = GateStatus.UNMET
+    status, stops_detail = strategy_claim(
+        status, f"breach_rate={breach_rate}, trades_assessed={assessed}")
     gates.append(_gate(
         "stops_hold", GateCategory.EVIDENCE, status,
         why=("If losses routinely exceed the planned risk, every "
              "position size upstream is wrong and the limits promise "
              "something they do not deliver."),
-        detail=f"breach_rate={breach_rate}, trades_assessed={assessed}",
+        detail=stops_detail,
         to_satisfy="a breach rate at or below 5% over a real sample"))
 
     cal_verdict = calibration.get("verdict")
@@ -217,13 +247,14 @@ def assess(*, performance: Optional[Dict] = None,
         status = GateStatus.UNKNOWN
     else:
         status = GateStatus.UNMET
+    status, cal_detail = strategy_claim(status, f"verdict={cal_verdict}")
     gates.append(_gate(
         "strength_is_predictive", GateCategory.EVIDENCE, status,
         why=("Position size is scaled by hypothesis strength. If "
              "strength does not order outcomes, the sizing is "
              "arbitrary and the risk model rests on a number that "
              "means nothing."),
-        detail=f"verdict={cal_verdict}",
+        detail=cal_detail,
         to_satisfy=("strength bands with enough trades each that the "
                     "extreme bands' intervals separate")))
 

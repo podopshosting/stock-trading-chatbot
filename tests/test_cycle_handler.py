@@ -777,3 +777,73 @@ class TestQuoteLoaderWithRealProviderTypes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheCycleRecordsWhatItTradedOn(unittest.TestCase):
+    """
+    Alpaca's free plan serves the consolidated tape 15 minutes late. A
+    session that does not record its feed would let delayed fills be read
+    later as real-time strategy evidence, so the cycle reports the quality
+    of every quote it actually used.
+    """
+
+    def observe(self, delayed):
+        import time as _t
+        from agent.providers.base import Provenance, Quote
+
+        class Cached:
+            def get_quote(self, symbol):
+                return Quote(symbol=symbol, price=10.0, volume=1000,
+                             provenance=Provenance("alpaca", _t.time(),
+                                                   is_delayed=delayed))
+        seen = set()
+        load_handler()._quote_loader(Cached(), object(), seen)("X")
+        return seen
+
+    def test_a_delayed_feed_is_recorded_as_delayed(self):
+        self.assertEqual(self.observe(True), {"DELAYED"})
+
+    def test_a_real_time_feed_is_recorded_as_real_time(self):
+        self.assertEqual(self.observe(False), {"REAL_TIME"})
+
+    def test_an_unknown_feed_is_not_recorded_as_real_time(self):
+        """Provenance documents is_delayed=None as 'never assume
+        real-time'."""
+        self.assertEqual(self.observe(None), {"UNKNOWN"})
+
+    def test_the_collector_is_optional_so_other_callers_still_work(self):
+        import time as _t
+        from agent.providers.base import Provenance, Quote
+
+        class Cached:
+            def get_quote(self, symbol):
+                return Quote(symbol=symbol, price=10.0,
+                             provenance=Provenance("alpaca", _t.time()))
+        q = load_handler()._quote_loader(Cached(), object())("X")
+        self.assertEqual(q["price"], 10.0)
+
+    def test_a_live_cycle_reports_its_data_quality(self):
+        world = World()
+        world.invoke()
+        self.assertIn(world.last["data_quality"],
+                      ("REAL_TIME", "DELAYED", "MIXED", "UNKNOWN"))
+
+    def test_a_mixed_cycle_is_reported_as_mixed_not_the_better_half(self):
+        handler = load_handler()
+        import time as _t
+        from agent.providers.base import Provenance, Quote
+
+        class Cached:
+            def __init__(self):
+                self.n = 0
+
+            def get_quote(self, symbol):
+                self.n += 1
+                return Quote(symbol=symbol, price=10.0, volume=10,
+                             provenance=Provenance(
+                                 "alpaca", _t.time(),
+                                 is_delayed=(self.n % 2 == 0)))
+        seen = set()
+        loader = handler._quote_loader(Cached(), object(), seen)
+        loader("A"), loader("B")
+        self.assertEqual(seen, {"REAL_TIME", "DELAYED"})

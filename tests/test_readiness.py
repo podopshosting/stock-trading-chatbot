@@ -193,10 +193,15 @@ class TestGatesReflectRealEvidence(unittest.TestCase):
         self.assertIs(gate.status, GateStatus.UNMET)
 
     def test_a_low_stop_breach_rate_passes_its_gate(self):
-        report = assess(performance={
-            "verdict": "POSITIVE_EDGE_DEMONSTRATED",
-            "stop_integrity": {"breach_rate": 0.01,
-                               "trades_assessed": 100}})
+        # Strategy-grade evidence is supplied so this isolates the
+        # breach-rate threshold itself. Without it the gate is demoted,
+        # which TestStrategyGatesRequireRealTimeEvidence covers.
+        report = assess(
+            performance={"verdict": "POSITIVE_EDGE_DEMONSTRATED",
+                         "stop_integrity": {"breach_rate": 0.01,
+                                            "trades_assessed": 100}},
+            pilot={"counts_toward_strategy_gates": True,
+                   "evidence_class": "REAL_TIME_STRATEGY_EVIDENCE"})
         gate = next(g for g in report.gates if g.name == "stops_hold")
         self.assertIs(gate.status, GateStatus.MET)
 
@@ -292,3 +297,73 @@ class TestSerialisation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStrategyGatesRequireRealTimeEvidence(unittest.TestCase):
+    """
+    A paper fill computed against a 15-minute-delayed quote exercises the
+    machinery; it does not measure what the market would have given. A
+    session spanning a redeploy measures no single program. Neither may
+    satisfy a gate that claims the strategy works.
+    """
+
+    PERF = {"verdict": "POSITIVE_EDGE_DEMONSTRATED", "trades_counted": 80,
+            "stop_integrity": {"breach_rate": 0.0, "trades_assessed": 80}}
+    CAL = {"verdict": "MONOTONIC_AND_SIGNIFICANT"}
+    CLAIMS = ("demonstrated_edge", "stops_hold", "strength_is_predictive")
+
+    def statuses(self, pilot):
+        report = assess(performance=self.PERF, calibration=self.CAL,
+                        pilot=pilot)
+        return {g.name: g for g in report.gates}
+
+    def test_real_time_single_runtime_evidence_can_satisfy_them(self):
+        """The control: without this the demotion tests below would pass
+        even if the gates could never be met at all."""
+        gates = self.statuses({
+            "counts_toward_strategy_gates": True,
+            "evidence_class": "REAL_TIME_STRATEGY_EVIDENCE"})
+        for name in self.CLAIMS:
+            with self.subTest(gate=name):
+                self.assertIs(gates[name].status, GateStatus.MET)
+
+    def test_delayed_data_evidence_cannot_satisfy_them(self):
+        gates = self.statuses({
+            "counts_toward_strategy_gates": False,
+            "evidence_class": "OPERATIONAL_VALIDATION_ONLY",
+            "evidence_class_reasons": ["traded on delayed market data"]})
+        for name in self.CLAIMS:
+            with self.subTest(gate=name):
+                self.assertIs(gates[name].status, GateStatus.UNMET)
+                self.assertIn("NOT COUNTED", gates[name].detail)
+                self.assertIn("delayed market data", gates[name].detail)
+
+    def test_an_unlabelled_body_of_evidence_fails_closed(self):
+        """Silence must not promote a record to real-time evidence."""
+        gates = self.statuses({})
+        for name in self.CLAIMS:
+            with self.subTest(gate=name):
+                self.assertIs(gates[name].status, GateStatus.UNMET)
+                self.assertIn("UNKNOWN", gates[name].detail)
+
+    def test_the_measurement_is_still_reported_not_hidden(self):
+        """Demoted is not deleted: the number stays visible."""
+        gates = self.statuses({"counts_toward_strategy_gates": False,
+                               "evidence_class": "OPERATIONAL_VALIDATION_ONLY"})
+        self.assertIn("POSITIVE_EDGE_DEMONSTRATED",
+                      gates["demonstrated_edge"].detail)
+        self.assertIn("trades_counted=80", gates["demonstrated_edge"].detail)
+
+    def test_demotion_does_not_touch_operational_gates(self):
+        """Delayed data still proves the machinery ran."""
+        gates = self.statuses({
+            "counts_toward_strategy_gates": False,
+            "evidence_class": "OPERATIONAL_VALIDATION_ONLY",
+            "live_data_path_exercised": True})
+        self.assertIs(gates["live_data_path_exercised"].status, GateStatus.MET)
+
+    def test_a_report_on_delayed_evidence_is_never_ready(self):
+        report = assess(performance=self.PERF, calibration=self.CAL,
+                        pilot={"counts_toward_strategy_gates": False,
+                               "evidence_class": "OPERATIONAL_VALIDATION_ONLY"})
+        self.assertFalse(report.ready)
