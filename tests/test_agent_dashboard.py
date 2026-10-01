@@ -590,3 +590,54 @@ class TestPackaging(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnreadablePositionStoreClaimsNothing(unittest.TestCase):
+    """
+    The existing test for this path only asserts the unreadable branch
+    IF the store happens to be unreadable, so under normal conditions it
+    asserts nothing about it at all. Forced here, because a store that
+    cannot be read must not report zero risk - and a mutation setting
+    that field to 0.0 on this path would otherwise survive.
+    """
+
+    def unreadable(self):
+        from agent.positions import DynamoDBPositionStore
+
+        def boom(*_a, **_k):
+            raise RuntimeError("table unavailable")
+        with mock.patch.object(DynamoDBPositionStore, "load_open", boom):
+            return call("/agent/positions")
+
+    def test_the_endpoint_still_answers(self):
+        code, _body = self.unreadable()
+        self.assertEqual(code, 200)
+
+    def test_it_says_the_store_was_unreadable(self):
+        _code, body = self.unreadable()
+        self.assertEqual(body["source"], "unreadable")
+
+    def test_open_risk_is_none_not_zero(self):
+        """Zero would claim there is no risk. An understated risk total
+        is worse than no total, because it is actionable."""
+        _code, body = self.unreadable()
+        self.assertIsNone(body["total_open_risk"])
+
+    def test_open_count_is_none_not_zero(self):
+        _code, body = self.unreadable()
+        self.assertIsNone(body["open_count"])
+
+    def test_the_note_refuses_the_zero_reading_in_words(self):
+        _code, body = self.unreadable()
+        self.assertIn("not a report of zero", body["note"])
+
+    def test_a_readable_empty_store_is_distinguishable_from_this(self):
+        """The control: both cases show no positions, and they must not
+        look the same. Without this, the assertions above would hold for
+        an endpoint that could never report a real reading."""
+        from agent.positions import DynamoDBPositionStore
+        with mock.patch.object(DynamoDBPositionStore, "load_open",
+                               lambda *_a, **_k: []):
+            _code, body = call("/agent/positions")
+        self.assertEqual(body["source"], "position store")
+        self.assertEqual(body["open_count"], 0)

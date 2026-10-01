@@ -1095,9 +1095,25 @@ MUTATIONS = [
         name="report-zero-open-risk-when-unknown",
         description="claim there is no risk when the total is unknown",
         path=API_HANDLER,
-        old='        "total_open_risk": None,',
-        new='        "total_open_risk": 0.0,  # MUTATION',
-        expect=["open_risk", "None", "zero"],
+        # Anchor repaired 2026-10-01: the previous one
+        # ('        "total_open_risk": None,') stopped matching when the
+        # endpoint began reading the real position store, so this
+        # mutation had been silently NOT RUN - providing no coverage
+        # while appearing in the list as though it did.
+        old='        "total_open_risk": round(sum(risks), 2) if risks else None,',
+        new='        "total_open_risk": round(sum(risks), 2) if risks else 0.0,  # MUTATION',
+        expect=["open_risk", "None", "zero", "unknown"],
+    ),
+    Mutation(
+        # The same property, lost a second way. Found while repairing the
+        # anchor above: nothing asserted it on the unreadable-store path,
+        # so this mutation would have survived.
+        name="report-zero-open-risk-when-unreadable",
+        description="claim zero risk when the position store cannot be read",
+        path=API_HANDLER,
+        old='            "positions": [], "open_count": None, "total_open_risk": None,',
+        new='            "positions": [], "open_count": None, "total_open_risk": 0.0,  # MUTATION',
+        expect=["unreadable", "open_risk", "zero"],
     ),
     Mutation(
         name="drop-the-paper-banner",
