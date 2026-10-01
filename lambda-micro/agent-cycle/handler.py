@@ -119,8 +119,15 @@ def _provider():
     cfg = _config()
     creds = _load_alpaca_credentials(cfg.storage.alpaca_secret_id,
                                      cfg.storage.region)
+    # The consolidated tape in real time. Entitlement verified against
+    # the live service on 2026-10-01 (is_delayed=false, sub-second source
+    # timestamp). Configurable so a loss of entitlement can be handled
+    # without a code change - and the Risk Governor refuses on a stale
+    # DATA age whatever the feed is called.
     inner = AlpacaProvider(api_key_id=creds["api_key_id"],
-                           api_secret_key=creds["api_secret_key"])
+                           api_secret_key=creds["api_secret_key"],
+                           quote_feed=os.environ.get("ALPACA_QUOTE_FEED",
+                                                     "sip"))
     return inner, CachedProvider(inner, backend=MemoryCache())
 
 

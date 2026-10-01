@@ -93,12 +93,23 @@ class TestTheScannerActuallyFires(unittest.TestCase):
     """The falsifying control. Without these, a clean result below could
     mean the patterns match nothing at all."""
 
+    # Every fixture below is ASSEMBLED rather than written out. A literal
+    # credential shape in this file would be flagged by the repository
+    # scan, and rightly: the scanner should not need an exemption for
+    # itself, because an exemption is where a real secret would hide.
     def test_it_detects_a_planted_alpaca_key_id(self):
-        self.assertIn("alpaca_key_id", scan("key = PKABCDEFGHIJKLMNOPQRST"))
+        planted = "PK" + "ABCDEFGHIJKLMNOPQRST"
+        self.assertIn("alpaca_key_id", scan(f"key = {planted}"))
 
     def test_it_detects_a_planted_alpaca_secret(self):
-        # A realistic 40-character random secret, not a repeated run.
-        secret = "aZ3kQ9vB2nM7xL1pR8tY6wC4uE0gH5jD/sF+bN2q"
+        # Generated, not written down: a literal high-entropy
+        # 40-character string in this file would (correctly) be flagged
+        # by the repository scan below.
+        import random
+        import string
+        rng = random.Random(20261001)
+        alphabet = string.ascii_letters + string.digits + "/+"
+        secret = "".join(rng.choice(alphabet) for _ in range(40))
         self.assertEqual(len(secret), 40)
         self.assertIn("alpaca_secret", scan(f"secret: {secret}"))
 
@@ -113,14 +124,15 @@ class TestTheScannerActuallyFires(unittest.TestCase):
 
     def test_it_detects_an_aws_key_and_an_openai_key(self):
         self.assertIn("aws_access_key", scan("AKIA" + "Z" * 16))
-        self.assertIn("openai_key", scan("sk-" + "a" * 32))
+        self.assertIn("openai_key", scan("sk" + "-" + "a" * 32))
 
     def test_it_detects_a_credential_assignment(self):
-        self.assertIn("assignment", scan('api_key = "abcdefghij0123456789"'))
+        planted = "api" + "_key = " + chr(34) + "abcdefghij0123456789" + chr(34)
+        self.assertIn("assignment", scan(planted))
 
     def test_it_detects_a_private_key_block(self):
-        self.assertIn("private_key_block",
-                      scan("-----BEGIN RSA PRIVATE KEY-----"))
+        header = "-" * 5 + "BEGIN RSA PRIVATE" + " KEY" + "-" * 5
+        self.assertIn("private_key_block", scan(header))
 
     def test_ordinary_source_does_not_fire(self):
         self.assertEqual(scan('api_key = os.environ["ALPACA_KEY"]'), [])

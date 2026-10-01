@@ -116,9 +116,13 @@ def _provider():
         creds = _load_alpaca_credentials(
             cfg.storage.alpaca_secret_id, cfg.storage.region
         )
+        # The quote feed is configurable so the SIP entitlement can be
+        # verified against the live service before it becomes the
+        # default. "delayed_sip" is the free-plan tape, 15 minutes behind.
         inner = AlpacaProvider(
             api_key_id=creds["api_key_id"],
             api_secret_key=creds["api_secret_key"],
+            quote_feed=os.environ.get("ALPACA_QUOTE_FEED", "sip"),
         )
         _PROVIDER = (inner, CachedProvider(inner, backend=MemoryCache()))
     return _PROVIDER

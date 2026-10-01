@@ -94,7 +94,7 @@ class AlpacaProvider(MarketDataProvider):
     REQUESTS_PER_MINUTE = 200
 
     def __init__(self, api_key_id: str, api_secret_key: str, http=None,
-                 quote_feed: str = "delayed_sip", bar_feed: str = "sip",
+                 quote_feed: str = "sip", bar_feed: str = "sip",
                  data_base: str = DATA_BASE,
                  trading_base: str = PAPER_TRADING_BASE,
                  max_symbols_per_request: int = 1000,

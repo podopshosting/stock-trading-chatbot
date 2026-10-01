@@ -362,10 +362,17 @@ class TestIexPartialCoverageIsDisclosed(unittest.TestCase):
                       "IEX volume is venue-only and must be called out")
 
     def test_default_quote_feed_is_the_consolidated_tape(self):
-        """Correct-but-delayed beats fresh-but-3%-of-the-market when the
-        numbers feed relative volume and spread rules."""
+        """The consolidated tape, never IEX, because the numbers feed
+        relative-volume and spread rules.
+
+        The default was `delayed_sip` while the plan offered only
+        delayed SIP or real-time IEX. With Algo Trader Plus (entitlement
+        verified live 2026-10-01) real-time SIP dominates both, so the
+        default is `sip`; what must not change is that the default is a
+        consolidated feed.
+        """
         p = make_provider(FakeHTTP())
-        self.assertEqual(p.quote_feed, "delayed_sip")
+        self.assertEqual(p.quote_feed, "sip")
         self.assertTrue(p.capabilities()["consolidated_volume"])
 
     def test_iex_feed_reports_non_consolidated_volume(self):
