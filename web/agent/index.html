@@ -231,9 +231,9 @@
     <div id="sessionReport"><p class="empty">Loading…</p></div>
   </section>
 
-  <!-- Shadow orders: what would have been submitted, never submitted -->
+  <!-- Internal simulator vs external paper venue, per fill -->
   <section class="card" style="margin-bottom:var(--gap)">
-    <h2>Shadow orders</h2>
+    <h2>Execution comparison</h2>
     <div id="shadow"><p class="empty">Loading…</p></div>
   </section>
 
@@ -1438,47 +1438,57 @@
     }).catch(function (e) { showError(box, e); });
   }
 
-  // ---- shadow orders ---------------------------------------------------
-  // Orders the agent would have submitted. Recording them is how an
-  // execution change can be assessed without placing one, so the panel
-  // has to be explicit that nothing here was sent.
+  // ---- execution comparison --------------------------------------------
+  // The internal simulator against the external paper venue, per fill.
+  // The endpoint reports its own state and detail, and they matter: an
+  // empty table because nothing executed is NOT a report that the two
+  // agree, and the panel must not let it be read as one.
   function loadShadow() {
     var box = document.getElementById("shadow");
     get("/agent/shadow").then(function (d) {
       box.innerHTML = "";
-      var rows = d.shadow_orders || d.orders || [];
-      var sum = d.summary || {};
-      box.appendChild(el("p", null,
-        "Recorded, never submitted. These are the orders the agent would "
-        + "have placed, kept so an execution path can be compared against "
-        + "the one that ran without any order reaching a broker."));
+      var rows = d.comparisons || [];
+      if (d.state) {
+        box.appendChild(el("span", "pill " +
+          (rows.length ? "up" : "flat"), d.state));
+      }
+      if (d.detail) { box.appendChild(el("p", null, d.detail)); }
+      if (d.read_error) {
+        box.appendChild(el("p", "note warn",
+          "read error: " + d.read_error));
+      }
       if (!rows.length) {
-        box.appendChild(el("p", "empty",
-          "No shadow orders recorded. The recorder is not yet wired into "
-          + "the submit path, which is a deliberately separate deployment "
-          + "with its own cohort boundary."));
+        // The declared fields are shown even with no rows, so it is
+        // clear what will be compared rather than left to be guessed.
+        if ((d.fields || []).length) {
+          box.appendChild(el("p", "co-prov",
+            "Will compare, per fill: " + d.fields.join(", ") + "."));
+        }
         return;
       }
+      var cols = d.fields || Object.keys(rows[0]);
       var t = el("table", "co-table");
       var head = el("tr");
-      ["Symbol", "Side", "Quantity", "Intended price", "Recorded at",
-       "Reason"].forEach(function (h) { head.appendChild(el("th", null, h)); });
+      cols.forEach(function (c) {
+        head.appendChild(el("th", null, c.replace(/_/g, " ")));
+      });
       t.appendChild(head);
-      rows.slice(0, 40).forEach(function (o) {
+      rows.slice(0, 40).forEach(function (r) {
         var tr = el("tr");
-        tr.appendChild(el("td", null, o.symbol));
-        tr.appendChild(el("td", null, o.side));
-        tr.appendChild(el("td", "num", fmt(o.quantity)));
-        tr.appendChild(el("td", "num", fmt(o.intended_price || o.price)));
-        tr.appendChild(el("td", null, o.recorded_at || o.created_at || ""));
-        tr.appendChild(el("td", null, o.reason || ""));
+        cols.forEach(function (c) {
+          var v = r[c];
+          tr.appendChild(el("td", typeof v === "number" ? "num" : null,
+            v === null || v === undefined ? "—" : fmt(v)));
+        });
         t.appendChild(tr);
       });
       box.appendChild(t);
-      if (sum.count !== undefined) {
+      var sum = d.summary || {};
+      if (sum && Object.keys(sum).length) {
         box.appendChild(el("p", "co-prov",
-          sum.count + " recorded; " + fmt(sum.notional) + " notional, none "
-          + "of it placed."));
+          Object.keys(sum).map(function (k) {
+            return k.replace(/_/g, " ") + ": " + fmt(sum[k]);
+          }).join("; ")));
       }
     }).catch(function (e) { showError(box, e); });
   }
