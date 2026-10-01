@@ -140,6 +140,21 @@ def lambda_handler(event, context) -> Dict:
         result = _run(session_date)
     except Exception as exc:                              # noqa: BLE001
         log_event("cycle_aborted", detail=str(exc)[:300])
+        # health.record_cycle is called from the orchestration, which an
+        # early exception never reaches - broker selection happens well
+        # before it. Without this the streak stays clean while every
+        # cycle fails, and the agent keeps describing itself as HEALTHY.
+        # That is exactly the silence a failure streak exists to break.
+        #
+        # Best-effort and last: if the health store is itself the thing
+        # that is broken, the abort must still be returned rather than
+        # replaced by a second, different error.
+        try:
+            DynamoDBHealthStore(table_name=JOURNAL_TABLE).record_cycle(False)
+        except Exception as health_exc:                   # noqa: BLE001
+            log_event("cycle_failure_recorded", recorded=False,
+                      detail=f"{type(health_exc).__name__}: "
+                             f"{health_exc}"[:200])
         result = {
             "session_date": session_date, "ran": False,
             "error": type(exc).__name__, "detail": str(exc)[:300],
@@ -201,18 +216,24 @@ def _run(session_date: str) -> Dict:
     broker = internal
     external = None
     if os.environ.get("AGENT_BROKER", "internal").lower() == "alpaca_paper":
+        # ONLY the construction is guarded. The success log used to sit
+        # inside this try, so when it raised - both event names were
+        # unregistered - the except clause caught its own logging
+        # failure, reported it as `broker_unavailable`, and then died on
+        # that log too. A logging fault must never be reported as a
+        # broker fault: it would downgrade to the simulator and file the
+        # result under a cohort labelled external, which is exactly what
+        # the fallback below exists to prevent.
         try:
             external = AlpacaPaperBroker(
                 transport=RequestsTransport(creds["api_key_id"],
                                             creds["api_secret_key"]))
-            broker = external
-            log_event("broker_selected", broker="alpaca_paper",
-                      base_url=external.base_url, authoritative=True)
         except Exception as exc:                          # noqa: BLE001
             # Fall back to the internal simulator rather than trading
             # against an adapter in an unknown state, and say so loudly:
             # a silent downgrade would put delayed-grade evidence into a
             # cohort labelled external.
+            external = None
             log_event("broker_unavailable", broker="alpaca_paper",
                       error=f"{type(exc).__name__}: {exc}"[:200])
             alerts.send(Alert(
@@ -220,6 +241,10 @@ def _run(session_date: str) -> Dict:
                 detail=f"alpaca paper adapter unavailable: "
                        f"{type(exc).__name__}", session_date=session_date))
             broker = internal
+        if external is not None:
+            broker = external
+            log_event("broker_selected", broker="alpaca_paper",
+                      base_url=external.base_url, authoritative=True)
 
     position_store = DynamoDBPositionStore(table_name=os.environ.get(
         "AGENT_POSITIONS_TABLE", "stock-agent-dev-positions"))

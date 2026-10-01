@@ -72,10 +72,15 @@ the API places no orders and imports no broker — a test asserts it.
 ```bash
 export AWS_PROFILE=mypodops
 cd "/Users/Brian 1/Documents/GitHub/stock-trading-chatbot"
-./scripts/deploy_agent_dev.sh api
+./scripts/deploy_agent_dev.sh lambda
 ```
 
-The deploy script now runs the test suite first and refuses a red one;
+The target is **`lambda`**, not `api`. The valid targets are
+`lambda|cycle|ui|all`; `api` exits 2 with a usage message, which is how
+this was found on 2026-10-01 - the instruction said `api` and the deploy
+did nothing.
+
+The deploy script runs the test suite first and refuses a red one;
 `AGENT_DEPLOY_SKIP_TESTS=1` overrides it and prints a warning.
 
 What that deploy carries, none of which is live yet:
@@ -169,3 +174,66 @@ decision id, client order id, symbol, side, quantity, order type, submit
 time, broker order id, broker status, fills — and the internal shadow's
 expected fill alongside, for the slippage comparison. Redact the account
 number beyond its last four characters.
+
+
+---
+
+## VOID cohort attempt — 2026-10-01 21:06:32Z
+
+The first cutover attempt deployed and then failed its own verification.
+Recorded rather than overwritten, because the attempt happened and the
+next attempt's timestamp has to be distinguishable from it.
+
+| | |
+|---|---|
+| Deployed | 2026-10-01T21:06:32Z, SHA `522aa5f` |
+| Config | `AGENT_BROKER=alpaca_paper`, `ALPACA_QUOTE_FEED=sip`, mode `PAPER` |
+| Verification | **FAILED** — `ValueError: unknown log event 'broker_unavailable'` |
+| Cycles on this artifact | 2 (21:06:42 verify, 21:07:41 scheduled), **both ABORTED** |
+| Trades | none — market already closed, and the abort precedes any order |
+| Evidence value | **none.** No cohort was opened. |
+
+### What was actually wrong
+
+Not the adapter. `AlpacaPaperBroker` constructs correctly against the
+paper host — verified directly afterwards with the real credentials.
+
+Neither `broker_selected` nor `broker_unavailable` was in
+`observability.EVENTS`, and the logger fails closed on an unknown event.
+The whole `AGENT_BROKER=alpaca_paper` branch therefore raised whichever
+way it went, and it had never run before, so nothing had exercised it.
+
+Worse, the success log sat **inside** the `try`, so the sequence was:
+
+1. the adapter constructs fine
+2. `log_event("broker_selected", ...)` raises
+3. `except Exception` catches its own logging failure and treats it as a
+   broker failure
+4. `log_event("broker_unavailable", ...)` raises too, uncaught → abort
+
+Had only the second name been missing, the result would have been worse
+than a crash: a silent downgrade to the internal simulator, filing
+simulator fills under a cohort labelled external.
+
+### Second defect, found while investigating the first
+
+`/agent/autonomy` reported **HEALTHY, no failure streak, no conditions,
+no alerts** across both aborted cycles. `health.record_cycle` is called
+from `agent/orchestration/day.py`, which an early exception never
+reaches. The agent could abort every cycle and keep describing itself as
+healthy.
+
+Both are fixed, with regression tests proven to fail first:
+
+- both events registered, and a general guard asserts that **every**
+  `log_event` name anywhere in `agent/` and both handlers is registered
+- only the adapter construction is inside the `try`, so a logging fault
+  can never be reported as a broker fault
+- an aborted cycle now records a health failure, best-effort and last,
+  so a broken health store cannot mask the abort
+
+### The next attempt starts a fresh boundary
+
+The 21:06:32Z deployment is void and must not be cited as a cohort
+start. `REALTIME_SIP_STRATEGY_EVIDENCE` begins at the timestamp of the
+redeploy that carries these fixes, on the SHA that deploy pins.

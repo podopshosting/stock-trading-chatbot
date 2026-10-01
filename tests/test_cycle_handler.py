@@ -898,3 +898,72 @@ class TestTheCycleRecordsWhatItTradedOn(unittest.TestCase):
         loader = handler._quote_loader(Cached(), object(), seen)
         loader("A"), loader("B")
         self.assertEqual(seen, {"REALTIME_SIP", "DELAYED_SIP"})
+
+
+class TestAnEarlyAbortIsVisibleToHealth(unittest.TestCase):
+    """
+    Found 2026-10-01 after the real-time cutover. Two cycles aborted on
+    `unknown log event 'broker_unavailable'` and `/agent/autonomy` still
+    reported HEALTHY with no failure streak, no conditions and no alerts.
+
+    `health.record_cycle(ok)` is called from agent/orchestration/day.py,
+    which runs well after broker selection, so anything that raises
+    before the orchestration never reaches it. The agent could therefore
+    abort every cycle and continue to describe itself as healthy - the
+    silent failure that a streak exists to surface.
+    """
+
+    def test_a_cycle_that_aborts_records_the_failure(self):
+        recorded = []
+
+        class FakeHealth:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def record_cycle(self, ok):
+                recorded.append(ok)
+                return 1
+
+        with mock.patch.object(cycle, "_run",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(cycle, "DynamoDBHealthStore", FakeHealth):
+            response = cycle.lambda_handler({}, None)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(recorded, [False],
+                         "an aborted cycle did not record a health failure, "
+                         "so the streak stays clean while every cycle fails")
+
+    def test_the_abort_is_still_reported_in_the_body(self):
+        """The control: recording health must not swallow the error."""
+        class FakeHealth:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def record_cycle(self, ok):
+                return 1
+
+        with mock.patch.object(cycle, "_run",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(cycle, "DynamoDBHealthStore", FakeHealth):
+            body = json.loads(cycle.lambda_handler({}, None)["body"])
+        self.assertFalse(body["ran"])
+        self.assertEqual(body["error"], "RuntimeError")
+        self.assertFalse(body["new_exposure_permitted"])
+
+    def test_a_failing_health_store_does_not_mask_the_abort(self):
+        """If the health write itself fails, the cycle must still return
+        its abort rather than raising a second, different error."""
+        class ExplodingHealth:
+            def __init__(self, *_a, **_k):
+                raise RuntimeError("dynamo down")
+
+        with mock.patch.object(cycle, "_run",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(cycle, "DynamoDBHealthStore",
+                               ExplodingHealth):
+            response = cycle.lambda_handler({}, None)
+        body = json.loads(response["body"])
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["error"], "RuntimeError")
+        self.assertFalse(body["ran"])

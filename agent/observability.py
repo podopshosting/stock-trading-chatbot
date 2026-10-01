@@ -77,6 +77,8 @@ EVENTS = frozenset({
     "global_halt_engaged",
     "global_halt_cleared",
     # broker / orders
+    "broker_selected",
+    "broker_unavailable",
     "order_proposed",
     "order_submitted",
     "order_filled",
