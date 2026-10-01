@@ -45,6 +45,9 @@ CONCEPTS: Dict[str, tuple] = {
                             "USD"),
     "capex": ("us-gaap", ["PaymentsToAcquirePropertyPlantAndEquipment"],
               "USD"),
+    # Cover-page share count (dei). Used only for a market-cap band.
+    "shares_outstanding": ("dei", ["EntityCommonStockSharesOutstanding"],
+                           "shares"),
 }
 
 

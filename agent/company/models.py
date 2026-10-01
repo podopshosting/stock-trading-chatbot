@@ -215,3 +215,30 @@ class EarningsRecord:
         if self.revenue_actual is None or self.revenue_estimate is None:
             return None
         return round(self.revenue_actual - self.revenue_estimate, 2)
+
+
+@dataclass
+class CompanyProfile:
+    """Identity and classification, every field with its source. SIC comes
+    from the SEC; sector/industry are derived from SIC by a fixed table, so
+    classification is structured data and not an opinion."""
+    symbol: str
+    name: Optional[str] = None
+    cik: Optional[int] = None
+    sic: Optional[str] = None
+    sic_description: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    exchange: Optional[str] = None
+    active: Optional[bool] = None
+    shares_outstanding: Optional[float] = None
+    price: Optional[float] = None
+    price_asof: Optional[str] = None
+    market_cap: Optional[float] = None
+    market_cap_basis: Optional[str] = None   # "shares X as of A x price Y as of B"
+    provenance: List[Provenance] = field(default_factory=list)
+
+    def as_dict(self) -> Dict:
+        d = dict(self.__dict__)
+        d["provenance"] = [p.as_dict() for p in self.provenance]
+        return d
