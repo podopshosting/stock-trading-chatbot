@@ -64,6 +64,58 @@ aws lambda get-function-configuration --function-name stock-agent-dev-cycle \
   --output text
 ```
 
+## Also pending: the dev API Lambda
+
+Separate from the cohort boundary, and safe to do at any time, because
+the API places no orders and imports no broker — a test asserts it.
+
+```bash
+export AWS_PROFILE=mypodops
+cd "/Users/Brian 1/Documents/GitHub/stock-trading-chatbot"
+./scripts/deploy_agent_dev.sh api
+```
+
+The deploy script now runs the test suite first and refuses a red one;
+`AGENT_DEPLOY_SKIP_TESTS=1` overrides it and prints a warning.
+
+What that deploy carries, none of which is live yet:
+
+- the two Company Intelligence fixes found by live validation — peer
+  selection no longer matches on the 2-digit SIC major group, and a
+  FAVORABLE holding verdict now requires fundamentals positively
+  established as CURRENT
+- dividend growth over 1, 3 and 5 years, restated into current share
+  terms
+- `next_ex_note`, so a null next ex-date says why it is null
+- an honest reason when a cohort has no finalised sessions yet, instead
+  of "no sessions recorded" while a session is mid-flight
+- two new dashboard panels: session close-out and shadow orders
+
+**Verify after deploying**, since the peer fix is the one with a
+user-visible before and after:
+
+```bash
+U=$(aws lambda get-function-url-config --function-name stock-agent-dev-api \
+      --region us-east-2 --query FunctionUrl --output text)
+for S in AAPL NVDA GE TSLA; do
+  echo -n "$S peers: "
+  curl -s "${U}agent/company/$S/peers" \
+    | python3 -c "import json,sys;print([p['symbol'] for p in (json.load(sys.stdin).get('peers') or [])])"
+done
+```
+
+Expected: AAPL no longer lists CAT or DE, and NVDA no longer lists GE.
+Before the fix, AAPL returned `CAT, CSCO, DE, IBM` and NVDA returned
+`AMD, AVGO, GE, INTC, MU`.
+
+### Known blocker
+
+On 2026-10-01 this deploy could not be run from the agent session: the
+sandbox permission classifier refused `scripts/deploy_agent_dev.sh` as a
+production deploy, although it targets only `stock-agent-dev-*`. It
+needs to be run by the account holder, or the permission widened
+deliberately for the dev functions.
+
 ## The cohort this creates
 
 Fill in from step 4; do not guess any of it.
