@@ -813,6 +813,386 @@
     }).catch(function (e) { out.textContent = "Could not ask: " + e.message; });
   });
 
+
+  // ---- company intelligence -------------------------------------------
+  // Longer-horizon company context. Kept visually and structurally apart
+  // from the execution card: a dividend record is not a reason to trade.
+  var CO_TABS = [
+    ["", "Overview"], ["dividends", "Dividends"], ["earnings", "Earnings"],
+    ["fundamentals", "Financials"], ["peers", "Competitors"],
+    ["peer-comparison", "Comparison"],
+    ["corporate-actions", "Corporate actions"], ["splits", "History"],
+    ["holding-context", "Holding context"]
+  ];
+  var coState = { symbol: null, tab: "" };
+
+  function coGet(section) {
+    var base = "/agent/company/" + coState.symbol + (section ? "/" + section : "");
+    return get(base + (document.getElementById("coRefresh").checked
+                       ? "?refresh=1" : ""));
+  }
+  function row(table, label, value, cls) {
+    var tr = el("tr");
+    tr.appendChild(el("th", null, label));
+    tr.appendChild(el("td", cls || null, fmt(value)));
+    table.appendChild(tr);
+  }
+  function table(parent, pairs) {
+    var t = el("table", "co-table");
+    pairs.forEach(function (p) { if (p) row(t, p[0], p[1], p[2]); });
+    parent.appendChild(t);
+    return t;
+  }
+  function prov(parent, text) {
+    if (text) parent.appendChild(el("p", "co-prov", text));
+  }
+  function badge(parent, label, value) {
+    var wrap = el("p");
+    wrap.appendChild(el("strong", null, label + " "));
+    var tone = value === "YES" ? "yes" : value === "NO" ? "no" : "unknown";
+    wrap.appendChild(el("span", "co-badge " + tone, value || "UNKNOWN"));
+    parent.appendChild(wrap);
+  }
+
+  function renderOverview(box, d) {
+    var p = d.profile || {};
+    badge(box, "Dividend stock:", d.dividend_stock);
+    table(box, [
+      ["Name", p.name], ["Symbol", p.symbol], ["Exchange", p.exchange],
+      ["Sector", p.sector], ["Industry", p.industry],
+      ["SIC", p.sic], ["CIK", p.cik],
+      ["Market cap", p.market_cap, "num"],
+      ["Dividend status", d.dividend_status],
+      ["Last split", d.last_split ? (d.last_split.ex_date + " " +
+        d.last_split.type) : "none recorded"]
+    ]);
+    prov(box, p.market_cap_basis ? "Market cap: " + p.market_cap_basis : "");
+    prov(box, d.note);
+  }
+
+  function renderDividends(box, d) {
+    badge(box, "Dividend stock:", d.dividend_stock);
+    table(box, [
+      ["Internal status", d.status], ["Why", d.reason],
+      ["Trailing 12 months", d.trailing_12m_amount, "num"],
+      ["Yield", d.trailing_yield_pct === null ||
+        d.trailing_yield_pct === undefined ? null
+        : d.trailing_yield_pct.toFixed(2) + "%", "num"],
+      ["Typical interval", d.frequency_days ? d.frequency_days + " days" : null],
+      ["Years with payments", d.years_paid, "num"],
+      ["Next ex-date", d.next_ex_date || "not yet announced"],
+      ["Days until ex-date", d.days_until_ex, "num"],
+      ["History window", d.window_years ? d.window_years + " years" : null]
+    ]);
+    var hist = d.history || [];
+    if (hist.length) {
+      box.appendChild(el("h3", null, "Payment history"));
+      var t = el("table", "co-table");
+      var head = el("tr");
+      ["Ex-date", "Amount", "Type", "Pay date"].forEach(function (h) {
+        head.appendChild(el("th", null, h));
+      });
+      t.appendChild(head);
+      hist.slice(0, 16).forEach(function (h) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, h.ex_date));
+        tr.appendChild(el("td", "num", h.amount));
+        tr.appendChild(el("td", null, h.kind === "SPECIAL"
+                                     ? "SPECIAL" : "regular"));
+        tr.appendChild(el("td", null, h.pay_date || "—"));
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+    }
+    prov(box, d.yield_price_basis ? "Yield basis: " + d.yield_price_basis : "");
+    prov(box, "A special distribution is never counted as a regular " +
+              "dividend. The price adjusts down by about the dividend on " +
+              "the ex-date, so it is not free return to a holder.");
+  }
+
+  function renderSplits(box, d) {
+    table(box, [["Recorded splits", d.count, "num"],
+                ["Within the last year", d.recent]]);
+    var tl = d.timeline || [];
+    if (!tl.length) {
+      box.appendChild(el("p", "empty", "No split recorded in the window."));
+      return;
+    }
+    box.appendChild(el("h3", null, "Split timeline"));
+    var ul = el("ul", "reasons");
+    tl.forEach(function (t) {
+      ul.appendChild(el("li", null, t.ex_date + " — " + t.label));
+    });
+    box.appendChild(ul);
+    prov(box, "Direction comes from the ratio, so a 1-for-10 reverse " +
+              "split cannot be shown as a forward one.");
+  }
+
+  function renderEarnings(box, d) {
+    table(box, [["Next report", d.next_earnings_date ||
+                   (d.next_earnings_note || "unknown")],
+                ["Consensus estimates", d.estimates],
+                ["Source", d.source]]);
+    var recs = d.records || [];
+    if (recs.length) {
+      box.appendChild(el("h3", null, "Reported periods"));
+      var t = el("table", "co-table");
+      var head = el("tr");
+      ["Period end", "EPS actual", "EPS estimate", "Surprise", "Revenue"]
+        .forEach(function (h) { head.appendChild(el("th", null, h)); });
+      t.appendChild(head);
+      recs.slice().reverse().forEach(function (r) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, r.period_end));
+        tr.appendChild(el("td", "num", fmt(r.eps_actual)));
+        tr.appendChild(el("td", "num", r.eps_estimate === null
+                          ? "unavailable" : r.eps_estimate));
+        tr.appendChild(el("td", "num", r.eps_surprise === null
+                          ? "—" : r.eps_surprise));
+        tr.appendChild(el("td", "num", fmt(r.revenue_actual)));
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+    }
+    var tr2 = d.trends || {};
+    table(box, [["Observations", tr2.observations, "num"],
+                ["EPS beat/miss", Array.isArray(tr2.eps_beat_miss)
+                  ? tr2.eps_beat_miss.join(", ") : tr2.eps_beat_miss],
+                ["Average EPS surprise", tr2.avg_eps_surprise],
+                ["Profitable quarters", tr2.profitable_quarters]]);
+    prov(box, tr2.estimates_note || "");
+    prov(box, "Reported values, analyst estimates and derived surprises " +
+              "are separate fields; a missing estimate is never inferred.");
+  }
+
+  function renderFundamentals(box, d) {
+    if (d.status === "UNKNOWN") {
+      box.appendChild(el("p", "err", "Unavailable: " + (d.error || "")));
+      return;
+    }
+    table(box, [["Basis", d.basis], ["Latest period end", d.latest_period_end],
+                ["Freshness", d.freshness], ["Source", d.source]]);
+    ["income", "balance", "cash_flow"].forEach(function (section) {
+      var vals = d[section] || {};
+      var keys = Object.keys(vals);
+      if (!keys.length) return;
+      box.appendChild(el("h3", null, section.replace("_", " ")));
+      var t = el("table", "co-table");
+      keys.forEach(function (k) {
+        var v = vals[k];
+        var tr = el("tr");
+        tr.appendChild(el("th", null, k));
+        if (v && typeof v === "object") {
+          tr.appendChild(el("td", "num", fmt(v.value)));
+          tr.appendChild(el("td", null, (v.period_end || "") +
+            (v.form ? " (" + v.form + ")" : "")));
+        } else {
+          tr.appendChild(el("td", "num", "UNKNOWN"));
+          tr.appendChild(el("td", null, ""));
+        }
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+    });
+    box.appendChild(el("h3", null, "Derived"));
+    var dt = el("table", "co-table");
+    (d.derived || []).forEach(function (m) {
+      var tr = el("tr");
+      tr.appendChild(el("th", null, m.metric));
+      tr.appendChild(el("td", "num", typeof m.value === "number"
+        ? m.value.toFixed(4) : "UNKNOWN"));
+      tr.appendChild(el("td", null, m.reason || m.period_end || ""));
+      dt.appendChild(tr);
+    });
+    box.appendChild(dt);
+    ["ttm_revenue", "ttm_net_income"].forEach(function (k) {
+      var t = d[k] || {};
+      prov(box, k + ": " + fmt(t.value) + " — " + (t.reason || ""));
+    });
+  }
+
+  function renderPeers(box, d) {
+    var peers = d.peers || [];
+    if (!peers.length) {
+      box.appendChild(el("p", "empty", "No structured peer found."));
+    } else {
+      var t = el("table", "co-table");
+      var head = el("tr");
+      ["Symbol", "Why it qualifies"].forEach(function (h) {
+        head.appendChild(el("th", null, h));
+      });
+      t.appendChild(head);
+      peers.forEach(function (p) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, p.symbol));
+        tr.appendChild(el("td", null, (p.reasons || []).join(", ")));
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+    }
+    var rejected = d.rejected || [];
+    if (rejected.length) {
+      box.appendChild(el("h3", null, "Rejected candidates"));
+      var ul = el("ul", "reasons");
+      rejected.slice(0, 12).forEach(function (r) {
+        ul.appendChild(el("li", null, r.symbol + " — " +
+                          (r.reasons || []).join(", ")));
+      });
+      box.appendChild(ul);
+    }
+    if ((d.llm_rejected || []).length) {
+      box.appendChild(el("h3", null, "Model suggestions refused"));
+      var ul2 = el("ul", "reasons");
+      d.llm_rejected.forEach(function (r) {
+        ul2.appendChild(el("li", "blocking", r.symbol + " — " + r.reason));
+      });
+      box.appendChild(ul2);
+    }
+    prov(box, "Peers need an industry reason from structured data. A " +
+              "language model may annotate this set; it cannot add to it. " +
+              (d.complete ? "" : (d.candidates_not_yet_profiled || []).length +
+               " universe members are not yet classified."));
+  }
+
+  function renderComparison(box, d) {
+    var t = el("table", "co-table");
+    var head = el("tr");
+    ["Metric", coState.symbol, "Peer median", "Range", "Peers", "Percentile"]
+      .forEach(function (h) { head.appendChild(el("th", null, h)); });
+    t.appendChild(head);
+    (d.metrics || []).forEach(function (m) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, m.metric));
+      var subj = (m.subject || {}).value;
+      tr.appendChild(el("td", "num", typeof subj === "number"
+        ? subj.toFixed(4) : "UNKNOWN"));
+      tr.appendChild(el("td", "num", typeof m.peer_median === "number"
+        ? m.peer_median.toFixed(4) : "—"));
+      tr.appendChild(el("td", "num", typeof m.peer_min === "number"
+        ? m.peer_min.toFixed(3) + " … " + m.peer_max.toFixed(3) : "—"));
+      tr.appendChild(el("td", "num", m.peer_count === undefined
+        ? "—" : m.peer_count));
+      tr.appendChild(el("td", "num", m.subject_percentile === undefined
+        ? "—" : m.subject_percentile + "%"));
+      t.appendChild(tr);
+    });
+    box.appendChild(t);
+    var excluded = [];
+    (d.metrics || []).forEach(function (m) {
+      (m.excluded || []).forEach(function (e) {
+        if (e.reason === "PERIOD_MISMATCH") {
+          excluded.push(e.symbol + " (" + e.peer_period_end + ")");
+        }
+      });
+    });
+    if (excluded.length) {
+      prov(box, "Excluded for period mismatch: " +
+           Array.from(new Set(excluded)).join(", ") +
+           ". Comparing different fiscal periods would describe neither.");
+    }
+    prov(box, d.note);
+  }
+
+  function renderCorporateActions(box, d) {
+    table(box, [["Recorded actions", d.count, "num"],
+                ["Window", d.window_years ? d.window_years + " years" : null]]);
+    if (d.error) box.appendChild(el("p", "err", "Provider: " + d.error));
+    var actions = (d.actions || []).slice().sort(function (a, b) {
+      return (b.ex_date || "") < (a.ex_date || "") ? -1 : 1;
+    });
+    var t = el("table", "co-table");
+    var head = el("tr");
+    ["Type", "Ex-date", "Amount", "Ratio", "Related"].forEach(function (h) {
+      head.appendChild(el("th", null, h));
+    });
+    t.appendChild(head);
+    actions.slice(0, 25).forEach(function (a) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, a.type + (a.special ? " (special)" : "")));
+      tr.appendChild(el("td", null, a.ex_date || a.effective_date || "—"));
+      tr.appendChild(el("td", "num", fmt(a.amount)));
+      tr.appendChild(el("td", "num", a.ratio_new && a.ratio_old
+        ? a.ratio_new + ":" + a.ratio_old : "—"));
+      tr.appendChild(el("td", null, a.related_symbol || "—"));
+      t.appendChild(tr);
+    });
+    box.appendChild(t);
+    prov(box, "Dates the provider did not supply are left blank rather " +
+              "than inferred.");
+  }
+
+  function renderHolding(box, d) {
+    var wrap = el("p");
+    wrap.appendChild(el("strong", null, "Holding context: "));
+    wrap.appendChild(el("span", "co-badge " +
+      (d.label === "FAVORABLE" ? "yes"
+       : d.label === "UNFAVORABLE" ? "no" : "unknown"), d.label));
+    box.appendChild(wrap);
+    box.appendChild(el("p", null, d.why));
+    var t = el("table", "co-table");
+    var head = el("tr");
+    ["Factor", "State", "Why"].forEach(function (h) {
+      head.appendChild(el("th", null, h));
+    });
+    t.appendChild(head);
+    (d.factors || []).forEach(function (f) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, f.factor));
+      tr.appendChild(el("td", null, f.state));
+      tr.appendChild(el("td", null, f.why));
+      t.appendChild(tr);
+    });
+    box.appendChild(t);
+    box.appendChild(el("p", "note warn",
+      "Not an execution instruction. Overnight positions: " +
+      d.overnight_execution + ". There is no composite score."));
+    prov(box, d.note);
+  }
+
+  var CO_RENDER = {
+    "": renderOverview, "dividends": renderDividends, "splits": renderSplits,
+    "earnings": renderEarnings, "fundamentals": renderFundamentals,
+    "peers": renderPeers, "peer-comparison": renderComparison,
+    "corporate-actions": renderCorporateActions,
+    "holding-context": renderHolding
+  };
+
+  function coTabs() {
+    var box = document.getElementById("coTabs");
+    box.innerHTML = "";
+    CO_TABS.forEach(function (pair) {
+      var b = el("button", null, pair[1]);
+      b.type = "button";
+      b.setAttribute("aria-selected", pair[0] === coState.tab ? "true" : "false");
+      b.addEventListener("click", function () {
+        coState.tab = pair[0];
+        coTabs();
+        coLoad();
+      });
+      box.appendChild(b);
+    });
+  }
+
+  function coLoad() {
+    var box = document.getElementById("coBody");
+    box.innerHTML = "";
+    box.appendChild(el("p", "empty", "Loading " + coState.symbol + "…"));
+    coGet(coState.tab).then(function (d) {
+      box.innerHTML = "";
+      (CO_RENDER[coState.tab] || renderOverview)(box, d);
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  document.getElementById("coForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var sym = (document.getElementById("coSymbol").value || "")
+      .trim().toUpperCase();
+    if (!sym) return;
+    coState.symbol = sym;
+    coTabs();
+    coLoad();
+  });
+
   // ---- boot ------------------------------------------------------------
   if (!API) {
     document.getElementById("paperDetail").textContent =
