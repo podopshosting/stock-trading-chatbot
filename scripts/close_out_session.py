@@ -126,12 +126,20 @@ def main() -> int:
         check("cohort classified", bool(cohort),
               cohort.get("evidence_class") if cohort else "none")
         if cohort:
-            check("reconciliation clean across the cohort",
-                  cohort["reconciliation"].get("clean") is True,
-                  f"{cohort['reconciliation'].get('failures')} failures")
-            check("EOD flatten clean across the cohort",
-                  cohort["eod_flatten"].get("clean") is True,
-                  f"{cohort['eod_flatten'].get('failures')} failures")
+            # .get, not indexing: a missing key here would raise at the
+            # one moment this script exists for, and an absent field is
+            # UNKNOWN - which must fail the check, not crash it.
+            for label, key in (("reconciliation clean across the cohort",
+                                "reconciliation"),
+                               ("EOD flatten clean across the cohort",
+                                "eod_flatten")):
+                block = cohort.get(key)
+                if not isinstance(block, dict):
+                    check(label, False, f"{key} not reported by /agent/cohorts")
+                else:
+                    check(label, block.get("clean") is True,
+                          "clean" if block.get("clean") is True
+                          else f"{block.get('failures')} failures")
     else:
         check("cohorts readable", False, f"status={status}")
 
@@ -172,11 +180,11 @@ def render(body, auto, cohort, failed) -> str:
         lines += [
             "", "## Cohort",
             "",
-            f"- Cohort: `{cohort['cohort']}`",
-            f"- Evidence class: **{cohort['evidence_class']}**",
-            f"- Code SHAs: {cohort['code_shas']}",
-            f"- Feed quality: {cohort['feed_quality_counts']}",
-            f"- Versions: {cohort['versions']}",
+            f"- Cohort: `{cohort.get('cohort', 'unknown')}`",
+            f"- Evidence class: **{cohort.get('evidence_class', 'UNKNOWN')}**",
+            f"- Code SHAs: {cohort.get('code_shas', 'not reported')}",
+            f"- Feed quality: {cohort.get('feed_quality_counts', {})}",
+            f"- Versions: {cohort.get('versions', 'not reported')}",
         ]
     lines += ["", "## Close-out checks", "",
               "| Check | Result | Detail |", "|---|---|---|"]
