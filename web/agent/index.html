@@ -1388,11 +1388,17 @@
   // answers {report: null, written: false}, and "not yet written" must
   // read differently from "written and clean" - a blank panel at 15:00
   // would otherwise look like a session with nothing wrong with it.
+  // Keys as the cycle writes them, nested under report.checks. Invented
+  // names here read as "not reported" and look like failures.
   var CLOSEOUT_CHECKS = [
-    ["positions_flat", "all positions flattened"],
+    ["no_positions_open", "all positions flattened"],
     ["broker_flat", "broker reports no positions"],
-    ["cash_ok", "cash reconciles with the journal"],
-    ["journal_complete", "journal complete"]
+    ["cash_reconciles", "cash reconciles with the journal"],
+    ["journal_complete", "journal complete"],
+    ["no_eod_flatten_failure", "no EOD flatten failure"],
+    ["reconciliation_clean", "reconciliation clean"],
+    ["no_emergency_stop", "no emergency stop engaged"],
+    ["ran_during_market_hours", "ran during market hours"]
   ];
   function loadSessionReport() {
     var box = document.getElementById("sessionReport");
@@ -1411,9 +1417,10 @@
       head.appendChild(el("span", "pill " + (r.session_ok ? "up" : "down"),
         r.session_ok ? "CLEAN" : "NOT CLEAN"));
       box.appendChild(head);
+      var checks = r.checks || {};
       var t = el("table", "co-table");
       CLOSEOUT_CHECKS.forEach(function (c) {
-        var v = r[c[0]];
+        var v = checks[c[0]];
         var tr = el("tr");
         tr.appendChild(el("th", null, c[1]));
         // Three states, not two: an unknown check is not a passed one.
@@ -1422,9 +1429,13 @@
           v === true ? "PASS" : v === false ? "FAIL" : "UNKNOWN"));
         t.appendChild(tr);
       });
-      [["positions open at close", r.positions_open],
-       ["realized P&L", r.realized_pnl],
-       ["trades closed", r.trades_closed]].forEach(function (row) {
+      [["realized P&L", r.realized_pnl],
+       ["trades", r.trades],
+       ["zero-trade day", r.zero_trade_day],
+       ["closing cash", (r.cash || {}).actual],
+       ["expected cash", (r.cash || {}).expected],
+       ["failed checks", (r.failed_checks || []).join(", ") || "none"]
+      ].forEach(function (row) {
         var tr = el("tr");
         tr.appendChild(el("th", null, row[0]));
         tr.appendChild(el("td", "num",

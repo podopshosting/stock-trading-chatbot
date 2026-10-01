@@ -83,25 +83,50 @@ def main() -> int:
           str(report.get("session_date", "")))
 
     # --- the things that must be true -------------------------------
-    for name, key in (("all positions flattened", "positions_flat"),
-                      ("broker reports no positions", "broker_flat"),
-                      ("cash reconciles with the journal", "cash_ok"),
-                      ("journal complete", "journal_complete")):
-        value = body.get(key)
-        check(name, value is True,
-              "unknown" if value is None else str(value))
+    #
+    # The cycle nests these under "checks", and the names are its own.
+    # An earlier version of this script invented top-level keys
+    # (positions_flat, cash_ok) that the writer never emits, so every one
+    # of them read None, became "unknown", and failed. A close-out that
+    # reports NOT CLEAN because it misspelled the field is worse than no
+    # close-out, because the first instinct is to go looking for a
+    # trading fault that is not there.
+    READABLE = {
+        "no_positions_open": "all positions flattened",
+        "broker_flat": "broker reports no positions",
+        "cash_reconciles": "cash reconciles with the journal",
+        "journal_complete": "journal complete",
+        "no_eod_flatten_failure": "no EOD flatten failure",
+        "reconciliation_clean": "reconciliation clean",
+        "no_emergency_stop": "no emergency stop engaged",
+        "ran_during_market_hours": "ran during market hours",
+    }
+    checks_block = body.get("checks")
+    if not isinstance(checks_block, dict):
+        check("per-check results present", False,
+              "the report carries no 'checks' block")
+    else:
+        for key, name in READABLE.items():
+            value = checks_block.get(key)
+            check(name, value is True,
+                  "not reported" if value is None else str(value))
+        unknown = [k for k in READABLE if k not in checks_block]
+        if unknown:
+            check("every expected check was reported", False,
+                  f"missing: {sorted(unknown)}")
 
     realized = body.get("realized_pnl")
     check("realized P&L recorded", realized is not None,
           "unknown" if realized is None else f"{realized}")
 
-    check("no residual open positions",
-          body.get("positions_open") in (0, None) and
-          body.get("positions_flat") is True,
-          f"open={body.get('positions_open')}")
+    cash = body.get("cash") or {}
+    check("closing cash recorded", cash.get("actual") is not None,
+          f"actual={cash.get('actual')} expected={cash.get('expected')}")
 
     check("session_ok derived clean", body.get("session_ok") is True,
-          str(body.get("session_ok")))
+          str(body.get("session_ok"))
+          + (f"; failed: {body.get('failed_checks')}"
+             if body.get("failed_checks") else ""))
 
     # --- live state after the close ----------------------------------
     status, auto = get(f"{base}agent/autonomy")
