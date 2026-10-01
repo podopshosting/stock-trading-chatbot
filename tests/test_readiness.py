@@ -367,3 +367,39 @@ class TestStrategyGatesRequireRealTimeEvidence(unittest.TestCase):
                         pilot={"counts_toward_strategy_gates": False,
                                "evidence_class": "OPERATIONAL_VALIDATION_ONLY"})
         self.assertFalse(report.ready)
+
+
+class TestEveryGateIsReported(unittest.TestCase):
+    """
+    A report that lists failures and hides passes cannot be audited, and
+    "10 of 11 unmet" never says which one is met.
+    """
+
+    def report(self):
+        return assess(performance={"verdict": "NO_EDGE_DEMONSTRATED"},
+                      pilot={"sessions_completed": 1}).as_dict()
+
+    def test_all_gates_are_present_not_only_the_unmet_ones(self):
+        body = self.report()
+        self.assertEqual(len(body["gates"]), body["gates_total"])
+        self.assertGreaterEqual(body["gates_total"], 11)
+
+    def test_the_counts_agree_with_the_lists(self):
+        body = self.report()
+        unmet = [g for g in body["gates"] if g["status"] != "MET"]
+        self.assertEqual(len(unmet), body["gates_unmet"])
+        self.assertEqual(body["gates_met"],
+                         body["gates_total"] - body["gates_unmet"])
+
+    def test_every_gate_carries_its_state_and_its_reason(self):
+        for gate in self.report()["gates"]:
+            with self.subTest(gate=gate["name"]):
+                self.assertIn(gate["status"],
+                              ("MET", "UNMET", "UNKNOWN", "BLOCKED"))
+                self.assertTrue(gate["why"])
+                self.assertIn("category", gate)
+
+    def test_evidence_and_operations_gates_are_distinguishable(self):
+        categories = {g["category"] for g in self.report()["gates"]}
+        self.assertIn("EVIDENCE", categories)
+        self.assertIn("OPERATIONS", categories)

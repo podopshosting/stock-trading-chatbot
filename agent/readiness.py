@@ -128,6 +128,10 @@ class ReadinessReport:
             "gates_met": len(self.gates) - len(self.unmet),
             "gates_unmet": len(self.unmet),
             "gates_blocked": len(self.blocked),
+            # Every gate, not only the unmet ones: a report that lists
+            # what failed and hides what passed cannot be audited, and
+            # "10 of 11 unmet" does not say which one is met.
+            "gates": [g.as_dict() for g in self.gates],
             "unmet": [g.as_dict() for g in self.unmet],
             "by_category": self.by_category(),
             "assessed_at": self.assessed_at,
