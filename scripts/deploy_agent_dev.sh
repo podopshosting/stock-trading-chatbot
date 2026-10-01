@@ -23,6 +23,33 @@ trap 'rm -rf "$BUILD"' EXIT
 
 target="${1:-all}"
 
+# A deploy over a red suite is how a broken invariant reaches a running
+# system. On 2026-10-01 the shadow store was added under agent/broker,
+# three tests said the read API must not import a broker, and it was
+# deployed anyway because the test output had been filtered through grep
+# rather than gated on. The suite now gates the deploy.
+#
+# AGENT_DEPLOY_SKIP_TESTS=1 exists for a genuine emergency and prints a
+# warning, because a silent escape hatch is the same bug again.
+run_test_gate() {
+  if [ "${AGENT_DEPLOY_SKIP_TESTS:-0}" = "1" ]; then
+    echo "WARNING: test gate SKIPPED by AGENT_DEPLOY_SKIP_TESTS=1" >&2
+    return 0
+  fi
+  echo "==> test gate"
+  if ! ( cd "$REPO" && python3 -m unittest discover -s tests -t . \
+            > /tmp/agent-deploy-tests.log 2>&1 ); then
+    echo "FATAL: the test suite is RED; refusing to deploy." >&2
+    grep -E '^(FAIL|ERROR):' /tmp/agent-deploy-tests.log | head -20 >&2
+    tail -3 /tmp/agent-deploy-tests.log >&2
+    exit 1
+  fi
+  tail -1 /tmp/agent-deploy-tests.log | sed 's/^/    /'
+  grep -E '^Ran ' /tmp/agent-deploy-tests.log | sed 's/^/    /'
+}
+
+
+
 deploy_lambda() {
   echo "==> packaging $FUNCTION"
   cp "$REPO/lambda-micro/agent-api/handler.py" "$BUILD/"
@@ -182,6 +209,8 @@ deploy_ui() {
     --region "$REGION" --profile "$PROFILE"
   echo "    http://$BUCKET.s3-website.$REGION.amazonaws.com/agent/"
 }
+
+run_test_gate
 
 case "$target" in
   lambda) deploy_lambda ;;

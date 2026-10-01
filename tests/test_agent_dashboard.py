@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
@@ -156,12 +157,16 @@ class TestNoExecutionPath(unittest.TestCase):
         Fail closed in the REPORT as well as in the engine. Showing it
         as "unknown" would invite someone to assume it was clear.
 
-        There is no DynamoDB table in the test environment, so this
-        exercises the real unreadable path - but note that the store
-        itself fails closed internally, so this test alone does not
-        prove the HANDLER would. The next test covers that layer.
+        The store is forced to fail rather than relying on there being
+        no DynamoDB table: with AWS credentials present the read
+        SUCCEEDS and the test passed only by accident of environment.
         """
-        code, body = call("/agent/switches")
+        from agent.risk import DynamoDBHaltStore
+
+        def boom(*_a, **_k):
+            raise RuntimeError("halt store unreadable")
+        with mock.patch.object(DynamoDBHaltStore, "get", boom):
+            code, body = call("/agent/switches")
         self.assertEqual(code, 200)
         self.assertTrue(body["global_halt"])
         self.assertIn("unreadable", body["global_halt_detail"])
@@ -255,11 +260,37 @@ class TestReadEndpoints(unittest.TestCase):
 
     def test_total_open_risk_is_none_not_zero_when_unknown(self):
         """
-        Zero would claim there is no risk. None says we do not know,
-        and an understated risk total is worse than no total.
+        Zero would claim there is no risk. None says we do not know, and
+        an understated risk total is worse than no total.
+
+        The store is stubbed: once /agent/positions began reading the
+        real store, this assertion depended on what happened to be in
+        the live table, and it failed the moment two positions were
+        genuinely open.
         """
-        _code, body = call("/agent/positions")
+        from agent.positions import DynamoDBPositionStore
+        with mock.patch.object(DynamoDBPositionStore, "load_open",
+                               lambda *_a, **_k: []):
+            _code, body = call("/agent/positions")
         self.assertIsNone(body["total_open_risk"])
+        self.assertEqual(body["open_count"], 0)
+
+    def test_open_risk_is_summed_when_it_is_known(self):
+        """The control: without it, the assertion above would hold even
+        if the endpoint could never report a risk total at all."""
+        from agent.positions import DynamoDBPositionStore
+
+        class Row:
+            def __init__(self, risk):
+                self._risk = risk
+
+            def as_dict(self):
+                return {"symbol": "AAA", "open_risk": self._risk}
+        with mock.patch.object(DynamoDBPositionStore, "load_open",
+                               lambda *_a, **_k: [Row(0.25), Row(0.17)]):
+            _code, body = call("/agent/positions")
+        self.assertEqual(body["open_count"], 2)
+        self.assertAlmostEqual(body["total_open_risk"], 0.42)
 
     def test_hypothesis_requires_a_symbol(self):
         code, body = call("/agent/hypothesis")
