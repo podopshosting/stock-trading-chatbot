@@ -71,7 +71,7 @@ from agent.autonomy import (
     classify_question, explain as explain_question, next_cycle_time,
 )
 from agent.positions import DynamoDBPositionStore
-from agent.broker.shadow_store import DynamoDBShadowStore
+from agent.autonomy.shadow_store import DynamoDBShadowStore, summarise_shadow
 from agent.company.service import CompanyService
 from agent.company.store import DynamoDBCompanyStore
 from agent.company.providers.alpaca_corporate_actions import AlpacaCorporateActions
@@ -1598,7 +1598,6 @@ def handle_shadow(event) -> Dict:
     and "no comparisons exist" are not the same claim, and only one of
     them is evidence that the simulator is calibrated.
     """
-    from agent.broker.shadow import summarise
     session_date = _query(event).get("date") or today_market_date()
     cfg, journal_table = _autonomy_tables()
     rows, read_error = _safe(lambda: DynamoDBShadowStore(
@@ -1624,7 +1623,7 @@ def handle_shadow(event) -> Dict:
         body["summary"] = None
     else:
         body["state"] = "RECORDED"
-        body["summary"], _ = _safe(lambda: summarise(rows))
+        body["summary"], _ = _safe(lambda: summarise_shadow(rows))
     return _response(200, body)
 
 

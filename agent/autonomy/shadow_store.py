@@ -2,9 +2,10 @@
 Persistence for shadow comparisons.
 
 One record per external paper order: what the internal simulator expected
-and what the venue actually did. Separate from the broker state store
-because these are observations about execution quality, not positions,
-and they must survive independently of whatever the broker says now.
+and what the venue actually did. It lives under `autonomy`, not `broker`: these are observations about
+execution quality rather than a way to execute, and the dev read API is
+forbidden from importing any broker module - a read surface that can
+reach a broker is one step from being able to submit.
 
 Written by the cycle when an external venue is in use. Until then the
 store is simply empty, and an empty store is reported as "no comparisons
@@ -16,6 +17,50 @@ import json
 import os
 from dataclasses import asdict, is_dataclass
 from typing import Dict, List, Optional
+
+
+def summarise_shadow(rows: List[Dict]) -> Dict:
+    """Aggregate the comparison, with n and without a verdict.
+
+    No judgement on the simulator's quality: a handful of fills cannot
+    establish that it models the venue, so the sample size is reported
+    and the conclusion is left open.
+    """
+    rows = [r for r in (rows or []) if r]
+    paired = [r for r in rows
+              if isinstance(r.get("internal_fill_price"), (int, float))
+              and isinstance(r.get("broker_fill_price"), (int, float))]
+    out = {
+        "comparisons": len(rows),
+        "both_filled": len(paired),
+        "broker_rejections": sum(
+            1 for r in rows if r.get("broker_reject_reason")),
+        "internal_rejections": sum(
+            1 for r in rows if r.get("internal_reject_reason")),
+        "partial_fills": sum(
+            1 for r in rows
+            if isinstance(r.get("broker_fill_quantity"), (int, float))
+            and isinstance(r.get("requested_quantity"), (int, float))
+            and r["broker_fill_quantity"] < r["requested_quantity"]),
+        "duplicate_broker_submissions": sum(
+            1 for r in rows if (r.get("submitted_to_broker_count") or 0) > 1),
+    }
+    if paired:
+        diffs = [r["broker_fill_price"] - r["internal_fill_price"]
+                 for r in paired]
+        out["mean_price_difference"] = round(sum(diffs) / len(diffs), 6)
+        out["max_abs_price_difference"] = round(
+            max(abs(d) for d in diffs), 6)
+    else:
+        out["mean_price_difference"] = None
+        out["max_abs_price_difference"] = None
+    out["verdict"] = (
+        "INSUFFICIENT_SAMPLE" if len(paired) < 20 else "SAMPLE_ADEQUATE")
+    out["note"] = ("A difference between the simulator and the venue is "
+                   "information about the simulator, not about the "
+                   "strategy. No conclusion is drawn below 20 paired "
+                   "fills.")
+    return out
 
 
 class ShadowStore:

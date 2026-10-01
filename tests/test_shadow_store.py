@@ -13,7 +13,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.broker.shadow import ShadowRecord                      # noqa: E402
-from agent.broker.shadow_store import (                           # noqa: E402
+from agent.autonomy.shadow_store import (                           # noqa: E402
     DynamoDBShadowStore, InMemoryShadowStore,
 )
 
