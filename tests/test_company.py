@@ -160,3 +160,48 @@ class TestCadenceIsJudgedOnTheMajorityNotTheWorstPair(unittest.TestCase):
         from datetime import timedelta
         self.assertEqual(classify(events, last + timedelta(days=400)).status,
                          DividendStatus.SUSPENDED)
+
+
+class TestNextExDateAlwaysCarriesAReason(unittest.TestCase):
+    """A bare null cannot distinguish "none has been declared" from "we
+    did not look", and only one of those is a fact about the company.
+    On 2026-10-01 GIS, AAPL and COST all read null here while paying on
+    a 91-day rhythm, so the next date is trivially guessable - which is
+    exactly why the field has to say it is not guessed.
+    """
+
+    def build(self, upcoming, payer):
+        ev = quarterly() if payer else []
+        if upcoming:
+            ev = ev + [DividendEvent("2026-10-09", 0.61)]
+        return with_metrics(classify(ev, TODAY), ev, TODAY, 100.0, "asof")
+
+    def test_a_declared_date_is_marked_as_relayed_not_measured(self):
+        p = self.build(upcoming=True, payer=True)
+        self.assertEqual(p.next_ex_date, "2026-10-09")
+        self.assertIn("relayed claim", p.next_ex_note)
+
+    def test_a_payer_with_no_declared_date_says_not_yet_announced(self):
+        p = self.build(upcoming=False, payer=True)
+        self.assertIsNone(p.next_ex_date)
+        self.assertIn("not yet announced", p.next_ex_note)
+
+    def test_the_note_refuses_cadence_inference_explicitly(self):
+        p = self.build(upcoming=False, payer=True)
+        self.assertIn("never inferred from the payment cadence",
+                      p.next_ex_note)
+
+    def test_a_non_payer_is_distinguished_from_an_unannounced_payer(self):
+        p = self.build(upcoming=False, payer=False)
+        self.assertIn("none expected", p.next_ex_note)
+        self.assertNotIn("not yet announced", p.next_ex_note)
+
+    def test_the_note_is_never_absent(self):
+        for up in (True, False):
+            for payer in (True, False):
+                with self.subTest(upcoming=up, payer=payer):
+                    self.assertTrue(self.build(up, payer).next_ex_note)
+
+    def test_the_date_itself_is_unchanged_by_the_note(self):
+        """The control: a note must not alter what is reported."""
+        self.assertEqual(self.build(True, True).days_until_ex, 8)

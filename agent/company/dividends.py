@@ -91,4 +91,21 @@ def with_metrics(profile: DividendProfile, events: Sequence[DividendEvent],
     if upcoming:
         profile.next_ex_date = upcoming[0].ex_date
         profile.days_until_ex = (_d(upcoming[0].ex_date) - today).days
+        profile.next_ex_note = (
+            "declared in the corporate-actions feed; a relayed claim, not "
+            "a measurement - companies do move these dates")
+    elif profile.pays_dividend:
+        # Deliberately not inferred from the payment cadence. A payer on a
+        # 91-day rhythm makes the next date easy to guess, and a guess
+        # presented in the same field as a declared date is worse than a
+        # null, because a reader cannot tell which they were given.
+        profile.next_ex_note = (
+            "no upcoming ex-dividend date has been declared in the "
+            "corporate-actions feed; companies usually declare one quarter "
+            "at a time, so this means 'not yet announced' rather than "
+            "'none coming'. It is never inferred from the payment cadence")
+    else:
+        profile.next_ex_note = (
+            "no upcoming ex-dividend date, and none expected: no regular "
+            "dividend was found")
     return profile

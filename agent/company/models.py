@@ -96,6 +96,10 @@ class DividendProfile:
     last_regular: Optional[DividendEvent] = None
     next_ex_date: Optional[str] = None
     days_until_ex: Optional[int] = None
+    # Why there is no date, when there is none. A bare null cannot
+    # distinguish "none has been declared" from "we never looked", and
+    # the two warrant different responses from a reader.
+    next_ex_note: Optional[str] = None
     trailing_12m_amount: Optional[float] = None
     trailing_yield_pct: Optional[float] = None
     yield_price_basis: Optional[str] = None   # which price, as of when
