@@ -734,5 +734,46 @@ class TestEvidenceAccumulation(unittest.TestCase):
         self.assertGreaterEqual(evidence["live_market_cycles"], 2)
 
 
+class TestQuoteLoaderWithRealProviderTypes(unittest.TestCase):
+    """The handler's fakes returned plain floats; the real provider returns
+    Quote/Provenance objects. Live defect 2026-10-01: age_seconds was
+    returned as an uncalled method and aborted the first live cycle that
+    reached the Risk Governor."""
+
+    def loader(self, quote):
+        class Cached:
+            def get_quote(self, symbol):
+                return quote
+        return load_handler()._quote_loader(Cached(), object())
+
+    def real_quote(self, **kw):
+        from agent.providers.base import Quote, Provenance
+        import time as _t
+        return Quote(symbol="MSFT", price=100.0, bid=99.95, ask=100.05,
+                     volume=500_000,
+                     provenance=Provenance("alpaca", _t.time() - 30), **kw)
+
+    def test_age_is_a_number_not_a_method(self):
+        q = self.loader(self.real_quote())("MSFT")
+        self.assertIsInstance(q["age_seconds"], float)
+        self.assertGreaterEqual(q["age_seconds"], 30)
+        self.assertTrue(q["age_seconds"] > 0)          # the failing comparison
+
+    def test_dollar_volume_is_derived_from_volume(self):
+        q = self.loader(self.real_quote())("MSFT")
+        self.assertEqual(q["dollar_volume"], 100.0 * 500_000)
+
+    def test_unknown_volume_stays_unknown_not_zero(self):
+        from agent.providers.base import Quote, Provenance
+        import time as _t
+        quote = Quote(symbol="X", price=10.0, provenance=Provenance("a", _t.time()))
+        self.assertIsNone(self.loader(quote)("X")["dollar_volume"])
+
+    def test_the_governor_accepts_the_loaded_quote_end_to_end(self):
+        from agent.risk import RiskLimits
+        q = self.loader(self.real_quote())("MSFT")
+        self.assertFalse(q["age_seconds"] > RiskLimits().max_quote_age_seconds)
+
+
 if __name__ == "__main__":
     unittest.main()

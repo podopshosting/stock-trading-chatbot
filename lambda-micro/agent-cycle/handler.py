@@ -403,9 +403,19 @@ def _quote_loader(cached, broker):
         if bid and ask and ask > 0:
             spread_pct = (ask - bid) / ((ask + bid) / 2) * 100.0
         provenance = getattr(quote, "provenance", None)
+        # Provenance.age_seconds is a METHOD. Returning it uncalled put a
+        # bound method into the Risk Governor's "> max age" comparison and
+        # aborted the first live cycle that reached a hypothesis.
+        age = getattr(provenance, "age_seconds", None)
+        age = age() if callable(age) else age
+        # The provider Quote carries session volume, not dollar volume.
+        # Unknown stays None (the governor refuses on unknown).
+        volume = getattr(quote, "volume", None)
+        dollar_volume = getattr(quote, "dollar_volume", None)
+        if dollar_volume is None and volume:
+            dollar_volume = price * volume
         return {"price": price, "spread_pct": spread_pct,
-                "dollar_volume": getattr(quote, "dollar_volume", None),
-                "age_seconds": getattr(provenance, "age_seconds", None)}
+                "dollar_volume": dollar_volume, "age_seconds": age}
     return quote_for
 
 
