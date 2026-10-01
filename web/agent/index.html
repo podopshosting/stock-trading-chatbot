@@ -225,6 +225,18 @@
     <div id="whyNoTrade"><p class="empty">Loading…</p></div>
   </section>
 
+  <!-- End-of-day close-out. Absent until the cycle writes it at the close. -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Session close-out</h2>
+    <div id="sessionReport"><p class="empty">Loading…</p></div>
+  </section>
+
+  <!-- Shadow orders: what would have been submitted, never submitted -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Shadow orders</h2>
+    <div id="shadow"><p class="empty">Loading…</p></div>
+  </section>
+
   <!-- Evidence cohorts, never pooled -->
   <section class="card" style="margin-bottom:var(--gap)">
     <h2>Evidence cohorts</h2>
@@ -1290,7 +1302,6 @@
       box.innerHTML = "";
       box.appendChild(el("p", null, d.headline));
       var f = d.funnel || {};
-      kv(el("dl"), []);  // no-op to keep helpers referenced
       var t = el("table", "co-table");
       [["symbols scanned", f.symbols_scanned],
        ["decisions recorded", f.decisions_recorded],
@@ -1325,6 +1336,106 @@
         box.appendChild(st);
       }
       box.appendChild(el("p", "co-prov", d.note || ""));
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  // ---- session close-out -----------------------------------------------
+  // The cycle writes this at MARKET_CLOSED. Before then the endpoint
+  // answers {report: null, written: false}, and "not yet written" must
+  // read differently from "written and clean" - a blank panel at 15:00
+  // would otherwise look like a session with nothing wrong with it.
+  var CLOSEOUT_CHECKS = [
+    ["positions_flat", "all positions flattened"],
+    ["broker_flat", "broker reports no positions"],
+    ["cash_ok", "cash reconciles with the journal"],
+    ["journal_complete", "journal complete"]
+  ];
+  function loadSessionReport() {
+    var box = document.getElementById("sessionReport");
+    get("/agent/session-report").then(function (d) {
+      box.innerHTML = "";
+      var r = d.report;
+      if (!d.written || !r) {
+        box.appendChild(el("p", "empty",
+          "Not yet written. The cycle writes the close-out at the market "
+          + "close, so this is blank during the session rather than clean."));
+        return;
+      }
+      var head = el("h3");
+      head.appendChild(document.createTextNode(
+        (d.session_date || r.session_date || "") + " "));
+      head.appendChild(el("span", "pill " + (r.session_ok ? "up" : "down"),
+        r.session_ok ? "CLEAN" : "NOT CLEAN"));
+      box.appendChild(head);
+      var t = el("table", "co-table");
+      CLOSEOUT_CHECKS.forEach(function (c) {
+        var v = r[c[0]];
+        var tr = el("tr");
+        tr.appendChild(el("th", null, c[1]));
+        // Three states, not two: an unknown check is not a passed one.
+        tr.appendChild(el("td", "pill " + (v === true ? "up" :
+          v === false ? "down" : "flat"),
+          v === true ? "PASS" : v === false ? "FAIL" : "UNKNOWN"));
+        t.appendChild(tr);
+      });
+      [["positions open at close", r.positions_open],
+       ["realized P&L", r.realized_pnl],
+       ["trades closed", r.trades_closed]].forEach(function (row) {
+        var tr = el("tr");
+        tr.appendChild(el("th", null, row[0]));
+        tr.appendChild(el("td", "num",
+          row[1] === null || row[1] === undefined ? "unknown" : fmt(row[1])));
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+      box.appendChild(el("p", "co-prov",
+        "A check that could not be performed reads UNKNOWN, not PASS: an "
+        + "unverifiable close-out is not a clean one."));
+    }).catch(function (e) { showError(box, e); });
+  }
+
+  // ---- shadow orders ---------------------------------------------------
+  // Orders the agent would have submitted. Recording them is how an
+  // execution change can be assessed without placing one, so the panel
+  // has to be explicit that nothing here was sent.
+  function loadShadow() {
+    var box = document.getElementById("shadow");
+    get("/agent/shadow").then(function (d) {
+      box.innerHTML = "";
+      var rows = d.shadow_orders || d.orders || [];
+      var sum = d.summary || {};
+      box.appendChild(el("p", null,
+        "Recorded, never submitted. These are the orders the agent would "
+        + "have placed, kept so an execution path can be compared against "
+        + "the one that ran without any order reaching a broker."));
+      if (!rows.length) {
+        box.appendChild(el("p", "empty",
+          "No shadow orders recorded. The recorder is not yet wired into "
+          + "the submit path, which is a deliberately separate deployment "
+          + "with its own cohort boundary."));
+        return;
+      }
+      var t = el("table", "co-table");
+      var head = el("tr");
+      ["Symbol", "Side", "Quantity", "Intended price", "Recorded at",
+       "Reason"].forEach(function (h) { head.appendChild(el("th", null, h)); });
+      t.appendChild(head);
+      rows.slice(0, 40).forEach(function (o) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, o.symbol));
+        tr.appendChild(el("td", null, o.side));
+        tr.appendChild(el("td", "num", fmt(o.quantity)));
+        tr.appendChild(el("td", "num", fmt(o.intended_price || o.price)));
+        tr.appendChild(el("td", null, o.recorded_at || o.created_at || ""));
+        tr.appendChild(el("td", null, o.reason || ""));
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+      if (sum.count !== undefined) {
+        box.appendChild(el("p", "co-prov",
+          sum.count + " recorded; " + fmt(sum.notional) + " notional, none "
+          + "of it placed."));
+      }
     }).catch(function (e) { showError(box, e); });
   }
 
@@ -1391,6 +1502,8 @@
   }
   loadReadiness();
   loadWhyNoTrade();
+  loadSessionReport();
+  loadShadow();
   loadCohorts();
   loadAutonomy();
   setInterval(loadAutonomy, 60000);
