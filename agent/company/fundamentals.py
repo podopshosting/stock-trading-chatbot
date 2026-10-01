@@ -166,6 +166,29 @@ def yoy_growth(periods: Sequence[FinancialPeriod], want: str,
             "prior_period_end": p0.period_end}
 
 
+def instant_at(periods: Sequence[FinancialPeriod],
+               end: str) -> Optional[FinancialPeriod]:
+    """The balance-sheet value dated exactly `end` (latest filed wins)."""
+    c = [p for p in collapse_instants(periods) if p.period_end == end]
+    return c[-1] if c else None
+
+
+def collapse_instants(periods: Sequence[FinancialPeriod]):
+    return collapse(periods, "INSTANT")
+
+
+def latest_common_instant(facts, a: str, b: str):
+    """Most recent date at which BOTH balance-sheet concepts are reported,
+    so a ratio never divides a May figure by an August one."""
+    ea = {p.period_end for p in collapse_instants(facts.get(a, []))}
+    eb = {p.period_end for p in collapse_instants(facts.get(b, []))}
+    common = sorted(ea & eb)
+    if not common:
+        return None, None
+    end = common[-1]
+    return (instant_at(facts[a], end), instant_at(facts[b], end))
+
+
 def summarise(facts: Dict[str, List[FinancialPeriod]], today: date) -> Dict:
     """Annual-basis fundamentals (latest fiscal year) plus the latest
     quarter, TTM, and freshness. Every number names its period."""
@@ -181,6 +204,15 @@ def summarise(facts: Dict[str, List[FinancialPeriod]], today: date) -> Dict:
                "period_end": ocf.period_end,
                "inputs": ["operating_cash_flow", "capex"]}
     cur = inst("current_assets")
+    # Ratios pair inputs at one date. Debt/equity and the current ratio use
+    # the latest date both sides are reported; ROA/ROE use the balance at
+    # the fiscal year end the net income covers.
+    debt_p, eq_p = latest_common_instant(facts, "total_debt", "equity")
+    ca_p, cl_p = latest_common_instant(facts, "current_assets",
+                                       "current_liabilities")
+    ni_end = ni.period_end if ni else None
+    ta_fy = instant_at(facts.get("total_assets", []), ni_end) if ni_end else None
+    eq_fy = instant_at(facts.get("equity", []), ni_end) if ni_end else None
     out = {
         "basis": "latest fiscal year (reported)",
         "income": {k: _val(p) for k, p in
@@ -199,10 +231,10 @@ def summarise(facts: Dict[str, List[FinancialPeriod]], today: date) -> Dict:
             ratio(gp, rev, "gross_margin"),
             ratio(op, rev, "operating_margin"),
             ratio(ni, rev, "net_margin"),
-            ratio(inst("total_debt"), inst("equity"), "debt_to_equity"),
-            ratio(cur, inst("current_liabilities"), "current_ratio"),
-            ratio(ni, inst("total_assets"), "return_on_assets"),
-            ratio(ni, inst("equity"), "return_on_equity"),
+            ratio(debt_p, eq_p, "debt_to_equity"),
+            ratio(ca_p, cl_p, "current_ratio"),
+            ratio(ni, ta_fy, "return_on_assets"),
+            ratio(ni, eq_fy, "return_on_equity"),
         ],
         "ttm_revenue": ttm(facts.get("revenue", [])),
         "ttm_net_income": ttm(facts.get("net_income", [])),

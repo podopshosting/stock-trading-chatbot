@@ -134,6 +134,32 @@ class TestDerived(unittest.TestCase):
         self.assertEqual(dte["value"], F.UNKNOWN)
 
 
+class TestBalanceSheetAlignment(unittest.TestCase):
+    def test_debt_to_equity_uses_the_latest_date_both_exist(self):
+        facts = {"total_debt": [P("total_debt", 100, None, "2026-05-31", fp="FY", form="10-K")],
+                 "equity": [P("equity", 50, None, "2026-05-31", fp="FY", form="10-K"),
+                            P("equity", 60, None, "2026-08-30", fp="Q1")]}
+        s = F.summarise(facts, date(2026, 10, 1))
+        d = [x for x in s["derived"] if x["metric"] == "debt_to_equity"][0]
+        self.assertEqual(d["value"], 2.0)            # May debt / May equity
+        self.assertEqual(d["period_end"], "2026-05-31")
+
+    def test_no_common_date_is_unknown_not_a_mixed_ratio(self):
+        facts = {"total_debt": [P("total_debt", 100, None, "2026-05-31")],
+                 "equity": [P("equity", 60, None, "2026-08-30")]}
+        s = F.summarise(facts, date(2026, 10, 1))
+        d = [x for x in s["derived"] if x["metric"] == "debt_to_equity"][0]
+        self.assertEqual(d["value"], F.UNKNOWN)
+
+    def test_roe_uses_the_balance_at_the_year_end_of_the_income(self):
+        facts = {"net_income": [P("net_income", 10, "2025-06-01", "2026-05-31", fp="FY")],
+                 "equity": [P("equity", 100, None, "2026-05-31"),
+                            P("equity", 999, None, "2026-08-30")]}
+        s = F.summarise(facts, date(2026, 10, 1))
+        d = [x for x in s["derived"] if x["metric"] == "return_on_equity"][0]
+        self.assertEqual(d["value"], 0.1)
+
+
 class TestSecProvider(unittest.TestCase):
     PAYLOAD = {"facts": {"us-gaap": {
         "Revenues": {"units": {"USD": [

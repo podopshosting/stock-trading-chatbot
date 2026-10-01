@@ -30,7 +30,7 @@ FUND_TTL = 24 * 3600
 HISTORY_YEARS = 10
 # Bump when normalisation logic changes: cached derived snapshots from an
 # older method are then ignored instead of served for another 24 hours.
-FUND_METHOD = "fundamentals-v1.1"
+FUND_METHOD = "fundamentals-v1.2"
 CANDIDATE_BUDGET = 25          # new candidate profiles per request
 
 
