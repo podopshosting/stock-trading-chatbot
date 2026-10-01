@@ -66,6 +66,9 @@ CO_DIVS = REPO / "agent" / "company" / "dividends.py"
 CO_SPLITS = REPO / "agent" / "company" / "splits.py"
 CO_MODELS = REPO / "agent" / "company" / "models.py"
 CO_EVIDENCE = REPO / "agent" / "autonomy" / "evidence_class.py"
+PROV_BASE = REPO / "agent" / "providers" / "base.py"
+RISK_GOV2 = REPO / "agent" / "risk" / "governor.py"
+BRK_ALPACA = REPO / "agent" / "broker" / "alpaca_paper.py"
 POS_EXITS = REPO / "agent" / "positions" / "exits.py"
 POS_MANAGER = REPO / "agent" / "positions" / "manager.py"
 
@@ -385,11 +388,11 @@ MUTATIONS = [
         name="accept-stale-prices",
         description="treat an unknown or stale quote as usable",
         path=RISK_GOV,
-        old="    if context.quote_age_seconds is None:\n"
+        old="    if context.source_age_seconds is None:\n"
             "        rej.add(RejectionCode.STALE_MARKET_DATA,",
         new="    if False:  # MUTATION\n"
             "        rej.add(RejectionCode.STALE_MARKET_DATA,",
-        expect=["stale", "quote_age", "fail_closed"],
+        expect=["stale", "unknown", "data age", "fail_closed"],
     ),
     Mutation(
         name="ignore-emergency-stop",
@@ -1516,6 +1519,63 @@ MUTATIONS = [
         old='    if len(shas) > 1:',
         new='    if False:  # MUTATION',
         expect=['redeploy', 'void', 'span', 'runtime'],
+    ),
+    # --- real-time data path and paper-only enforcement -----------
+    Mutation(
+        name='freshness-from-fetch-not-from-the-quote',
+        description='fall back to the fetch age when the provider gave no timestamp',
+        path=PROV_BASE,
+        old='        if not self.as_of:\n            return None',
+        new='        if not self.as_of:\n            return self.age_seconds(now)  # MUTATION',
+        expect=['unknown', 'fallback', 'fetch', 'freshness', 'source'],
+    ),
+    Mutation(
+        name='governor-checks-the-fetch-age',
+        description='check how long ago we downloaded the quote, not how old it is',
+        path=RISK_GOV2,
+        old='    if context.source_age_seconds is None:',
+        new='    if context.quote_age_seconds is None:  # MUTATION',
+        expect=['stale', 'data age', 'fetch', 'old'],
+    ),
+    Mutation(
+        name='delayed-sip-labelled-realtime-sip',
+        description='classify the 15-minute delayed tape as real-time SIP',
+        path=CO_EVIDENCE,
+        old='    if name == "delayed_sip":\n        return FeedQuality.DELAYED_SIP',
+        new='    if name == "delayed_sip":\n        return FeedQuality.REALTIME_SIP  # MUTATION',
+        expect=['delayed', 'realtime_sip', 'strategy', 'operational'],
+    ),
+    Mutation(
+        name='iex-counted-as-the-consolidated-tape',
+        description='treat IEX, about 2.5% of volume, as equivalent to full SIP',
+        path=CO_EVIDENCE,
+        old='    if name == "iex":\n        return FeedQuality.REALTIME_IEX',
+        new='    if name == "iex":\n        return FeedQuality.REALTIME_SIP  # MUTATION',
+        expect=['iex', 'consolidated', 'realtime_sip', 'strategy'],
+    ),
+    Mutation(
+        name='a-stale-realtime-feed-is-accepted',
+        description='skip the data-age check so a halted symbol reads as current',
+        path=CO_EVIDENCE,
+        old='    if source_age_seconds > max_age_seconds:',
+        new='    if False:  # MUTATION',
+        expect=['stale', 'old data', 'halted'],
+    ),
+    Mutation(
+        name='no-timestamp-promoted-to-real-time',
+        description='treat a missing market-data timestamp as if the data were current',
+        path=CO_EVIDENCE,
+        old='    if source_age_seconds is None:\n        return FeedQuality.UNKNOWN',
+        new='    if source_age_seconds is None:\n        return FeedQuality.REALTIME_SIP  # MUTATION',
+        expect=['unknown', 'timestamp', 'absent', 'real-time'],
+    ),
+    Mutation(
+        name='paper-adapter-accepts-the-live-domain',
+        description='let the paper adapter be pointed at the live trading domain',
+        path=BRK_ALPACA,
+        old='def _assert_paper(url: str) -> None:',
+        new='def _assert_paper(url: str) -> None:\n    return None  # MUTATION',
+        expect=['paper', 'live', 'domain', 'base_url', 'refus'],
     ),
 ]
 
