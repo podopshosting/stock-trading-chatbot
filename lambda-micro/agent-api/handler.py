@@ -1564,6 +1564,31 @@ def handle_cohorts(event) -> Dict:
     })
 
 
+def handle_why_no_trade(event) -> Dict:
+    """Why the agent did not trade, by binding constraint.
+
+    Inactivity has to be as explainable as activity, or a quiet day
+    looks like a broken one and the strategy gets "fixed" when nothing
+    was wrong.
+    """
+    from agent.autonomy.inactivity import explain_inactivity
+    session_date = _query(event).get("date") or today_market_date()
+    cfg, journal_table = _autonomy_tables()
+    rows, decision_error = _safe(lambda: DynamoDBDecisionLog(
+        table_name=journal_table).for_session(session_date), [])
+    snapshot, _ = _safe(lambda: DynamoDBSnapshotStore(
+        table_name=journal_table).get())
+    scanned = (snapshot or {}).get("symbols_scanned")
+    body = explain_inactivity(rows or [], scanned=scanned)
+    body.update({"session_date": session_date,
+                 "read_error": decision_error})
+    if decision_error:
+        body["headline"] = ("The decision log could not be read, so I "
+                            "cannot say why. That is not the same as "
+                            "there being no reason.")
+    return _response(200, body)
+
+
 ROUTES = {
     ("GET", "/agent/status"): handle_status,
     ("GET", "/agent/market-regime"): handle_market_regime,
@@ -1595,6 +1620,7 @@ ROUTES = {
     ("GET", "/agent/decisions"): handle_decisions,
     ("GET", "/agent/sessions"): handle_sessions,
     ("GET", "/agent/cohorts"): handle_cohorts,
+    ("GET", "/agent/why-no-trade"): handle_why_no_trade,
     ("GET", "/agent/session-report"): handle_session_report,
     ("GET", "/agent/ask"): handle_ask,
 }

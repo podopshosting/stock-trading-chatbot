@@ -37,3 +37,4 @@ from .versions import (
 )
 
 __all__ = [n for n in dir() if not n.startswith("_")]
+from .inactivity import explain_inactivity  # noqa: F401,E402
