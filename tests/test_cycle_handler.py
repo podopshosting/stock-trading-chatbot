@@ -59,13 +59,33 @@ cycle = load_handler()
 
 
 class FakeQuote:
-    def __init__(self, price, age=3.0):
+    """A quote with a REAL Provenance, not a Mock.
+
+    It used `mock.Mock(age_seconds=...)`, which answers every attribute
+    that is ever asked of it. That made the fake strictly more permissive
+    than the provider: it absorbed a new `source_age_seconds` method
+    without complaint and then failed on the first comparison, and it is
+    the same looseness that let `age_seconds` be returned uncalled and
+    abort a live cycle on 2026-10-01.
+    """
+
+    def __init__(self, price, age=3.0, source_age=3.0, feed="sip"):
+        import time as _t
+        from datetime import datetime, timedelta, timezone
+        from agent.providers.base import Provenance
         self.price = price
         self.last = price
         self.bid = price - 0.05
         self.ask = price + 0.05
         self.dollar_volume = 5e8
-        self.provenance = mock.Mock(age_seconds=age)
+        now = _t.time()
+        as_of = None
+        if source_age is not None:
+            as_of = (datetime.fromtimestamp(now, timezone.utc)
+                     - timedelta(seconds=source_age)).isoformat()
+        self.provenance = Provenance(provider="fake", retrieved_at=now - age,
+                                     as_of=as_of, feed=feed,
+                                     is_delayed=(feed == "delayed_sip"))
 
 
 class FakeProvider:
@@ -781,57 +801,65 @@ if __name__ == "__main__":
 
 class TestTheCycleRecordsWhatItTradedOn(unittest.TestCase):
     """
-    Alpaca's free plan serves the consolidated tape 15 minutes late. A
-    session that does not record its feed would let delayed fills be read
-    later as real-time strategy evidence, so the cycle reports the quality
-    of every quote it actually used.
+    The cycle records WHICH FEED each quote came from and how old the
+    DATA was - not how long ago we fetched it. A quote fetched three
+    seconds ago can describe the market as it was fifteen minutes
+    earlier, which is what `delayed_sip` serves.
     """
 
-    def observe(self, delayed):
-        import time as _t
-        from agent.providers.base import Provenance, Quote
-
+    def observe(self, feed, source_age=3.0):
         class Cached:
             def get_quote(self, symbol):
-                return Quote(symbol=symbol, price=10.0, volume=1000,
-                             provenance=Provenance("alpaca", _t.time(),
-                                                   is_delayed=delayed))
+                return FakeQuote(100.0, source_age=source_age, feed=feed)
         seen = set()
         load_handler()._quote_loader(Cached(), object(), seen)("X")
         return seen
 
-    def test_a_delayed_feed_is_recorded_as_delayed(self):
-        self.assertEqual(self.observe(True), {"DELAYED"})
+    def test_the_consolidated_tape_in_real_time_is_realtime_sip(self):
+        self.assertEqual(self.observe("sip"), {"REALTIME_SIP"})
 
-    def test_a_real_time_feed_is_recorded_as_real_time(self):
-        self.assertEqual(self.observe(False), {"REAL_TIME"})
+    def test_iex_is_real_time_but_recorded_separately(self):
+        """Real-time, and about 2.5% of volume: not the national best
+        bid and offer, so it must not read as REALTIME_SIP."""
+        self.assertEqual(self.observe("iex"), {"REALTIME_IEX"})
 
-    def test_an_unknown_feed_is_not_recorded_as_real_time(self):
-        """Provenance documents is_delayed=None as 'never assume
-        real-time'."""
+    def test_a_delayed_feed_is_delayed_however_fresh_its_stamp_looks(self):
+        self.assertEqual(self.observe("delayed_sip", source_age=2.0),
+                         {"DELAYED_SIP"})
+
+    def test_a_real_time_feed_serving_old_data_is_stale(self):
+        self.assertEqual(self.observe("sip", source_age=900.0), {"STALE"})
+
+    def test_no_source_timestamp_is_unknown_not_real_time(self):
+        self.assertEqual(self.observe("sip", source_age=None), {"UNKNOWN"})
+
+    def test_an_unnamed_feed_is_unknown(self):
         self.assertEqual(self.observe(None), {"UNKNOWN"})
 
-    def test_the_collector_is_optional_so_other_callers_still_work(self):
-        import time as _t
-        from agent.providers.base import Provenance, Quote
-
+    def test_the_loader_reports_source_age_separately_from_fetch_age(self):
         class Cached:
             def get_quote(self, symbol):
-                return Quote(symbol=symbol, price=10.0,
-                             provenance=Provenance("alpaca", _t.time()))
+                return FakeQuote(100.0, age=1.0, source_age=600.0, feed="sip")
         q = load_handler()._quote_loader(Cached(), object())("X")
-        self.assertEqual(q["price"], 10.0)
+        self.assertLess(q["age_seconds"], 10)        # we fetched it just now
+        self.assertGreater(q["source_age_seconds"], 500)   # the data is old
+        self.assertEqual(q["feed"], "sip")
+        self.assertEqual(q["feed_quality"], "STALE")
 
-    def test_a_live_cycle_reports_its_data_quality(self):
+    def test_the_collector_is_optional_so_other_callers_still_work(self):
+        class Cached:
+            def get_quote(self, symbol):
+                return FakeQuote(100.0)
+        q = load_handler()._quote_loader(Cached(), object())("X")
+        self.assertEqual(q["price"], 100.0)
+
+    def test_a_live_cycle_reports_its_feed_quality(self):
         world = World()
         world.invoke()
-        self.assertIn(world.last["data_quality"],
-                      ("REAL_TIME", "DELAYED", "MIXED", "UNKNOWN"))
+        self.assertEqual(world.last["data_quality"], "REALTIME_SIP")
 
     def test_a_mixed_cycle_is_reported_as_mixed_not_the_better_half(self):
         handler = load_handler()
-        import time as _t
-        from agent.providers.base import Provenance, Quote
 
         class Cached:
             def __init__(self):
@@ -839,11 +867,9 @@ class TestTheCycleRecordsWhatItTradedOn(unittest.TestCase):
 
             def get_quote(self, symbol):
                 self.n += 1
-                return Quote(symbol=symbol, price=10.0, volume=10,
-                             provenance=Provenance(
-                                 "alpaca", _t.time(),
-                                 is_delayed=(self.n % 2 == 0)))
+                return FakeQuote(100.0,
+                                 feed="sip" if self.n % 2 else "delayed_sip")
         seen = set()
         loader = handler._quote_loader(Cached(), object(), seen)
         loader("A"), loader("B")
-        self.assertEqual(seen, {"REAL_TIME", "DELAYED"})
+        self.assertEqual(seen, {"REALTIME_SIP", "DELAYED_SIP"})

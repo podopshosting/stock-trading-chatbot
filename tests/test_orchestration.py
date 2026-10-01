@@ -35,7 +35,8 @@ from agent.risk import InMemoryHaltStore, RiskLimits               # noqa: E402
 
 def quote_for(symbol):
     return {"price": 100.0, "spread_pct": 0.05, "dollar_volume": 5e8,
-            "age_seconds": 5.0}
+            "age_seconds": 5.0, "source_age_seconds": 5.0,
+            "feed_quality": "REALTIME_SIP"}
 
 
 def falling_quote(symbol):
@@ -46,7 +47,8 @@ def falling_quote(symbol):
     has to come down to it.
     """
     return {"price": 90.0, "spread_pct": 0.05, "dollar_volume": 5e8,
-            "age_seconds": 5.0}
+            "age_seconds": 5.0, "source_age_seconds": 5.0,
+            "feed_quality": "REALTIME_SIP"}
 
 
 def stopping_quote(symbol):
@@ -58,7 +60,8 @@ def stopping_quote(symbol):
     tripping that lock, or they are silently testing the lock instead.
     """
     return {"price": 96.0, "spread_pct": 0.05, "dollar_volume": 5e8,
-            "age_seconds": 5.0}
+            "age_seconds": 5.0, "source_age_seconds": 5.0,
+            "feed_quality": "REALTIME_SIP"}
 
 
 def hypothesis_for(symbol):

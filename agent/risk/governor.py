@@ -165,13 +165,22 @@ def _check_market_quality(rej: _Rejections, context: RiskContext,
                 f"price {context.price:.2f} is outside "
                 f"{limits.min_price:.2f}-{limits.max_price:.2f}")
 
-    if context.quote_age_seconds is None:
+    # Freshness is judged on how old the DATA is, never on how long ago
+    # we fetched it. Those differ by the length of the feed delay, and
+    # using the fetch age let a quote describing the market fifteen
+    # minutes earlier pass a 120-second check.
+    if context.source_age_seconds is None:
         rej.add(RejectionCode.STALE_MARKET_DATA,
-                "quote age is unknown, which is not the same as current")
-    elif context.quote_age_seconds > limits.max_quote_age_seconds:
+                "market-data timestamp is unknown, which is not the same "
+                "as current"
+                + (f" (fetched {context.quote_age_seconds:.0f}s ago)"
+                   if context.quote_age_seconds is not None else ""))
+    elif context.source_age_seconds > limits.max_quote_age_seconds:
         rej.add(RejectionCode.STALE_MARKET_DATA,
-                f"quote is {context.quote_age_seconds:.0f}s old, limit "
-                f"{limits.max_quote_age_seconds:.0f}s")
+                f"market data is {context.source_age_seconds:.0f}s old, "
+                f"limit {limits.max_quote_age_seconds:.0f}s"
+                + (f" (feed {context.feed_quality})"
+                   if context.feed_quality else ""))
 
     if context.spread_pct is None:
         rej.add(RejectionCode.SPREAD_TOO_WIDE,

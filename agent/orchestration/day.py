@@ -901,6 +901,10 @@ class MarketDayOrchestrator:
                 spread_pct=None if quote is None else quote.get("spread_pct"),
                 dollar_volume=(None if quote is None
                                else quote.get("dollar_volume")),
+                source_age_seconds=(None if quote is None
+                                    else quote.get("source_age_seconds")),
+                feed_quality=(None if quote is None
+                              else quote.get("feed_quality")),
                 quote_age_seconds=(None if quote is None
                                    else quote.get("age_seconds")),
                 capital_deployed_today=deployed,

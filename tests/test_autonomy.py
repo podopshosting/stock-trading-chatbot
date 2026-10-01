@@ -44,19 +44,22 @@ SESSION = "2026-10-01"
 
 def quote_for(symbol):
     return {"price": 100.0, "spread_pct": 0.05, "dollar_volume": 5e8,
-            "age_seconds": 5.0}
+            "age_seconds": 5.0, "source_age_seconds": 5.0,
+            "feed_quality": "REALTIME_SIP"}
 
 
 def stopping_quote(symbol):
     """Through the stop, inside the daily loss limit."""
     return {"price": 96.0, "spread_pct": 0.05, "dollar_volume": 5e8,
-            "age_seconds": 5.0}
+            "age_seconds": 5.0, "source_age_seconds": 5.0,
+            "feed_quality": "REALTIME_SIP"}
 
 
 def disastrous_quote(symbol):
     """A loss well beyond the $5 daily limit."""
     return {"price": 80.0, "spread_pct": 0.05, "dollar_volume": 5e8,
-            "age_seconds": 5.0}
+            "age_seconds": 5.0, "source_age_seconds": 5.0,
+            "feed_quality": "REALTIME_SIP"}
 
 
 def hypothesis_for(symbol):
@@ -514,7 +517,8 @@ class TestPaperTradingNeedsNoHuman(unittest.TestCase):
         result = rig.cycle(quote=lambda s: {"price": 100.0,
                                             "spread_pct": 5.0,
                                             "dollar_volume": 5e8,
-                                            "age_seconds": 5.0})
+                                            "age_seconds": 5.0,
+                                            "source_age_seconds": 5.0})
         self.assertEqual(result.entries_submitted, 0)
         rows = rig.decisions.for_session(SESSION)
         self.assertEqual(rows[0]["outcome"], "REFUSED")

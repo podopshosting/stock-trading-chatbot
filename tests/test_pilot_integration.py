@@ -81,7 +81,8 @@ class Pilot:
         if price is None:
             return None
         return {"price": price, "spread_pct": 0.05,
-                "dollar_volume": 5e8, "age_seconds": 5.0}
+                "dollar_volume": 5e8, "age_seconds": 5.0,
+                "source_age_seconds": 5.0, "feed_quality": "REALTIME_SIP"}
 
     def cycle(self, phase=CyclePhase.INTRADAY, candidates=("XYZ",),
               minutes_to_close=200, hypothesis_for=strong_hypothesis):

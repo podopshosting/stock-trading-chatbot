@@ -15,6 +15,7 @@ Two rules run through this module:
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
@@ -69,6 +70,42 @@ class EntitlementRequired(DataUnavailable):
 
 # --- value types ----------------------------------------------------------
 
+def _parse_epoch(stamp) -> Optional[float]:
+    """Epoch seconds from a provider timestamp, or None.
+
+    Alpaca returns RFC-3339 with nanosecond precision
+    ("2026-10-01T16:02:03.123456789Z"), which `fromisoformat` rejects
+    before Python 3.11 and which carries more precision than a float
+    needs, so the fractional part is trimmed to microseconds.
+    """
+    if stamp is None:
+        return None
+    if isinstance(stamp, (int, float)):
+        return float(stamp)
+    text = str(stamp).strip()
+    if not text:
+        return None
+    text = text.replace("Z", "+00:00")
+    if "." in text:
+        head, _, tail = text.partition(".")
+        digits = ""
+        rest = ""
+        for i, ch in enumerate(tail):
+            if ch.isdigit():
+                digits += ch
+            else:
+                rest = tail[i:]
+                break
+        text = f"{head}.{digits[:6]}{rest}" if digits else head + rest
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 @dataclass(frozen=True)
 class Provenance:
     """Where a value came from and how old it is."""
@@ -79,12 +116,41 @@ class Provenance:
     is_delayed: Optional[bool] = None # None = unknown, never assume real-time
     cache_hit: bool = False
     note: str = ""
+    feed: Optional[str] = None        # provider feed, e.g. "sip", "iex"
 
     def age_seconds(self, now: Optional[float] = None) -> float:
+        """How long since WE fetched it. Not how old the data is.
+
+        On a delayed feed this can read 3 seconds for a quote describing
+        the market fifteen minutes ago, which is why a risk check must
+        use `source_age_seconds` instead.
+        """
         return (time.time() if now is None else now) - self.retrieved_at
+
+    def source_age_seconds(self, now: Optional[float] = None
+                           ) -> Optional[float]:
+        """How old the DATA is, from the provider's own timestamp.
+
+        None when the provider supplied no timestamp: unknown, which must
+        fail closed rather than fall back to the fetch age. Falling back
+        is exactly the substitution that made a 15-minute-old quote look
+        current.
+        """
+        if not self.as_of:
+            return None
+        stamp = _parse_epoch(self.as_of)
+        if stamp is None:
+            return None
+        return (time.time() if now is None else now) - stamp
 
     def is_stale(self, max_age_seconds: float, now: Optional[float] = None) -> bool:
         return self.age_seconds(now) > max_age_seconds
+
+    def source_is_stale(self, max_age_seconds: float,
+                        now: Optional[float] = None) -> Optional[bool]:
+        """None when the source age is unknown - not False."""
+        age = self.source_age_seconds(now)
+        return None if age is None else age > max_age_seconds
 
 
 @dataclass(frozen=True)

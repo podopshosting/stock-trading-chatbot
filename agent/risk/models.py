@@ -234,6 +234,12 @@ class RiskContext:
     spread_pct: Optional[float] = None
     dollar_volume: Optional[float] = None
     quote_age_seconds: Optional[float] = None
+    # Age of the MARKET DATA, from the provider's own timestamp. The
+    # field above is how long since WE fetched, which on a delayed feed
+    # reads as seconds for data that is minutes old. The freshness check
+    # uses this one; None is unknown and refuses.
+    source_age_seconds: Optional[float] = None
+    feed_quality: Optional[str] = None
 
     security_type: str = "equity"
     exchange: str = ""

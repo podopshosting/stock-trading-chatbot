@@ -34,6 +34,57 @@ import enum
 from typing import Dict, Iterable, List, Optional, Sequence
 
 
+class FeedQuality(str, enum.Enum):
+    """What one quote actually was, per provider feed and data age.
+
+    The distinction REALTIME_SIP vs REALTIME_IEX matters: IEX is
+    real-time but about 2.5% of US volume, so its best bid and offer is
+    not the national one. It is usable for diagnostics and must not
+    silently count as a consolidated-tape measurement.
+    """
+    REALTIME_SIP = "REALTIME_SIP"
+    REALTIME_IEX = "REALTIME_IEX"
+    DELAYED_SIP = "DELAYED_SIP"
+    STALE = "STALE"
+    UNKNOWN = "UNKNOWN"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+# The only feed quality that may support a claim about the strategy.
+STRATEGY_GRADE_FEED = FeedQuality.REALTIME_SIP
+
+# Feeds that are real-time but not the consolidated tape, and the delayed
+# tape: both prove the machinery runs and neither measures the strategy.
+OPERATIONAL_FEEDS = {FeedQuality.REALTIME_IEX, FeedQuality.DELAYED_SIP}
+
+
+def classify_feed(feed: Optional[str], source_age_seconds: Optional[float],
+                  max_age_seconds: float = 120.0) -> FeedQuality:
+    """Classify one quote from its feed and the age of the DATA.
+
+    `source_age_seconds` is the age of the provider's own timestamp, not
+    of our fetch. None means the provider gave no timestamp, which is
+    UNKNOWN - never real-time, because a feed name alone does not prove
+    the data behind it is current.
+    """
+    name = (feed or "").strip().lower()
+    if source_age_seconds is None:
+        return FeedQuality.UNKNOWN
+    if name == "delayed_sip":
+        return FeedQuality.DELAYED_SIP
+    if source_age_seconds > max_age_seconds:
+        # A real-time feed serving old data is stale, whatever it is
+        # called. A halted or thinly traded symbol does this.
+        return FeedQuality.STALE
+    if name == "sip":
+        return FeedQuality.REALTIME_SIP
+    if name == "iex":
+        return FeedQuality.REALTIME_IEX
+    return FeedQuality.UNKNOWN
+
+
 class DataQuality(str, enum.Enum):
     REAL_TIME = "REAL_TIME"
     DELAYED = "DELAYED"
@@ -55,6 +106,28 @@ class EvidenceClass(str, enum.Enum):
 
 # Only this class may be cited by a gate that claims the strategy works.
 STRATEGY_GRADE = EvidenceClass.REAL_TIME_STRATEGY_EVIDENCE
+
+
+def data_quality_from_feeds(counts: Dict[str, int]) -> DataQuality:
+    """Session data quality from per-cycle FeedQuality counts.
+
+    Only REALTIME_SIP counts as REAL_TIME. REALTIME_IEX is real-time but
+    not the consolidated tape, so it is reported as DELAYED here rather
+    than being promoted: the session-level question is "may this support
+    a strategy claim", and the answer for IEX is no. The specific feed
+    counts are kept alongside so the reason is never lost.
+    """
+    counts = {k: v for k, v in (counts or {}).items() if v}
+    if not counts:
+        return DataQuality.UNKNOWN
+    kinds = set(counts)
+    if kinds == {str(FeedQuality.REALTIME_SIP)}:
+        return DataQuality.REAL_TIME
+    if str(FeedQuality.UNKNOWN) in kinds and len(kinds) == 1:
+        return DataQuality.UNKNOWN
+    if str(FeedQuality.REALTIME_SIP) in kinds or len(kinds) > 1:
+        return DataQuality.MIXED
+    return DataQuality.DELAYED
 
 
 def data_quality(realtime_cycles: int = 0, delayed_cycles: int = 0,
@@ -97,9 +170,11 @@ def classify_session(tally) -> Dict:
     else:
         sha_source = "per-cycle record"
 
-    quality = data_quality(get("realtime_data_cycles", 0) or 0,
-                           get("delayed_data_cycles", 0) or 0,
-                           get("unknown_data_quality_cycles", 0) or 0)
+    feed_counts = get("feed_quality_counts", None) or {}
+    quality = (data_quality_from_feeds(feed_counts) if feed_counts else
+               data_quality(get("realtime_data_cycles", 0) or 0,
+                            get("delayed_data_cycles", 0) or 0,
+                            get("unknown_data_quality_cycles", 0) or 0))
     reasons: List[str] = []
 
     if len(shas) > 1:
@@ -119,6 +194,13 @@ def classify_session(tally) -> Dict:
                             "runtime"],
                 "counts_toward_strategy_gates": True}
 
+    if feed_counts:
+        detail = ", ".join(f"{k} x{v}" for k, v in sorted(feed_counts.items())
+                           if v)
+        reasons.append(f"feeds used: {detail}")
+    if str(FeedQuality.REALTIME_IEX) in feed_counts:
+        reasons.append("IEX is real-time but about 2.5% of volume, so its "
+                       "quotes are not the consolidated tape")
     if quality is DataQuality.DELAYED:
         reasons.append("traded on delayed market data; fills do not "
                        "represent real-time execution")

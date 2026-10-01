@@ -266,7 +266,7 @@ class TestStaleMarketData(unittest.TestCase):
 
     def _stale(self, symbol):
         return {"price": 100.0, "spread_pct": 0.05, "dollar_volume": 5e8,
-                "age_seconds": 900.0}
+                "age_seconds": 900.0, "source_age_seconds": 900.0}
 
     def test_a_stale_quote_blocks_the_entry(self):
         rig = Rig()
@@ -884,7 +884,7 @@ class TestMarketDataDeadlock(unittest.TestCase):
 
     def _stale(self, symbol):
         return {"price": 100.0, "spread_pct": 0.05, "dollar_volume": 5e8,
-                "age_seconds": 900.0}
+                "age_seconds": 900.0, "source_age_seconds": 900.0}
 
     def test_staleness_recovers_with_no_positions_and_entries_blocked(self):
         rig = Rig()
@@ -911,7 +911,8 @@ class TestMarketDataDeadlock(unittest.TestCase):
         def fresh(symbol):
             asked.append(symbol)
             return {"price": 100.0, "spread_pct": 0.05,
-                    "dollar_volume": 5e8, "age_seconds": 3.0}
+                    "dollar_volume": 5e8, "age_seconds": 3.0,
+                    "source_age_seconds": 3.0}
         rig.cycle(candidates=(), quote=fresh)
         self.assertEqual(asked, ["SPY"])
         self.assertNotIn(Condition.STALE_MARKET_DATA, conditions(rig))

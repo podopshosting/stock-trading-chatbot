@@ -38,7 +38,7 @@ from agent.autonomy import (
     aggregate_evidence, cohort_key, current_versions, daily_counters,
     finalize_session, policy_from_environment, record_cycle,
 )
-from agent.autonomy.evidence_class import quality_from_provenance
+from agent.autonomy.evidence_class import classify_feed
 from agent.autonomy.state_sync import sync_state
 from agent.broker import (
     BrokerStateError, ConcurrentBrokerUpdate, DynamoDBBrokerStateStore,
@@ -67,6 +67,10 @@ from agent.state.store import today_market_date
 
 # Asserted, not configured: nothing here can flip it.
 JOURNAL_TABLE = os.environ.get("AGENT_JOURNAL_TABLE", "stock-agent-dev-journal")
+# How old the MARKET DATA may be for an entry. Matches the Risk Governor's
+# max_quote_age_seconds; a quote older than this is STALE whatever feed it
+# came from.
+MAX_SOURCE_AGE_SECONDS = 120.0
 
 IS_LIVE = False
 
@@ -414,9 +418,18 @@ def _quote_loader(cached, broker, observed: Optional[set] = None):
         if bid and ask and ask > 0:
             spread_pct = (ask - bid) / ((ask + bid) / 2) * 100.0
         provenance = getattr(quote, "provenance", None)
+        # Age of the DATA, from the provider's own timestamp. The fetch
+        # age below is kept for diagnostics but must never stand in for
+        # this: a quote fetched 3 seconds ago can describe the market as
+        # it was fifteen minutes earlier.
+        source_age = None
+        if provenance is not None and hasattr(provenance, "source_age_seconds"):
+            source_age = provenance.source_age_seconds()
+        feed_quality = classify_feed(
+            getattr(provenance, "feed", None), source_age,
+            MAX_SOURCE_AGE_SECONDS)
         if observed is not None:
-            observed.add(str(quality_from_provenance(
-                getattr(provenance, "is_delayed", None))))
+            observed.add(str(feed_quality))
         # Provenance.age_seconds is a METHOD. Returning it uncalled put a
         # bound method into the Risk Governor's "> max age" comparison and
         # aborted the first live cycle that reached a hypothesis.
@@ -429,7 +442,10 @@ def _quote_loader(cached, broker, observed: Optional[set] = None):
         if dollar_volume is None and volume:
             dollar_volume = price * volume
         return {"price": price, "spread_pct": spread_pct,
-                "dollar_volume": dollar_volume, "age_seconds": age}
+                "dollar_volume": dollar_volume, "age_seconds": age,
+                "source_age_seconds": source_age,
+                "feed": getattr(provenance, "feed", None),
+                "feed_quality": str(feed_quality)}
     return quote_for
 
 

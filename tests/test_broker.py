@@ -328,7 +328,9 @@ class TestExecutionGate(unittest.TestCase):
                           minutes_to_close=180.0, trading_enabled=True,
                           execution_available=True, price=100.0,
                           spread_pct=0.05, dollar_volume=5e8,
-                          quote_age_seconds=10.0)
+                          quote_age_seconds=10.0,
+                          source_age_seconds=10.0,
+                          feed_quality="REALTIME_SIP")
         return h, evaluate(h, ctx)
 
     def test_execution_unavailable_refuses(self):

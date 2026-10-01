@@ -333,6 +333,10 @@ def _decide(symbol, sym_series, clock, config, feed, catalyst_for,
                       "price_source": "replay_bars",
                       "price_as_of": bar.timestamp,
                       "age_seconds": 0.0,
+                      # In a replay the bar's timestamp IS the clock, so
+                      # the data is current by construction.
+                      "source_age_seconds": 0.0,
+                      "feed_quality": "REPLAY",
                       "history_bars": len(closes)},
         price=bar.close)
     signal_summary = signal_result.as_dict()
@@ -348,6 +352,7 @@ def _decide(symbol, sym_series, clock, config, feed, catalyst_for,
         dollar_volume=max(bar.volume * bar.close,
                           config.risk_limits.min_dollar_volume),
         quote_age_seconds=0.0,
+        source_age_seconds=0.0,
         open_positions=manager.open_count,
         capital_deployed_today=daily_capital_used,
         positions_opened_today=0,

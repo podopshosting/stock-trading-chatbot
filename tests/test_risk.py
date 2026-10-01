@@ -36,7 +36,8 @@ def context(**overrides):
     base = dict(session_date="2026-09-30", market_session="OPEN",
                 minutes_to_close=180.0, trading_enabled=True,
                 execution_available=True, price=100.0, spread_pct=0.05,
-                dollar_volume=5e8, quote_age_seconds=10.0)
+                dollar_volume=5e8, quote_age_seconds=10.0,
+                source_age_seconds=10.0, feed_quality="REALTIME_SIP")
     base.update(overrides)
     return RiskContext(**base)
 
@@ -128,7 +129,9 @@ class TestFailClosed(unittest.TestCase):
         self.assertIn(RejectionCode.SPREAD_TOO_WIDE, codes(d))
 
     def test_unknown_quote_age_is_rejected_not_treated_as_fresh(self):
-        d = evaluate(good_hypothesis(), context(quote_age_seconds=None))
+        d = evaluate(good_hypothesis(),
+                     context(quote_age_seconds=None,
+                             source_age_seconds=None))
         self.assertIn(RejectionCode.STALE_MARKET_DATA, codes(d))
 
     def test_unknown_liquidity_is_rejected(self):
@@ -155,7 +158,9 @@ class TestMarketQuality(unittest.TestCase):
         self.assertIn(RejectionCode.SPREAD_TOO_WIDE, codes(d))
 
     def test_stale_quote_is_rejected(self):
-        d = evaluate(good_hypothesis(), context(quote_age_seconds=600))
+        d = evaluate(good_hypothesis(),
+                     context(quote_age_seconds=600,
+                             source_age_seconds=600))
         self.assertIn(RejectionCode.STALE_MARKET_DATA, codes(d))
 
     def test_thin_liquidity_is_rejected(self):

@@ -52,6 +52,10 @@ class SessionTally:
     realtime_data_cycles: int = 0
     delayed_data_cycles: int = 0
     unknown_data_quality_cycles: int = 0
+    # Per-cycle FeedQuality counts (REALTIME_SIP, REALTIME_IEX,
+    # DELAYED_SIP, STALE, UNKNOWN). Kept as counts rather than a single
+    # verdict so "which feed, how often" is never lost to aggregation.
+    feed_quality_counts: Dict[str, int] = field(default_factory=dict)
 
     cycles_total: int = 0
     cycles_live_market: int = 0
@@ -119,10 +123,16 @@ class SessionTally:
                 # An unreported feed is UNKNOWN, not real-time: a cycle
                 # from before the agent recorded this must not be
                 # promoted by the silence.
-                quality = cycle.get("data_quality")
-                if quality == "REAL_TIME":
+                quality = cycle.get("data_quality") or "UNKNOWN"
+                self.feed_quality_counts[quality] = \
+                    self.feed_quality_counts.get(quality, 0) + 1
+                # Only the consolidated tape, in real time, counts as
+                # real-time evidence. IEX is real-time and not the
+                # national best bid and offer.
+                if quality in ("REAL_TIME", "REALTIME_SIP"):
                     self.realtime_data_cycles += 1
-                elif quality == "DELAYED":
+                elif quality in ("DELAYED", "DELAYED_SIP", "REALTIME_IEX",
+                                 "STALE"):
                     self.delayed_data_cycles += 1
                 else:
                     self.unknown_data_quality_cycles += 1

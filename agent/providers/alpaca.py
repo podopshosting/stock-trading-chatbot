@@ -197,6 +197,7 @@ class AlpacaProvider(MarketDataProvider):
             provider=self.name,
             retrieved_at=self._wall_clock(),
             as_of=as_of,
+            feed=feed,
             is_delayed=delayed,
             note=_FEED_NOTES.get(feed, f"feed={feed}"),
         )
