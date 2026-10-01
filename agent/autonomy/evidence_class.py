@@ -215,7 +215,9 @@ def classify_session(tally) -> Dict:
             "counts_toward_strategy_gates": False}
 
 
-def classify_evidence(tallies: Sequence) -> Dict:
+def classify_evidence(tallies: Sequence,
+                      in_progress: int = 0,
+                      excluded_void: int = 0) -> Dict:
     """Classify a whole body of evidence.
 
     The class of the whole is the weakest class in it: one delayed-data
@@ -228,10 +230,24 @@ def classify_evidence(tallies: Sequence) -> Dict:
     strategy_grade = [p for p in per
                       if p["evidence_class"] == str(STRATEGY_GRADE)]
     if not per:
+        # "Nothing recorded" and "nothing finalised yet" are different
+        # facts, and reporting the second as the first reads as a broken
+        # pipeline on a day that is simply still running. A session
+        # becomes evidence at its close, not while it is open.
+        if excluded_void:
+            why = (f"{excluded_void} session(s) recorded but all VOID "
+                   f"(each spanned a redeploy, so no result can be "
+                   f"attributed to one runtime)")
+        elif in_progress:
+            why = (f"{in_progress} session(s) in progress and none "
+                   f"finalised; a session becomes evidence at its close")
+        else:
+            why = "no sessions recorded"
         return {"evidence_class": str(EvidenceClass.OPERATIONAL_VALIDATION_ONLY),
                 "sessions": 0, "strategy_grade_sessions": 0,
-                "void_sessions": 0, "data_quality": str(DataQuality.UNKNOWN),
-                "reasons": ["no sessions recorded"],
+                "void_sessions": excluded_void,
+                "data_quality": str(DataQuality.UNKNOWN),
+                "reasons": [why],
                 "counts_toward_strategy_gates": False}
     qualities = {p["data_quality"] for p in per}
     overall_quality = (DataQuality.REAL_TIME

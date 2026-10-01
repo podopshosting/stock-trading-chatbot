@@ -460,7 +460,10 @@ def aggregate_evidence(tallies: List[SessionTally], current_cohort: str
     countable = [t for t, c in classified if c["evidence_class"] != "VOID"]
     strategy_grade = [t for t, c in classified
                       if c["evidence_class"] == str(STRATEGY_GRADE)]
-    body = classify_evidence(countable)
+    body = classify_evidence(
+        countable,
+        in_progress=len([t for t in mine if not t.finalized]),
+        excluded_void=len(void))
     return {
         "current_cohort": current_cohort,
         # What this body of evidence is allowed to prove. Carried into the
