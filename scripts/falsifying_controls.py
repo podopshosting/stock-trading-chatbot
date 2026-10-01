@@ -944,7 +944,7 @@ MUTATIONS = [
         description="add risk before managing the risk already held",
         path=ORC_DAY,
         old="            self._manage_exits(result, phase, quote_for, minutes_to_close,\n"
-            "                               session_date)",
+            "                               session_date, realized_pnl_today)",
         new="            pass  # MUTATION",
         expect=["exit", "order", "manage"],
     ),
@@ -996,6 +996,8 @@ MUTATIONS = [
         path=ORC_DAY,
         old="            result.add_step(\"acquire_lock\", ok=False,\n"
             "                            detail=f\"lock unreadable: {exc}\")\n"
+            "            self._raise(result, Condition.CYCLE_LOCK_FAILURE, "
+            "str(exc)[:160])\n"
             "            return False",
         new="            return True  # MUTATION",
         expect=["lock", "duplicate", "concurrent"],
@@ -1419,11 +1421,12 @@ MUTATIONS = [
         expect=['mismatch', 'align', 'period'],
     ),
     Mutation(
-        name='ttm-from-any-four-rows',
-        description='sum any four observations as a TTM, without sequence checks',
+        name='ttm-skips-the-sequence-checks',
+        description='accept four quarters as a TTM without checking that '
+                    'they are sequential and non-overlapping',
         path=CO_FUND,
-        old='    qs = collapse(periods, "Q")\n    if len(qs) < 4:',
-        new='    qs = collapse(periods, "Q") or list(periods)[-4:]  # MUTATION\n    if len(qs) < 4:',
+        old='    for a, b in zip(last4, last4[1:]):',
+        new='    for a, b in []:  # MUTATION',
         expect=['ttm', 'quarter', 'overlap', 'annual'],
     ),
     Mutation(
