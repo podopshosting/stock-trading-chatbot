@@ -32,13 +32,26 @@ def fp(c, v, s, e, fpd="FY", fy=2026):
 
 
 class FakeFacts:
-    def __init__(self, data=None, fail=False):
+    def __init__(self, data=None, fail=False, shares=None):
         self.data, self.fail = data or {}, fail
+        self.shares = shares or {}
+        self.fetch_calls, self.shares_calls = [], []
 
     def fetch(self, symbol):
+        self.fetch_calls.append(symbol)
         if self.fail:
             raise RuntimeError("sec down")
         return self.data.get(symbol, {})
+
+    def shares_outstanding(self, symbol):
+        """The small companyconcept call. Separate from fetch() so a test
+        can tell which endpoint the service reached for."""
+        self.shares_calls.append(symbol)
+        if self.fail:
+            raise RuntimeError("sec down")
+        n = self.shares.get(symbol)
+        return None if n is None else fp("shares_outstanding", n, None,
+                                         "2026-09-16")
 
 
 def svc(acts=None, facts=None, subs=None, universe=()):
@@ -203,3 +216,198 @@ class TestPeersEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestItDoesNotDownloadTheTaxonomyForAShareCount(unittest.TestCase):
+    """
+    Measured 2026-10-01: a nine-company peer comparison took 88.4s and
+    112.7 MB cold, because selecting peers pulled each candidate's full
+    ~4.5 MB XBRL payload to read one share count. The companyconcept
+    endpoint returns the same number in ~10 KB.
+    """
+
+    def service(self, universe=("CPB",)):
+        subs = {s: {"name": s, "sic": "2040", "sicDescription": "Grain Mill",
+                    "cik": i + 1} for i, s in enumerate(("GIS",) + tuple(universe))}
+        facts = FakeFacts(shares={s: 1_000_000 for s in subs})
+        s, store = svc(FakeActions(QUARTERLY), facts, subs=subs,
+                       universe=universe)
+        return s, facts
+
+    def test_a_profile_uses_the_small_concept_call(self):
+        s, facts = self.service()
+        p = s.profile("GIS")
+        self.assertEqual(facts.shares_calls, ["GIS"])
+        self.assertEqual(facts.fetch_calls, [])
+        self.assertEqual(p.market_cap, 1_000_000 * 50.0)
+
+    def test_market_cap_still_names_its_basis(self):
+        s, _ = self.service()
+        self.assertIn("1,000,000 shares", s.profile("GIS").market_cap_basis)
+
+    def test_a_company_that_reports_no_share_count_has_no_market_cap(self):
+        subs = {"GIS": {"name": "G", "sic": "2040", "cik": 1}}
+        s, _store = svc(FakeActions(QUARTERLY), FakeFacts(shares={}),
+                        subs=subs)
+        self.assertIsNone(s.profile("GIS").market_cap)
+
+    def test_cached_full_facts_are_reused_rather_than_refetched(self):
+        s, facts = self.service()
+        s.fundamentals("GIS")                 # pulls the full payload
+        before = list(facts.shares_calls)
+        s.profile("GIS")
+        self.assertEqual(facts.shares_calls, before)
+
+    def test_facts_are_downloaded_once_per_container(self):
+        s, facts = self.service()
+        s.fundamentals("GIS")
+        s.earnings("GIS")
+        s.fundamentals("GIS")
+        self.assertEqual(facts.fetch_calls, ["GIS"])
+
+    def test_warming_fetches_each_symbol_once_and_reports_failures(self):
+        s, facts = self.service(universe=("CPB", "KHC"))
+        errors = s.warm_facts(["GIS", "CPB", "GIS"])
+        self.assertEqual(errors, {})
+        self.assertEqual(sorted(facts.fetch_calls), ["CPB", "GIS"])
+        self.assertEqual(s.warm_facts(["GIS"]), {})      # already cached
+        self.assertEqual(sorted(facts.fetch_calls), ["CPB", "GIS"])
+
+    def test_the_facts_cache_is_bounded(self):
+        from agent.company.service import FACTS_CACHE_MAX
+        s, facts = self.service()
+        for i in range(FACTS_CACHE_MAX + 4):
+            s._facts_cache[f"SYM{i}"] = {}
+            if len(s._facts_cache) > FACTS_CACHE_MAX:
+                s._facts_cache.pop(next(iter(s._facts_cache)))
+        self.assertLessEqual(len(s._facts_cache), FACTS_CACHE_MAX)
+
+
+class TestOnlyCitedPeriodsArePersisted(unittest.TestCase):
+    """19,748 immutable writes per comparison, none of which were ever
+    read. Only the periods behind a reported number are stored now."""
+
+    def facts_with_noise(self):
+        rows = [fp("revenue", 100 + i, f"{2000 + i}-01-01", f"{2000 + i}-12-31")
+                for i in range(50)]
+        return {"GIS": {"revenue": rows}}
+
+    def test_it_stores_the_reported_periods_not_the_whole_taxonomy(self):
+        s, store = svc(FakeActions(QUARTERLY),
+                       FakeFacts(self.facts_with_noise()))
+        summary = s.fundamentals("GIS")
+        stored = store.facts("GIS", "FINPERIOD")
+        self.assertLess(len(stored), 10)
+        self.assertGreaterEqual(summary["periods_persisted"], 1)
+
+    def test_what_is_stored_is_what_was_reported(self):
+        s, store = svc(FakeActions(QUARTERLY),
+                       FakeFacts(self.facts_with_noise()))
+        summary = s.fundamentals("GIS")
+        ends = {r["period_end"] for r in store.facts("GIS", "FINPERIOD")}
+        self.assertIn(summary["income"]["revenue"]["period_end"], ends)
+
+    def test_stored_periods_stay_immutable(self):
+        s, store = svc(FakeActions(QUARTERLY),
+                       FakeFacts(self.facts_with_noise()))
+        s.fundamentals("GIS")
+        first = store.facts("GIS", "FINPERIOD")
+        s._facts_cache.clear()
+        s.fundamentals("GIS")
+        self.assertEqual(store.facts("GIS", "FINPERIOD"), first)
+
+
+class TestThePeerFanOutStaysInsideItsBudget(unittest.TestCase):
+    """
+    Measured 2026-10-01 against the real SEC API: a cold GIS peer
+    comparison took 88.4s (Lambda budget 90s) over 112.7 MB, because
+    candidate profiling made 58 sequential round trips and each company's
+    4.5 MB taxonomy was downloaded twice. After the fix: ~21s, 56 MB.
+    These tests pin the properties that produced the improvement, since
+    wall time itself is not a stable assertion.
+    """
+
+    UNIVERSE = tuple(f"P{i:02d}" for i in range(12))
+
+    def service(self):
+        subs = {"GIS": {"name": "GIS", "sic": "2040", "cik": 1}}
+        for i, s in enumerate(self.UNIVERSE):
+            # Half share the subject's SIC major group (20xx), half do not.
+            subs[s] = {"name": s, "cik": 100 + i,
+                       "sic": "2043" if i % 2 == 0 else "7372",
+                       "sicDescription": "x"}
+        facts = FakeFacts(shares={s: 1_000_000 for s in subs})
+        service, store = svc(FakeActions(QUARTERLY), facts, subs=subs,
+                             universe=self.UNIVERSE)
+        calls = []
+        original = service._fetch_profile_inputs
+
+        def tracked(symbol, with_market_cap):
+            calls.append((symbol, with_market_cap))
+            return original(symbol, with_market_cap)
+        service._fetch_profile_inputs = tracked
+        return service, facts, calls
+
+    def test_a_candidate_is_fetched_at_most_once_per_phase(self):
+        service, _facts, calls = self.service()
+        service.peers("GIS")
+        lite = [c for c in calls if c[1] is False]
+        self.assertEqual(len(lite), len({c[0] for c in lite}))
+
+    def test_only_same_major_group_candidates_cost_a_market_cap_call(self):
+        """The expensive-ish second round is limited to companies that
+        could actually become peers."""
+        service, _facts, calls = self.service()
+        service.peers("GIS")
+        full = {c[0] for c in calls if c[1] is True}
+        self.assertTrue(full)
+        for sym in full:
+            self.assertTrue(sym == "GIS" or sym.startswith("P"))
+        # Half the universe shares the subject's major group, plus the
+        # subject itself, whose market cap the comparison needs.
+        self.assertEqual(len(full), len(self.UNIVERSE) // 2 + 1)
+        self.assertIn("GIS", full)
+
+    def test_a_second_call_refetches_nothing(self):
+        service, _facts, calls = self.service()
+        service.peers("GIS")
+        before = len(calls)
+        service.peers("GIS")
+        self.assertEqual(len(calls), before)
+
+    def test_the_candidate_budget_is_respected(self):
+        from agent.company.service import CANDIDATE_BUDGET
+        service, _facts, calls = self.service()
+        out = service.peers("GIS")
+        lite = [c for c in calls if c[1] is False]
+        self.assertLessEqual(len(lite), CANDIDATE_BUDGET)
+        self.assertIsInstance(out["candidates_not_yet_profiled"], list)
+
+    def test_concurrency_is_bounded_not_one_thread_per_symbol(self):
+        """A fan-out proportional to the universe would be impolite to
+        SEC and unbounded as the universe grows."""
+        from agent.company.service import FETCH_CONCURRENCY
+        self.assertLessEqual(FETCH_CONCURRENCY, 10)
+        self.assertGreater(FETCH_CONCURRENCY, 1)
+
+    def test_one_failing_candidate_does_not_fail_the_peer_set(self):
+        service, _facts, _calls = self.service()
+        original = service._submissions
+
+        def flaky(symbol):
+            if symbol == "P02":
+                raise RuntimeError("sec timeout")
+            return original(symbol)
+        service._submissions = flaky
+        out = service.peers("GIS")
+        self.assertNotIn("P02", [p["symbol"] for p in out["peers"]])
+        self.assertTrue(out["peers"])
+
+    def test_a_failed_market_cap_says_why(self):
+        service, _facts, _calls = self.service()
+        service._price = lambda s: (_ for _ in ()).throw(
+            RuntimeError("quote unavailable"))
+        p = service.profile("GIS")
+        self.assertIsNone(p.market_cap)
+        self.assertIn("quote unavailable",
+                      " ".join(x.source for x in p.provenance))

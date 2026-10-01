@@ -21,6 +21,12 @@ from agent.providers.base import DataUnavailable
 from ..models import FinancialPeriod, Provenance
 
 URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
+# One concept instead of the whole taxonomy. The share count behind a
+# market cap is ~10 KB here against ~4.5 MB for companyfacts, and peer
+# selection needs nothing else from XBRL - so a nine-company comparison
+# does not download 67 MB to read nine numbers.
+CONCEPT_URL = ("https://data.sec.gov/api/xbrl/companyconcept/"
+               "CIK{cik:010d}/{taxonomy}/{concept}.json")
 MIN_INTERVAL = 0.125
 
 # canonical name -> (taxonomy, [XBRL concepts in preference order], unit)
@@ -125,12 +131,68 @@ class SECCompanyFacts:
         self._ua, self._cik_for, self._http = user_agent, cik_for, http
         self._sleep, self._clock, self._wall = sleep, clock, wall_clock
         self._last = None
+        # Peer fan-out calls this from several threads. Without the lock
+        # the pacing check reads and writes `_last` unsynchronised, so the
+        # rate it enforces is not the rate it claims.
+        import threading
+        self._pace_lock = threading.Lock()
 
     def _pace(self):
-        now = self._clock()
-        if self._last is not None and now - self._last < MIN_INTERVAL:
-            self._sleep(MIN_INTERVAL - (now - self._last))
-        self._last = self._clock()
+        with self._pace_lock:
+            now = self._clock()
+            wait = 0.0
+            if self._last is not None and now - self._last < MIN_INTERVAL:
+                wait = MIN_INTERVAL - (now - self._last)
+            self._last = now + wait
+        if wait:
+            self._sleep(wait)
+
+    def _get(self, url: str, what: str):
+        http = self._http
+        if http is None:
+            import requests
+            http = requests
+        self._pace()
+        try:
+            r = http.get(url, headers={"User-Agent": self._ua,
+                                       "Accept": "application/json"},
+                         timeout=30)
+        except Exception as e:
+            raise DataUnavailable(f"SEC {what} failed: {e}") from e
+        if r.status_code == 404:
+            raise DataUnavailable(f"SEC has no {what} at {url}")
+        if r.status_code != 200:
+            raise DataUnavailable(f"SEC {what} HTTP {r.status_code}")
+        return r.json()
+
+    def shares_outstanding(self, symbol: str) -> Optional[FinancialPeriod]:
+        """Latest reported common shares outstanding, as one small call.
+
+        Returns None when the company does not report the cover-page
+        concept, rather than guessing a share count.
+        """
+        cik, _name = self._cik_for(symbol)
+        payload = self._get(
+            CONCEPT_URL.format(cik=cik, taxonomy="dei",
+                               concept="EntityCommonStockSharesOutstanding"),
+            "companyconcept")
+        rows = [r for r in ((payload or {}).get("units") or {}).get("shares")
+                or [] if r.get("val") is not None and r.get("end")]
+        if not rows:
+            return None
+        row = max(rows, key=lambda r: (r.get("end"), r.get("filed") or ""))
+        retrieved = datetime.fromtimestamp(
+            self._wall(), timezone.utc).isoformat(timespec="seconds")
+        return FinancialPeriod(
+            concept="shares_outstanding", value=float(row["val"]),
+            unit="shares", period_start=None, period_end=row["end"],
+            fiscal_year=row.get("fy"), fiscal_period=row.get("fp"),
+            form=row.get("form"), filed=row.get("filed"),
+            accession=row.get("accn"),
+            provenance=Provenance(
+                "sec_companyfacts",
+                "companyconcept#dei:EntityCommonStockSharesOutstanding",
+                retrieved, period=row["end"]))
 
     def fetch(self, symbol: str) -> Dict[str, List[FinancialPeriod]]:
         cik, _name = self._cik_for(symbol)

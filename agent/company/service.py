@@ -32,6 +32,16 @@ HISTORY_YEARS = 10
 # older method are then ignored instead of served for another 24 hours.
 FUND_METHOD = "fundamentals-v1.2"
 CANDIDATE_BUDGET = 25          # new candidate profiles per request
+# One company's XBRL facts are ~4.5 MB and ~2,400 observations. Both
+# profile() (for the share count) and fundamentals() need them, so the
+# normalised result is held per container and the download happens once.
+# Bounded so a warm container serving many symbols cannot grow without
+# limit.
+FACTS_CACHE_MAX = 12
+# How many SEC fetches may be in flight. SEC asks for <=10 requests/second
+# and these are large, download-bound responses: the limit exists to keep
+# the fan-out polite, not to saturate a link.
+FETCH_CONCURRENCY = 9
 
 
 def _now_iso(clock=time.time) -> str:
@@ -56,6 +66,55 @@ class CompanyService:
         self._submissions, self._price, self._bars = submissions, price, bars
         self._cik_for = cik_for
         self._today, self._clock, self.universe = today, clock, universe
+        self._facts_cache: Dict[str, Dict] = {}
+
+    def _company_facts(self, symbol: str) -> Dict:
+        """Normalised XBRL facts for one symbol, downloaded at most once
+        per container.
+
+        Without this, a peer comparison downloaded each company's 4.5 MB
+        payload twice - once for the share count behind market cap and
+        again for the fundamentals.
+        """
+        cached = self._facts_cache.get(symbol)
+        if cached is not None:
+            return cached
+        facts = self.facts.fetch(symbol)
+        if len(self._facts_cache) >= FACTS_CACHE_MAX:
+            self._facts_cache.pop(next(iter(self._facts_cache)))
+        self._facts_cache[symbol] = facts
+        return facts
+
+    def warm_facts(self, symbols: Sequence[str]) -> Dict[str, str]:
+        """Fetch several companies' facts concurrently into the cache.
+
+        Peer comparison needs the subject plus every peer. Fetching them
+        one at a time cost about 4.7 seconds each - 42 seconds for nine
+        companies, most of it waiting on the network. Failures are
+        returned per symbol rather than raised: one unavailable peer must
+        not fail the comparison.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        todo = [s for s in dict.fromkeys(symbols)
+                if s not in self._facts_cache]
+        errors: Dict[str, str] = {}
+        if not todo:
+            return errors
+
+        def one(sym):
+            return sym, self.facts.fetch(sym)
+        with ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY) as pool:
+            for future in [pool.submit(one, s) for s in todo]:
+                try:
+                    sym, facts = future.result()
+                except Exception as exc:                  # noqa: BLE001
+                    errors[getattr(exc, "symbol", "?")] = \
+                        f"{type(exc).__name__}: {exc}"[:160]
+                    continue
+                if len(self._facts_cache) >= FACTS_CACHE_MAX:
+                    self._facts_cache.pop(next(iter(self._facts_cache)))
+                self._facts_cache[sym] = facts
+        return errors
 
     # -- freshness of stored snapshots --------------------------------------
     def _fresh(self, symbol, kind, ttl):
@@ -80,14 +139,45 @@ class CompanyService:
         self.store.put_snapshot(symbol, kind, payload, self._stamp())
 
     # -- profile -------------------------------------------------------------
-    def profile(self, symbol: str, with_market_cap: bool = True) -> CompanyProfile:
-        symbol = symbol.upper()
-        cached = self._fresh(symbol, "PROFILE", ACTIONS_TTL)
-        if cached and (cached.get("market_cap") is not None
-                       or not with_market_cap):
-            return _profile_from(cached)
+    def _fetch_profile_inputs(self, symbol: str,
+                              with_market_cap: bool) -> Dict:
+        """Every network read a profile needs, and nothing else.
+
+        Separated from building the profile so a peer fan-out can do the
+        waiting concurrently while the store stays written from one
+        thread. Failures are carried in the result rather than raised:
+        one unavailable company must not fail a peer set.
+        """
+        out: Dict = {"symbol": symbol, "errors": {}}
+        try:
+            out["submissions"] = self._submissions(symbol) or {}
+        except Exception as exc:                          # noqa: BLE001
+            out["submissions"] = {}
+            out["errors"]["submissions"] = f"{type(exc).__name__}: {exc}"[:160]
+        if with_market_cap:
+            try:
+                # One small concept call (~10 KB), unless the full facts
+                # happen to be cached from a fundamentals request. The
+                # whole taxonomy is ~4.5 MB and holds nothing else a
+                # market cap needs.
+                cached = self._facts_cache.get(symbol)
+                if cached is not None:
+                    out["shares"] = fund.latest(
+                        cached.get("shares_outstanding", []), "INSTANT")
+                else:
+                    out["shares"] = self.facts.shares_outstanding(symbol)
+            except Exception as exc:                      # noqa: BLE001
+                out["errors"]["shares"] = f"{type(exc).__name__}: {exc}"[:160]
+            try:
+                out["price"], out["price_asof"] = self._price(symbol)
+            except Exception as exc:                      # noqa: BLE001
+                out["errors"]["price"] = f"{type(exc).__name__}: {exc}"[:160]
+        return out
+
+    def _build_profile(self, symbol: str, inputs: Dict,
+                       with_market_cap: bool) -> CompanyProfile:
         retrieved = _now_iso(self._clock)
-        sub = self._submissions(symbol) or {}
+        sub = inputs.get("submissions") or {}
         sic = str(sub["sic"]) if sub.get("sic") else None
         p = CompanyProfile(
             symbol=symbol, name=sub.get("name"), cik=sub.get("cik"),
@@ -97,26 +187,38 @@ class CompanyService:
             active=True if sub else None,
             provenance=[Provenance("sec", "submissions", retrieved)])
         if with_market_cap:
-            try:
-                facts = self.facts.fetch(symbol)
-                sh = fund.latest(facts.get("shares_outstanding", []), "INSTANT")
-                price, asof = self._price(symbol)
-                if sh and price:
-                    p.shares_outstanding, p.price, p.price_asof = sh.value, price, asof
-                    p.market_cap = sh.value * price
-                    p.market_cap_basis = (
-                        f"{sh.value:,.0f} shares (cover page, {sh.period_end}) "
-                        f"x price {price} as of {asof}")
-                    p.provenance.append(Provenance(
-                        "sec_companyfacts", "dei:EntityCommonStockSharesOutstanding",
-                        retrieved, period=sh.period_end))
-            except Exception as e:                      # degrade, never guess
+            sh, price = inputs.get("shares"), inputs.get("price")
+            asof = inputs.get("price_asof")
+            if sh and price:
+                p.shares_outstanding, p.price, p.price_asof = \
+                    sh.value, price, asof
+                p.market_cap = sh.value * price
+                p.market_cap_basis = (
+                    f"{sh.value:,.0f} shares (cover page, {sh.period_end}) "
+                    f"x price {price} as of {asof}")
                 p.provenance.append(Provenance(
-                    "market_cap", f"unavailable: {type(e).__name__}", retrieved))
+                    "sec_companyfacts",
+                    "dei:EntityCommonStockSharesOutstanding",
+                    retrieved, period=sh.period_end))
+            else:
+                why = "; ".join(f"{k}: {v}" for k, v in
+                                (inputs.get("errors") or {}).items()) \
+                    or "no share count reported"
+                p.provenance.append(Provenance(
+                    "market_cap", f"unavailable: {why}"[:200], retrieved))
         self._save(symbol, "PROFILE", p.as_dict())
         return p
 
-    # -- corporate actions ---------------------------------------------------
+    def profile(self, symbol: str, with_market_cap: bool = True) -> CompanyProfile:
+        symbol = symbol.upper()
+        cached = self._fresh(symbol, "PROFILE", ACTIONS_TTL)
+        if cached and (cached.get("market_cap") is not None
+                       or not with_market_cap):
+            return _profile_from(cached)
+        return self._build_profile(
+            symbol, self._fetch_profile_inputs(symbol, with_market_cap),
+            with_market_cap)
+
     def ingest_actions(self, symbol: str) -> Dict:
         symbol = symbol.upper()
         today = self._today()
@@ -220,21 +322,42 @@ class CompanyService:
         return s
 
     # -- fundamentals / earnings --------------------------------------------
-    def _facts(self, symbol):
-        facts = self.facts.fetch(symbol)
-        for periods in facts.values():
-            for p in periods:
-                ident = "|".join([p.concept, p.period_start or "", p.period_end,
-                                  p.filed or "", p.accession or ""])
-                try:
-                    self.store.put_fact(symbol, "FINPERIOD", ident, {
-                        "concept": p.concept, "value": p.value, "unit": p.unit,
-                        "period_start": p.period_start, "period_end": p.period_end,
-                        "fiscal_year": p.fiscal_year, "fiscal_period": p.fiscal_period,
-                        "form": p.form, "filed": p.filed, "accession": p.accession})
-                except HistoryConflict:
-                    pass
-        return facts
+    def _persist_cited_periods(self, symbol: str, summary: Dict) -> int:
+        """Store the periods the summary actually cites, and only those.
+
+        Persisting every XBRL observation meant 19,748 writes for a
+        nine-company comparison - about 2,400 per company, none of which
+        anything ever read. SEC's XBRL is reproducible from the source at
+        any time with full provenance; what needs to be immutable here is
+        the period behind a number this system REPORTED.
+        """
+        cited: List[Dict] = []
+        for section in ("income", "balance"):
+            for value in (summary.get(section) or {}).values():
+                if isinstance(value, dict):
+                    cited.append(value)
+        for key in ("operating_cash_flow", "capex"):
+            value = (summary.get("cash_flow") or {}).get(key)
+            if isinstance(value, dict):
+                cited.append(value)
+        for key in ("ttm_revenue", "ttm_net_income"):
+            cited.extend((summary.get(key) or {}).get("contributing") or [])
+
+        written = 0
+        for row in cited:
+            if not row.get("period_end"):
+                continue
+            ident = "|".join([str(row.get("concept") or "?"),
+                              str(row.get("period_start") or ""),
+                              str(row["period_end"]),
+                              str(row.get("filed") or ""),
+                              str(row.get("accession") or "")])
+            try:
+                if self.store.put_fact(symbol, "FINPERIOD", ident, row):
+                    written += 1
+            except HistoryConflict:
+                pass
+        return written
 
     def fundamentals(self, symbol: str) -> Dict:
         symbol = symbol.upper()
@@ -242,7 +365,7 @@ class CompanyService:
         if cached and cached.get("method") == FUND_METHOD:
             return cached
         try:
-            facts = self._facts(symbol)
+            facts = self._company_facts(symbol)
         except Exception as e:
             return {"symbol": symbol, "status": "UNKNOWN",
                     "error": f"{type(e).__name__}: {e}"[:200]}
@@ -250,13 +373,14 @@ class CompanyService:
         s.update({"symbol": symbol, "method": FUND_METHOD,
                   "source": "SEC Company Facts (XBRL)",
                   "retrieved_at": _now_iso(self._clock)})
+        s["periods_persisted"] = self._persist_cited_periods(symbol, s)
         self._save(symbol, "FUNDSUMMARY", s)
         return s
 
     def earnings(self, symbol: str) -> Dict:
         symbol = symbol.upper()
         try:
-            facts = self.facts.fetch(symbol)
+            facts = self._company_facts(symbol)
         except Exception as e:
             return {"symbol": symbol, "status": "UNKNOWN",
                     "error": f"{type(e).__name__}: {e}"[:200]}
@@ -281,25 +405,40 @@ class CompanyService:
     def peers(self, symbol: str, refresh: bool = False) -> Dict:
         symbol = symbol.upper()
         subject = self.profile(symbol)
-        cands, spent, skipped = [], 0, []
+        cands, skipped, todo = [], [], []
         for sym in self.universe:
             if sym == symbol:
                 continue
             cached = self._fresh(sym, "PROFILE", 7 * ACTIONS_TTL)
             if cached:
                 cands.append(_profile_from(cached))
-                continue
-            if spent >= CANDIDATE_BUDGET:
+            elif len(todo) < CANDIDATE_BUDGET:
+                todo.append(sym)
+            else:
                 skipped.append(sym)
-                continue
-            spent += 1
-            try:
-                lite = self.profile(sym, with_market_cap=False)
-                same_major = (lite.sic and subject.sic
-                              and lite.sic[:2] == subject.sic[:2])
-                cands.append(self.profile(sym) if same_major else lite)
-            except Exception:
-                skipped.append(sym)
+
+        # Candidate profiling was 58 sequential HTTP round trips - 33 of
+        # the 88 seconds a cold comparison took, on only 7 MB. The waiting
+        # happens concurrently; every store write still comes from this
+        # thread.
+        if todo:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY) as pool:
+                lite_inputs = list(pool.map(
+                    lambda sym: self._fetch_profile_inputs(sym, False), todo))
+            lites = [self._build_profile(sym, inputs, False)
+                     for sym, inputs in zip(todo, lite_inputs)]
+            # Only companies in the subject's SIC major group can become
+            # peers, so only those need a market cap.
+            major = [p for p in lites
+                     if p.sic and subject.sic and p.sic[:2] == subject.sic[:2]]
+            with ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY) as pool:
+                full_inputs = list(pool.map(
+                    lambda p: self._fetch_profile_inputs(p.symbol, True),
+                    major))
+            full = {p.symbol: self._build_profile(p.symbol, inputs, True)
+                    for p, inputs in zip(major, full_inputs)}
+            cands.extend(full.get(p.symbol, p) for p in lites)
         ps = pe.select(subject, cands)
         out = ps.as_dict()
         out.update({"symbol": symbol,
@@ -314,6 +453,10 @@ class CompanyService:
         symbol = symbol.upper()
         ps = self.peers(symbol)
         syms = [p["symbol"] for p in ps["peers"]]
+        # One concurrent pass for every company's facts, then the
+        # summaries are computed from cache. Sequentially this was ~4.7s
+        # per company of pure download wait.
+        fetch_errors = self.warm_facts([symbol] + syms)
         fs = {s: self.fundamentals(s) for s in [symbol] + syms}
 
         def metric(sym, name):
@@ -329,6 +472,7 @@ class CompanyService:
             rows.append(cmp_.compare_metric(
                 name, metric(symbol, name), {s: metric(s, name) for s in syms}))
         out = {"symbol": symbol, "peers": ps["peers"], "metrics": rows,
+               "fetch_errors": fetch_errors,
                "note": "relative facts; periods aligned or excluded"}
         self._save(symbol, "PEERCOMPARE", out)
         return out
