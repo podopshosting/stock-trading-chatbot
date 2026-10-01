@@ -12,6 +12,14 @@ from typing import List, Optional, Sequence
 from .models import DividendEvent, DividendProfile, DividendStatus
 
 
+# A payment counts as "on cadence" within this fraction of the typical
+# interval, and this fraction of payments must be on cadence for the
+# schedule to count as regular. Calendar drift moves a quarterly ex-date
+# by a few weeks; a cut or a restructuring moves it by months.
+CADENCE_TOLERANCE = 0.35
+CADENCE_MAJORITY = 0.8
+
+
 def _d(s: str) -> date:
     return date.fromisoformat(s[:10])
 
@@ -45,10 +53,16 @@ def classify(events: Optional[Sequence[DividendEvent]], today: date,
     gaps = [(_d(b.ex_date) - _d(a.ex_date)).days
             for a, b in zip(regular, regular[1:])]
     typical = sorted(gaps)[len(gaps) // 2]
-    spread = max(gaps) - min(gaps)
-    if spread > max(45, typical * 0.5):
+    # Judged on how MOST payments are spaced, not on the worst pair.
+    # max(gaps) - min(gaps) made two odd gaps out of 37 enough to call a
+    # reliable quarterly payer irregular: verified live on COST (every
+    # gap between 63 and 112 days, median 91) and on GE (36 of 39 gaps
+    # near the median, yet reported IRREGULAR).
+    near = sum(1 for g in gaps if abs(g - typical) <= CADENCE_TOLERANCE * typical)
+    if near < CADENCE_MAJORITY * len(gaps):
         prof.status, prof.pays_dividend = DividendStatus.IRREGULAR, True
-        prof.reason = "payment spacing is inconsistent"
+        prof.reason = (f"only {near} of {len(gaps)} intervals are near the "
+                       f"typical {typical} days")
     elif gap_days > typical * 2 + 30:
         prof.status = DividendStatus.SUSPENDED
         prof.pays_dividend = False

@@ -28,9 +28,11 @@ from .universe import SEED_UNIVERSE
 ACTIONS_TTL = 24 * 3600
 FUND_TTL = 24 * 3600
 HISTORY_YEARS = 10
+# How far ahead to look for already-declared corporate actions.
+UPCOMING_WINDOW_DAYS = 120
 # Bump when normalisation logic changes: cached derived snapshots from an
 # older method are then ignored instead of served for another 24 hours.
-FUND_METHOD = "fundamentals-v1.2"
+FUND_METHOD = "fundamentals-v1.3"
 CANDIDATE_BUDGET = 25          # new candidate profiles per request
 # One company's XBRL facts are ~4.5 MB and ~2,400 observations. Both
 # profile() (for the share count) and fundamentals() need them, so the
@@ -223,7 +225,12 @@ class CompanyService:
         symbol = symbol.upper()
         today = self._today()
         start = date(today.year - HISTORY_YEARS, today.month, min(today.day, 28))
-        acts = self.actions.fetch(symbol, start.isoformat(), today.isoformat())
+        # The window runs PAST today: an already-declared ex-date in the
+        # near future is exactly what "next ex-date" means, and a window
+        # ending today could never contain one, so the field was always
+        # None however many dividends a company had announced.
+        end = today + timedelta(days=UPCOMING_WINDOW_DAYS)
+        acts = self.actions.fetch(symbol, start.isoformat(), end.isoformat())
         written, conflicts = 0, []
         for a in acts:
             try:
@@ -234,7 +241,7 @@ class CompanyService:
                 conflicts.append(str(e))
         return {"fetched": len(acts), "written": written,
                 "conflicts": conflicts, "window": [start.isoformat(),
-                                                   today.isoformat()],
+                                                   end.isoformat()],
                 "retrieved_at": _now_iso(self._clock)}
 
     def corporate_actions(self, symbol: str, refresh: bool = False) -> Dict:

@@ -19,9 +19,11 @@ def div(ex, amt, special=False):
 class FakeActions:
     def __init__(self, acts=None, fail=False):
         self.acts, self.fail, self.calls = acts or [], fail, 0
+        self.windows = []
 
     def fetch(self, symbol, start, end, types=None):
         self.calls += 1
+        self.windows.append({"symbols": symbol, "start": start, "end": end})
         if self.fail:
             raise RuntimeError("provider down")
         return [a for a in self.acts if a.symbol == symbol or True]
@@ -411,3 +413,30 @@ class TestThePeerFanOutStaysInsideItsBudget(unittest.TestCase):
         self.assertIsNone(p.market_cap)
         self.assertIn("quote unavailable",
                       " ".join(x.source for x in p.provenance))
+
+
+class TestUpcomingActionsAreInTheWindow(unittest.TestCase):
+    """Verified live 2026-10-01: next_ex_date was None for AAPL, NVDA, GE
+    and COST alike, because the fetch window ended today and an announced
+    future ex-date can never fall inside it."""
+
+    def test_the_window_reaches_past_today(self):
+        acts = FakeActions(QUARTERLY)
+        s, _ = svc(acts)
+        s.dividends("GIS")
+        [(_sym, start, end)] = [(c["symbols"], c["start"], c["end"])
+                                for c in acts.windows]
+        self.assertGreater(end, TODAY.isoformat())
+        self.assertLess(start, TODAY.isoformat())
+
+    def test_an_announced_future_dividend_becomes_the_next_ex_date(self):
+        future = div("2026-10-09", 0.61)
+        s, _ = svc(FakeActions(QUARTERLY + [future]))
+        d = s.dividends("GIS")
+        self.assertEqual(d["next_ex_date"], "2026-10-09")
+        self.assertEqual(d["days_until_ex"], 8)
+
+    def test_a_future_dividend_is_not_counted_in_the_trailing_amount(self):
+        s, _ = svc(FakeActions(QUARTERLY + [div("2026-10-09", 0.61)]))
+        d = s.dividends("GIS")
+        self.assertAlmostEqual(d["trailing_12m_amount"], 0.61 * 3 + 0.60, 4)

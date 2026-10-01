@@ -105,3 +105,58 @@ class TestSplits(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCadenceIsJudgedOnTheMajorityNotTheWorstPair(unittest.TestCase):
+    """
+    Verified live 2026-10-01: COST's 37 regular intervals all fall between
+    63 and 112 days (median 91) and GE has 36 of 39 near its median, yet
+    both were reported IRREGULAR because max(gap) - min(gap) exceeded a
+    fixed spread. One odd interval in a decade is calendar drift, not an
+    irregular dividend.
+    """
+
+    def events(self, gaps, amount=0.61):
+        from datetime import timedelta
+        day = date(2016, 1, 10)
+        out = [DividendEvent(day.isoformat(), amount)]
+        for g in gaps:
+            day = day + timedelta(days=g)
+            out.append(DividendEvent(day.isoformat(), amount))
+        return out, day
+
+    def classify_with_gaps(self, gaps):
+        events, last = self.events(gaps)
+        return classify(events, last)
+
+    def test_the_real_cost_interval_pattern_is_active(self):
+        gaps = [98, 92, 91, 84, 112, 70, 91, 91, 112, 63, 98, 84, 91, 91,
+                98, 84, 91, 91, 98, 84, 91, 91, 98, 91, 112, 70, 91, 84,
+                92, 98, 98, 84, 91, 91, 91, 91, 84]
+        self.assertEqual(self.classify_with_gaps(gaps).status,
+                         DividendStatus.ACTIVE)
+
+    def test_a_few_anomalies_in_a_decade_do_not_flip_the_status(self):
+        gaps = [91] * 36 + [0, 126, 120]
+        self.assertEqual(self.classify_with_gaps(gaps).status,
+                         DividendStatus.ACTIVE)
+
+    def test_genuinely_erratic_spacing_is_still_irregular(self):
+        gaps = [27, 231, 162, 40, 300]
+        self.assertEqual(self.classify_with_gaps(gaps).status,
+                         DividendStatus.IRREGULAR)
+
+    def test_a_majority_off_cadence_is_irregular(self):
+        gaps = [91, 91, 240, 300, 30, 400]
+        self.assertEqual(self.classify_with_gaps(gaps).status,
+                         DividendStatus.IRREGULAR)
+
+    def test_the_reason_counts_the_intervals(self):
+        prof = self.classify_with_gaps([27, 231, 162, 40, 300])
+        self.assertIn("intervals are near the typical", prof.reason)
+
+    def test_a_stopped_payer_is_still_suspended_not_irregular(self):
+        events, last = self.events([91] * 20)
+        from datetime import timedelta
+        self.assertEqual(classify(events, last + timedelta(days=400)).status,
+                         DividendStatus.SUSPENDED)
