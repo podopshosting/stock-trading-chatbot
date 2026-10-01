@@ -63,9 +63,9 @@ number.
 |---|---|---|---|---|---|---|---|---|
 | **SEC EDGAR** | XBRL / submissions | ✗ (after the fact) | ✗ | ✗ | ✗ | unlimited, free | n/a | Public domain filings; already wired |
 | **Alpaca** | corporate actions | ✗ | ✗ | ✗ | ✗ | included in current plan | n/a | Already entitled; wrong data type |
-| **Alpha Vantage** | `EARNINGS`, `EARNINGS_CALENDAR` | ✓ | ✓ where supplied | ✓ (`estimatedEPS`) | limited | **25 req/day** | ~$29.99/mo (75 req/min) | Free tier personal use; **key is shared with production** |
-| **Finnhub** | earnings calendar | ✓ | ✓ | ✓ on free tier; advanced estimates premium | premium | 60 req/min | paid tiers vary | New account; check redistribution terms |
-| **Financial Modeling Prep** | earnings calendar, analyst estimates | ✓ | ✓ | ✓ | ✓ | 250 req/day | paid tiers vary | New account; 5y annual statements on free |
+| **Alpha Vantage** | `EARNINGS`, `EARNINGS_CALENDAR` | ✓ | ✓ where supplied | ✓ (`estimatedEPS`) | limited | **25 req/day** | ~$29.99/mo (75 req/min) | **Excluded for Company Intelligence**: key is production's, enforced by test |
+| **Finnhub** | earnings calendar | ✓ | ✓ | ✓ on free tier; advanced estimates premium | premium | 60 req/min | paid tiers vary | **Preferred candidate**, pending licensing review |
+| **Financial Modeling Prep** | earnings calendar, analyst estimates | ✓ | ✓ | ✓ | ✓ | 250 req/day | paid tiers vary | **Off the shortlist** unless a paid plan is chosen deliberately |
 | **Eulerpool** | earnings calendar, estimates, filings | ✓ | ✓ | ✓ | ✓ | 100,000 req/month | paid raises volume / real-time | New vendor, least familiar to this project |
 
 ### Why Alpha Vantage is the obvious candidate and still blocked
@@ -93,6 +93,49 @@ cost is a new account and a licensing read: a free tier that forbids
 storing or redistributing estimates matters here, because this project
 *persists* what it fetches and shows it on a dashboard.
 
+## DECISION TAKEN 2026-10-01
+
+Directed by the account holder:
+
+- **No provider is wired.** Upcoming earnings stays `UNKNOWN` until a
+  dedicated provider is deliberately selected. An unknown date is a fact;
+  a date inferred from a filing cadence is a guess wearing a fact's
+  clothes.
+- **Alpha Vantage is not to be used for Company Intelligence at all**,
+  because its key is production's and its free tier is 25 requests a day.
+  This is now enforced rather than remembered: `agent/company/` may not
+  import or construct `AlphaVantageProvider`, and
+  `tests/test_company_quota_boundary.py` asserts it. `from_alpha_vantage()`
+  stays as a pure normaliser over a payload someone else fetched — it has
+  no way to fetch anything.
+- **Finnhub is the preferred next candidate**, pending a licensing and
+  terms review (see below). Nothing is signed up for.
+- **FMP is off the shortlist** unless a paid plan is intentionally
+  selected.
+- Sequencing: finish Company Intelligence and the real-time paper
+  cutover first.
+
+### What the Finnhub review has to answer
+
+Not "does it have the data" — it does. The questions that decide it:
+
+1. **Persistence.** This project stores what it fetches, with
+   provenance, in DynamoDB. Does the free tier permit storing estimates
+   rather than only displaying them transiently?
+2. **Display.** The dev dashboard renders the data. Is that
+   "redistribution" under their terms?
+3. **Derived values.** The agent computes a surprise from actual minus
+   estimate and shows it. Is a derived figure covered?
+4. **Attribution.** Is a visible credit required where the data appears?
+5. **Commercial use.** The project is personal today. A free tier
+   restricted to non-commercial use would constrain what this could ever
+   become, which is worth knowing before building on it.
+6. **Report time.** Is BMO/AMC actually populated, or frequently null?
+   A calendar without the time cannot support an earnings-blackout rule
+   that must act before a release.
+
+Until those are answered, (a) below is in force.
+
 ## USER ACTION REQUIRED — pick one
 
 - **(a) Do nothing.** Earnings dates stay `null`, beat/miss stays
@@ -102,12 +145,13 @@ storing or redistributing estimates matters here, because this project
   account, no payment. Stored as a new secret so production's budget is
   untouched. Smallest change, uses code that already exists and is
   tested.
-- **(c) Finnhub or FMP free tier** — larger allowance, estimates on the
-  free tier, no contact with production's quota. Needs a new account and
-  a licensing check on persistence and display.
+- **(c) Finnhub free tier — the preferred candidate.** 60 requests a
+  minute, a calendar with estimates, and no contact with production's
+  quota. Needs a new account and the licensing review above.
 - **(d) A paid plan**, if per-symbol estimate coverage matters more than
-  any free tier allows. A purchase and an account agreement: a stop
-  condition, not something this system will arrange.
+  any free tier allows — this is the only route by which FMP returns to
+  the shortlist. A purchase and an account agreement: a stop condition,
+  not something this system will arrange.
 
 ## If any of (b) to (d) is chosen
 
