@@ -7,6 +7,25 @@ Short start prompt: `docs/NEXT-AGENT-PROMPT.md`.
 > live dev API. Anything time-varying (paper session numbers, next invocation) must be
 > re-queried — commands are in section 20.
 
+## 0. What changed after this handoff was written
+
+This document is a snapshot of **2026-10-01 ~13:45 UTC** and has not been
+rewritten. Work continued the same day; where the two disagree, the
+documents below are later and win.
+
+| Topic | Read |
+|---|---|
+| Company Intelligence validated live; two defects a green suite missed | [progress/COMPANY-INTELLIGENCE-VALIDATION.md](progress/COMPANY-INTELLIGENCE-VALIDATION.md) |
+| The 2026-10-01 session straddles two artifacts and counts toward no cohort | [progress/CYCLE-ARTIFACT-LAG.md](progress/CYCLE-ARTIFACT-LAG.md) |
+| Real-time SIP cutover: runbook, preflight 16/16, **not executed** | [progress/REALTIME-COHORT-CUTOVER.md](progress/REALTIME-COHORT-CUTOVER.md) |
+| A mutation run was voided by concurrent edits; two guards added | [progress/MUTATION-HARNESS-CONCURRENCY-INCIDENT.md](progress/MUTATION-HARNESS-CONCURRENCY-INCIDENT.md) |
+| No earnings provider is wired, by instruction; Finnhub is next candidate | [EARNINGS-CALENDAR-SOURCES.md](EARNINGS-CALENDAR-SOURCES.md) |
+| Current counts, SHAs, blockers | [agent-handoff-state.json](agent-handoff-state.json) |
+
+Tests are now **2019 run: 2018 passing, 1 skipped**, not the 1738 below.
+The mutation-control figure below is **stale** and needs a full re-run on
+a committed tree.
+
 ## 1. Handoff checkpoint
 
 | | |
