@@ -206,9 +206,34 @@ class DynamoDBAlertSink(AlertSink):
             Limit=limit)
         out = []
         for item in response.get("Items", []):
-            d = json.loads(item["payload"]["S"])
-            out.append(Alert(kind=AlertKind(d["kind"]), detail=d["detail"],
-                             session_date=d["session_date"],
-                             context=d.get("context") or {},
-                             raised_at=d.get("raised_at", "")))
+            # Per row, so one bad row cannot hide the rest. Coercing
+            # every stored kind into the enum meant a single alert from a
+            # newer writer raised and the whole list was lost: measured
+            # on the dev API on 2026-10-02, where `alerts` came back
+            # empty with the ValueError named in `read_errors`. A newer
+            # cycle against an older reader is a normal deployment state,
+            # and an operator who can see no alerts is worse off than one
+            # who sees an unfamiliar name.
+            try:
+                d = json.loads(item["payload"]["S"])
+                try:
+                    kind = AlertKind(d["kind"])
+                except ValueError:
+                    # Kept as the raw string rather than dropped or
+                    # renamed. Every consumer uses str(kind) or
+                    # membership in CRITICAL_KINDS, so an unknown kind
+                    # degrades safely: it is reported, and it is never
+                    # treated as critical.
+                    kind = d["kind"]
+                out.append(Alert(kind=kind, detail=d["detail"],
+                                 session_date=d["session_date"],
+                                 context=d.get("context") or {},
+                                 raised_at=d.get("raised_at", "")))
+            except Exception as exc:                      # noqa: BLE001
+                # Unreadable beyond the kind - malformed JSON, missing
+                # field. Skipped and SAID, because a silently dropped
+                # alert is indistinguishable from no alert.
+                log_event("alert_unreadable",
+                          sk=str(item.get("SK", {}).get("S", ""))[:40],
+                          detail=f"{type(exc).__name__}: {exc}"[:160])
         return out

@@ -128,6 +128,7 @@ EVENTS = frozenset({
     "shadow_comparison",
     "alert_raised",
     "alert_persist_failed",
+    "alert_unreadable",
     "health_condition_raised",
     "health_condition_cleared",
     "autonomy_mode_resolved",

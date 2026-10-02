@@ -13,6 +13,7 @@ The logger fails closed on an unknown event, which is right. What was
 missing is anything that checks the two sides agree.
 """
 import ast
+import json
 import os
 import pathlib
 import sys
@@ -208,3 +209,79 @@ class TestEveryAlertKindReferencedExists(unittest.TestCase):
         """The control for the assertion above."""
         from agent.autonomy.alerts import AlertKind, CRITICAL_KINDS
         self.assertIn(AlertKind.EMERGENCY_STOP, CRITICAL_KINDS)
+
+
+class TestOneUnknownAlertKindDoesNotHideTheRest(unittest.TestCase):
+    """
+    Measured on the deployed dev API on 2026-10-02:
+
+        alerts: []
+        read_errors: {"alerts": "ValueError: 'BROKER_UNAVAILABLE' is
+                      not a valid AlertKind"}
+
+    `recent()` coerced every stored kind into the enum, so a single row
+    written by a newer writer raised and the whole list was lost. The
+    endpoint named the error rather than hiding it, which is the design
+    working - but the operator still saw no alerts at all, including any
+    CRITICAL one in the same session. A newer cycle plus an older reader
+    is a normal deployment state, not an exotic one.
+    """
+
+    def rows(self, kinds):
+        return [{"payload": {"S": json.dumps({
+            "kind": k, "severity": "WARNING", "detail": f"detail for {k}",
+            "session_date": "2026-10-02", "context": {},
+            "raised_at": "2026-10-02T00:30:00Z"})}} for k in kinds]
+
+    def sink_with(self, kinds, items=None):
+        """The client is injectable, so no patching is needed. An earlier
+        version of this helper patched the `client` property and silently
+        injected nothing, which failed the control below - that is what
+        the control is for."""
+        from unittest import mock as _mock
+        from agent.autonomy.alerts import DynamoDBAlertSink
+        fake = _mock.Mock()
+        fake.query.return_value = {
+            "Items": self.rows(kinds) if items is None else items}
+        sink = DynamoDBAlertSink(table_name="t", client=fake)
+        return sink.recent(session_date="2026-10-02")
+
+    def test_a_known_kind_still_parses(self):
+        """The control: if nothing parsed, the test below would pass for
+        a reader that returns an empty list for everything."""
+        got = self.sink_with(["EMERGENCY_STOP"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(str(got[0].kind), "EMERGENCY_STOP")
+
+    def test_an_unknown_kind_does_not_raise(self):
+        got = self.sink_with(["SOMETHING_A_NEWER_CYCLE_EMITS"])
+        self.assertEqual(len(got), 1)
+
+    def test_the_unknown_kind_is_still_reported_not_dropped(self):
+        """Swallowing it would be the other failure: an alert nobody can
+        see is the same as no alert."""
+        got = self.sink_with(["SOMETHING_A_NEWER_CYCLE_EMITS"])
+        self.assertIn("SOMETHING_A_NEWER_CYCLE_EMITS", str(got[0].kind))
+
+    def test_one_unknown_kind_does_not_hide_a_critical_one(self):
+        """The case that matters. Previously this returned nothing."""
+        got = self.sink_with(["SOMETHING_UNKNOWN", "EMERGENCY_STOP"])
+        self.assertEqual(len(got), 2)
+        self.assertIn("EMERGENCY_STOP", [str(a.kind) for a in got])
+
+    def test_a_malformed_row_does_not_hide_the_rest_either(self):
+        got = self.sink_with(None, items=[
+            {"payload": {"S": "not json at all"}},
+            {"payload": {"S": json.dumps({
+                "kind": "EMERGENCY_STOP", "detail": "d",
+                "session_date": "2026-10-02"})}}])
+        self.assertIn("EMERGENCY_STOP", [str(a.kind) for a in got])
+
+    def test_the_query_is_scoped_to_the_session(self):
+        """Guards the helper itself: if recent() ignored session_date the
+        rows above would be returned for any date and the assertions
+        would not mean what they say."""
+        self.assertEqual(
+            __import__("agent.autonomy.alerts", fromlist=["x"])
+            .DynamoDBAlertSink(table_name="t", client=None)
+            .recent(session_date=None), [])
