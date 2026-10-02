@@ -18,6 +18,9 @@ from agent.broker import (                                        # noqa: E402
     BrokerAdapter, ExecutionRefused, OrderRejected, OrderStatus, PaperBroker,
     PaperBrokerConfig, Quote, RejectReason, build_proposal, submit_approved,
 )
+from agent.broker.order_ledger import (                           # noqa: E402
+    ExternalOrderRecord, InMemoryOrderLedger, OrderLedgerError,
+)
 from agent.hypothesis import generate                             # noqa: E402
 from agent.risk import (                                          # noqa: E402
     RejectionCode, RiskContext, RiskLimits, evaluate,
@@ -319,19 +322,30 @@ class TestIdempotency(unittest.TestCase):
         self.assertNotEqual(first["order_id"], second["order_id"])
 
 
+def approved_pair():
+    """A hypothesis and an approved decision for it.
+
+    Module level so that two test classes can share it without one
+    inheriting the other - inheritance would silently re-run the parent
+    class's tests under the child's name, which inflates the count and
+    makes it unclear which class is actually covering what.
+    """
+    h = generate("XYZ", signal(), catalyst(), regime())
+    ctx = RiskContext(session_date="2026-09-30", market_session="OPEN",
+                      minutes_to_close=180.0, trading_enabled=True,
+                      execution_available=True, price=100.0,
+                      spread_pct=0.05, dollar_volume=5e8,
+                      quote_age_seconds=10.0,
+                      source_age_seconds=10.0,
+                      feed_quality="REALTIME_SIP")
+    return h, evaluate(h, ctx)
+
+
 class TestExecutionGate(unittest.TestCase):
     """The only path from a decision to an order."""
 
     def _approved(self):
-        h = generate("XYZ", signal(), catalyst(), regime())
-        ctx = RiskContext(session_date="2026-09-30", market_session="OPEN",
-                          minutes_to_close=180.0, trading_enabled=True,
-                          execution_available=True, price=100.0,
-                          spread_pct=0.05, dollar_volume=5e8,
-                          quote_age_seconds=10.0,
-                          source_age_seconds=10.0,
-                          feed_quality="REALTIME_SIP")
-        return h, evaluate(h, ctx)
+        return approved_pair()
 
     def test_execution_unavailable_refuses(self):
         h, d = self._approved()
@@ -487,3 +501,281 @@ class TestDeterminism(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeExternalBroker:
+    """An external venue, with the capabilities that matter here.
+
+    `events` is shared with the ledger fake so that ORDERING can be
+    asserted. Proving that both a write and a submit happened is not the
+    property under test: the property is that the write happened FIRST,
+    because the whole defect class lives in the window between them.
+    """
+    name = "fake_external"
+    is_paper = True
+    is_external_venue = True
+
+    def __init__(self, events, lookup=None, submit_raises=None):
+        self.events = events
+        self.submits = []
+        self._lookup = lookup
+        self._submit_raises = submit_raises
+
+    def submit_order(self, **kw):
+        self.events.append("submit")
+        self.submits.append(kw)
+        if self._submit_raises:
+            raise self._submit_raises
+        return {"order_id": "brk_1", "client_order_id": kw["client_order_id"],
+                "status": "FILLED", "raw_status": "filled",
+                "filled_quantity": kw["quantity"], "remaining_quantity": 0.0,
+                "average_fill_price": 100.05,
+                "submitted_at": "2026-10-02T13:30:00+00:00"}
+
+    def find_by_client_order_id(self, client_order_id):
+        self.events.append("lookup")
+        if self._lookup is None:
+            return None
+        if isinstance(self._lookup, Exception):
+            raise self._lookup
+        return self._lookup
+
+
+class _RecordingLedger(InMemoryOrderLedger):
+    def __init__(self, events, intent_raises=None, obs_raises=None,
+                 get_raises=None):
+        super().__init__()
+        self.events = events
+        self._intent_raises = intent_raises
+        self._obs_raises = obs_raises
+        self._get_raises = get_raises
+
+    def get(self, client_order_id):
+        if self._get_raises:
+            raise self._get_raises
+        return super().get(client_order_id)
+
+    def record_intent(self, record):
+        if self._intent_raises:
+            raise self._intent_raises
+        self.events.append("intent")
+        return super().record_intent(record)
+
+    def record_observation(self, client_order_id, order, observed_at):
+        if self._obs_raises:
+            raise self._obs_raises
+        self.events.append("observation")
+        return super().record_observation(client_order_id, order, observed_at)
+
+
+class TestIntentBeforeSubmit(unittest.TestCase):
+    """An external order is durably recorded before it is sent.
+
+    The orphan on 2026-10-02 existed because nothing in this system had
+    any record of asking for the order that filled. These tests are about
+    the window that produced it.
+    """
+
+    def _approved(self):
+        return approved_pair()
+
+    def _submit(self, broker_obj, ledger, hd=None, **kw):
+        # `hd` is passed when the test has already seeded a ledger row
+        # for this decision. _approved() mints a new decision_id each
+        # call, and since the client order id is derived from it, calling
+        # it twice would produce a different id and the seeded row would
+        # never be found - the test would pass for the wrong reason.
+        h, d = hd if hd is not None else self._approved()
+        return submit_approved(broker_obj, d, h, 100.0,
+                               execution_available=True, ledger=ledger,
+                               session_date="2026-10-02",
+                               cohort="TEST_COHORT", **kw)
+
+    # --- the ordering property ------------------------------------------
+
+    def test_the_intent_is_recorded_before_the_order_is_sent(self):
+        events = []
+        b = _FakeExternalBroker(events)
+        self._submit(b, _RecordingLedger(events))
+        self.assertEqual(events, ["intent", "submit", "observation"])
+        self.assertLess(events.index("intent"), events.index("submit"))
+
+    def test_a_failed_intent_write_prevents_the_submission(self):
+        events = []
+        b = _FakeExternalBroker(events)
+        ledger = _RecordingLedger(events,
+                                  intent_raises=OrderLedgerError("table gone"))
+        with self.assertRaises(ExecutionRefused) as caught:
+            self._submit(b, ledger)
+        self.assertIn("NOT submitted", str(caught.exception))
+        # The property: nothing reached the venue.
+        self.assertEqual(b.submits, [])
+        self.assertNotIn("submit", events)
+
+    def test_an_unreadable_ledger_prevents_the_submission(self):
+        events = []
+        b = _FakeExternalBroker(events)
+        ledger = _RecordingLedger(events,
+                                  get_raises=OrderLedgerError("read failed"))
+        with self.assertRaises(ExecutionRefused) as caught:
+            self._submit(b, ledger)
+        self.assertIn("could not be read", str(caught.exception))
+        self.assertEqual(b.submits, [])
+
+    # --- the ledger is not optional for an external venue ---------------
+
+    def test_an_external_broker_without_a_ledger_refuses(self):
+        events = []
+        b = _FakeExternalBroker(events)
+        h, d = self._approved()
+        with self.assertRaises(ExecutionRefused) as caught:
+            submit_approved(b, d, h, 100.0, execution_available=True,
+                            ledger=None, session_date="2026-10-02")
+        self.assertIn("ledger", str(caught.exception))
+        self.assertEqual(b.submits, [])
+
+    def test_an_external_broker_without_a_session_date_refuses(self):
+        events = []
+        b = _FakeExternalBroker(events)
+        h, d = self._approved()
+        with self.assertRaises(ExecutionRefused):
+            submit_approved(b, d, h, 100.0, execution_available=True,
+                            ledger=_RecordingLedger(events), session_date=None)
+        self.assertEqual(b.submits, [])
+
+    def test_the_simulator_still_needs_no_ledger(self):
+        """The in-process broker serialises its own orders, so requiring
+        a ledger of it would be ceremony rather than safety."""
+        h, d = self._approved()
+        order = submit_approved(broker(), d, h, 100.0,
+                                execution_available=True)
+        self.assertIsNotNone(order.get("client_order_id"))
+
+    # --- what the record says afterwards --------------------------------
+
+    def test_the_record_carries_the_intent_and_then_the_observation(self):
+        events = []
+        b = _FakeExternalBroker(events)
+        ledger = _RecordingLedger(events)
+        order = self._submit(b, ledger)
+        row = ledger.get(order["client_order_id"])
+        self.assertEqual(row.session_date, "2026-10-02")
+        self.assertEqual(row.cohort, "TEST_COHORT")
+        self.assertEqual(row.requested_quantity, b.submits[0]["quantity"])
+        self.assertIsNotNone(row.risk_decision_id)
+        self.assertIsNotNone(row.intent_at)
+        self.assertTrue(row.submission_outcome_known)
+        self.assertEqual(row.status, "FILLED")
+        self.assertEqual(row.broker_order_id, "brk_1")
+
+    def test_an_intent_is_written_even_when_the_submission_raises(self):
+        """The crash case. The order may or may not exist at the venue,
+        and the record is what makes finding out possible at all."""
+        events = []
+        b = _FakeExternalBroker(events, submit_raises=RuntimeError("boom"))
+        ledger = _RecordingLedger(events)
+        with self.assertRaises(RuntimeError):
+            self._submit(b, ledger)
+        rows = ledger.for_session("2026-10-02")
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0].submission_outcome_known)
+        # Not terminal, so it keeps reserving exposure until resolved.
+        self.assertFalse(rows[0].is_terminal)
+
+    def test_a_lost_observation_does_not_unsend_the_order(self):
+        """The order exists. Raising here would report a failure for an
+        order that was accepted, and the intent record already makes it
+        recoverable by polling."""
+        events = []
+        b = _FakeExternalBroker(events)
+        ledger = _RecordingLedger(events,
+                                  obs_raises=OrderLedgerError("write failed"))
+        order = self._submit(b, ledger)
+        self.assertEqual(order["status"], "FILLED")
+        self.assertEqual(len(b.submits), 1)
+
+    # --- lost-response recovery -----------------------------------------
+
+    def test_an_order_the_venue_already_has_is_not_sent_again(self):
+        events = []
+        existing = {"order_id": "brk_prior", "status": "FILLED",
+                    "raw_status": "filled", "filled_quantity": 1.0,
+                    "average_fill_price": 99.0}
+        b = _FakeExternalBroker(events, lookup=existing)
+        ledger = _RecordingLedger(events)
+        h, d = self._approved()
+        cli = build_proposal(d, 100.0).client_order_id
+        ledger.record_intent(ExternalOrderRecord(
+            client_order_id=cli, session_date="2026-10-02",
+            symbol=d.symbol, side="BUY", requested_notional=100.0))
+        order = self._submit(b, ledger, hd=(h, d))
+        self.assertEqual(order["order_id"], "brk_prior")
+        self.assertEqual(b.submits, [])          # the whole point
+        self.assertNotIn("submit", events)
+        self.assertTrue(ledger.get(cli).submission_outcome_known)
+
+    def test_a_confirmed_absence_resends_the_same_client_id(self):
+        """A confirmed absence means the earlier attempt never reached
+        the venue. Resending is correct, and it must reuse the same
+        logical id so the venue's own idempotency still applies."""
+        events = []
+        b = _FakeExternalBroker(events, lookup=None)
+        ledger = _RecordingLedger(events)
+        h, d = self._approved()
+        cli = build_proposal(d, 100.0).client_order_id
+        ledger.record_intent(ExternalOrderRecord(
+            client_order_id=cli, session_date="2026-10-02",
+            symbol=d.symbol, side="BUY", requested_notional=100.0))
+        order = self._submit(b, ledger, hd=(h, d))
+        self.assertEqual(len(b.submits), 1)
+        self.assertEqual(b.submits[0]["client_order_id"], cli)
+        self.assertEqual(order["client_order_id"], cli)
+
+    def test_an_unanswerable_lookup_refuses_rather_than_risking_a_double(self):
+        events = []
+        b = _FakeExternalBroker(events, lookup=RuntimeError("venue down"))
+        ledger = _RecordingLedger(events)
+        h, d = self._approved()
+        cli = build_proposal(d, 100.0).client_order_id
+        ledger.record_intent(ExternalOrderRecord(
+            client_order_id=cli, session_date="2026-10-02",
+            symbol=d.symbol, side="BUY", requested_notional=100.0))
+        with self.assertRaises(ExecutionRefused) as caught:
+            self._submit(b, ledger, hd=(h, d))
+        self.assertIn("could not be queried", str(caught.exception))
+        self.assertEqual(b.submits, [])
+
+    def test_a_venue_with_no_lookup_refuses_to_resubmit_an_observed_order(self):
+        events = []
+
+        class _NoLookup(_FakeExternalBroker):
+            find_by_client_order_id = None
+
+        b = _NoLookup(events)
+        ledger = _RecordingLedger(events)
+        h, d = self._approved()
+        cli = build_proposal(d, 100.0).client_order_id
+        row = ExternalOrderRecord(
+            client_order_id=cli, session_date="2026-10-02",
+            symbol=d.symbol, side="BUY", requested_notional=100.0)
+        row.submission_outcome_known = True
+        row.status = "FILLED"
+        ledger.record_intent(row)
+        with self.assertRaises(ExecutionRefused) as caught:
+            self._submit(b, ledger, hd=(h, d))
+        self.assertIn("already been submitted", str(caught.exception))
+        self.assertEqual(b.submits, [])
+
+    # --- the marker itself ----------------------------------------------
+
+    def test_the_alpaca_adapter_declares_itself_external(self):
+        from agent.broker.alpaca_paper import AlpacaPaperBroker
+        self.assertTrue(AlpacaPaperBroker.is_external_venue)
+
+    def test_the_simulator_does_not_declare_itself_external(self):
+        self.assertFalse(PaperBroker.is_external_venue)
+
+    def test_a_new_adapter_defaults_to_not_external(self):
+        """The default has to be the laxer path's opposite: a new
+        adapter must opt IN to being trusted as in-process."""
+        self.assertFalse(BrokerAdapter.is_external_venue)

@@ -30,6 +30,7 @@ from ..autonomy.health import Condition
 from ..autonomy.policy import Action, AutonomyPolicy, PolicyViolation
 from ..broker.alpaca_paper import UncertainSubmission
 from ..broker.execution import ExecutionRefused, submit_approved
+from ..broker.order_poller import poll_outstanding
 from ..journal import record_closed_position
 from ..observability import log_event
 from ..positions import ExitContext, ExitPlan, ExitReason, StopMechanism
@@ -115,7 +116,8 @@ class MarketDayOrchestrator:
                  cycle_lock=None,
                  autonomy: Optional[AutonomyPolicy] = None,
                  health=None, alerts=None, decisions=None,
-                 versions: Optional[Dict] = None):
+                 versions: Optional[Dict] = None,
+                 order_ledger=None, cohort: Optional[str] = None):
         self.broker = broker
         self.positions = position_manager
         self.journal = journal
@@ -127,6 +129,12 @@ class MarketDayOrchestrator:
         self.alerts = alerts
         self.decisions = decisions
         self.versions = dict(versions or {})
+        # The durable record of every order sent to an external venue.
+        # An external broker will refuse to submit without it, which is
+        # the point: an order that nothing recorded cannot be found
+        # again after a crash.
+        self.order_ledger = order_ledger
+        self.cohort = cohort
 
         if autonomy is not None:
             # The policy is the single source of truth. The two legacy
@@ -209,6 +217,9 @@ class MarketDayOrchestrator:
 
             # --- 1. reconcile --------------------------------------------
             self._reconcile(result)
+            # Before exits and before entries: an accepted order
+            # is exposure, and the entry path must see it.
+            self._poll_external_orders(result, session_date)
 
             # --- 2. exits, ALWAYS before entries -------------------------
             self._manage_exits(result, phase, quote_for, minutes_to_close,
@@ -657,6 +668,63 @@ class MarketDayOrchestrator:
         result.add_step("reconcile", ok=reconciliation.matched,
                         detail=reconciliation.detail)
 
+    def _poll_external_orders(self, result: CycleResult,
+                              session_date: str) -> None:
+        """Follow up every order the venue has not finished with.
+
+        Runs BEFORE entries, because an accepted-but-unfilled order is
+        exposure and a decision sized as though it were not live is how
+        an account ends up past its own limits.
+
+        Never fatal. A poll that could not complete reports PARTIAL or
+        UNKNOWN integrity, which the entry path reads as a reason to
+        refuse rather than as a clean zero.
+        """
+        if self.order_ledger is None:
+            result.add_step("poll_external_orders", ok=True, skipped=True,
+                            skip_reason="no order ledger (internal broker)")
+            return
+        try:
+            poll = poll_outstanding(self.broker, self.order_ledger,
+                                    session_date)
+        except Exception as exc:                          # noqa: BLE001
+            # Leave committed_exposure as None, not 0.0. The entry path
+            # treats unknown exposure as a refusal.
+            result.committed_exposure_known = False
+            result.add_step("poll_external_orders", ok=False,
+                            detail=f"{type(exc).__name__}: {exc}"[:200])
+            log_event("order_poll_failed", session_date=session_date,
+                      error=str(exc)[:200])
+            return
+
+        result.order_poll = poll
+        result.pending_external_orders = poll.get("outstanding")
+        result.committed_exposure_known = bool(poll.get("exposure_known"))
+        exposure = poll.get("exposure") or {}
+        result.committed_exposure = (exposure.get("reserved")
+                                     if result.committed_exposure_known
+                                     else None)
+        result.oldest_pending_order_age_seconds = poll.get(
+            "oldest_pending_age_seconds")
+
+        if poll.get("never_placed"):
+            log_event("order_never_placed", session_date=session_date,
+                      detail=f"{poll['never_placed']} order(s) confirmed "
+                             f"absent at the venue")
+        if poll.get("vanished"):
+            self._alert(result, AlertKind.UNCERTAIN_ORDER_STATE,
+                        f"{poll['vanished']} order(s) acknowledged by the "
+                        f"venue can no longer be found there")
+        integrity = poll.get("integrity")
+        result.add_step(
+            "poll_external_orders",
+            ok=integrity == "COMPLETE",
+            detail=(f"integrity={integrity} outstanding="
+                    f"{poll.get('outstanding')} observed="
+                    f"{poll.get('observed')} never_placed="
+                    f"{poll.get('never_placed')} "
+                    f"exposure_known={result.committed_exposure_known}"))
+
     def _manage_exits(self, result: CycleResult, phase: CyclePhase,
                       quote_for, minutes_to_close, session_date,
                       realized_pnl_today: float = 0.0) -> None:
@@ -821,8 +889,31 @@ class MarketDayOrchestrator:
                           realized_pnl_today, positions_opened_today,
                           minutes_to_close) -> None:
         """Scan, decide, enter. The only step that adds risk."""
+        # --- pending orders are exposure ----------------------------------
+        #
+        # An accepted-but-unfilled BUY may fill a moment from now. Sizing
+        # a second entry as though it were not live is how an account
+        # ends up past the ceiling its limits describe. So the reserved
+        # amount is added to the day's deployed capital BEFORE any
+        # decision is evaluated.
+        #
+        # And if the reservation could not be established, no entry is
+        # made at all. Treating unknown exposure as zero is the one
+        # arithmetic error that silently permits everything.
+        if self.order_ledger is not None and not result.committed_exposure_known:
+            result.add_step(
+                "consider_entries", ok=False, skipped=True,
+                skip_reason="committed exposure from outstanding orders "
+                            "could not be established; no new exposure is "
+                            "opened while it is unknown")
+            log_event("entries_blocked_unknown_exposure",
+                      session_date=session_date,
+                      detail="outstanding external order exposure is "
+                             "UNKNOWN, which is not zero")
+            return
+
         held = {p.symbol for p in self.positions.open_positions()}
-        deployed = capital_deployed
+        deployed = capital_deployed + (result.committed_exposure or 0.0)
         opened = positions_opened_today
         failures: List[str] = []
 
@@ -926,7 +1017,10 @@ class MarketDayOrchestrator:
                 order = submit_approved(
                     self.broker, decision, hypothesis,
                     reference_price=context.price,
-                    execution_available=self.execution_available)
+                    execution_available=self.execution_available,
+                    ledger=self.order_ledger,
+                    session_date=session_date,
+                    cohort=self.cohort)
             except UncertainSubmission as exc:
                 # The order may or may not exist. Placing anything else
                 # around it would compound an unknown, so entries stop

@@ -36,7 +36,15 @@ from typing import Dict, List, Optional
 # Statuses from which no further transition is possible. Anything else -
 # including an unrecognised status - is non-terminal, because an order we
 # cannot classify must not be treated as finished.
-TERMINAL = frozenset({"FILLED", "CANCELLED", "REJECTED", "EXPIRED"})
+# This system's own conclusion, not a venue status: the venue has
+# CONFIRMED there is no such order. Reachable only from a confirmed
+# absence after a grace period, never from a failed lookup, because
+# "I could not ask" and "it does not exist" release exposure in
+# opposite directions.
+NEVER_PLACED = "NEVER_PLACED"
+
+TERMINAL = frozenset({"FILLED", "CANCELLED", "REJECTED", "EXPIRED",
+                      NEVER_PLACED})
 
 # What the agent knows about whether this order resulted in exposure.
 LIFECYCLE_EXPECTED_NOT_FILLED = "EXPECTED_NOT_FILLED"
@@ -46,6 +54,7 @@ LIFECYCLE_CANCELLED_UNFILLED = "CANCELLED_UNFILLED"
 LIFECYCLE_CANCELLED_PARTIAL = "CANCELLED_PARTIAL"
 LIFECYCLE_REJECTED = "REJECTED"
 LIFECYCLE_UNKNOWN = "UNKNOWN"
+LIFECYCLE_NEVER_PLACED = "NEVER_PLACED"
 
 
 class OrderLedgerError(Exception):
@@ -100,6 +109,8 @@ class ExternalOrderRecord:
         if not self.submission_outcome_known:
             return LIFECYCLE_UNKNOWN
         status = self.status or ""
+        if status == NEVER_PLACED:
+            return LIFECYCLE_NEVER_PLACED
         if status == "FILLED":
             return LIFECYCLE_FILLED
         if status == "REJECTED":
@@ -200,6 +211,10 @@ class OrderLedger:
     def for_session(self, session_date: str) -> List[ExternalOrderRecord]:
         raise NotImplementedError
 
+    def record_never_placed(self, client_order_id: str,
+                            observed_at: str) -> ExternalOrderRecord:
+        raise NotImplementedError
+
     def non_terminal(self, session_date: str) -> List[ExternalOrderRecord]:
         return [r for r in self.for_session(session_date)
                 if not (r.is_terminal and r.submission_outcome_known)]
@@ -227,12 +242,53 @@ class InMemoryOrderLedger(OrderLedger):
         _apply(row, order, observed_at)
         return row
 
+    def record_never_placed(self, client_order_id, observed_at):
+        row = self._rows.get(client_order_id)
+        if row is None:
+            raise OrderLedgerError(
+                f"no intent recorded for {client_order_id}")
+        _mark_never_placed(row, observed_at)
+        return row
+
     def get(self, client_order_id):
         return self._rows.get(client_order_id)
 
     def for_session(self, session_date):
         return [r for r in self._rows.values()
                 if r.session_date == session_date]
+
+
+def _mark_never_placed(row: ExternalOrderRecord, observed_at: str) -> None:
+    """Record that the venue confirms this order does not exist.
+
+    Two guards, both of which exist because the alternative is silently
+    wrong rather than loudly wrong:
+
+    A row with a fill cannot be "never placed" - something filled it,
+    so the record and the conclusion contradict each other and the
+    conclusion is the one that must give way.
+
+    A row whose outcome was already observed cannot be "never placed"
+    either: we saw it at the venue. Treating a later absence as proof of
+    non-existence would release the reservation on an order we have
+    watched execute.
+    """
+    if (row.filled_quantity or 0.0) > 0:
+        raise OrderLedgerError(
+            f"{row.client_order_id} has a recorded fill of "
+            f"{row.filled_quantity}; an order that filled cannot be "
+            f"marked as never placed")
+    if row.submission_outcome_known:
+        raise OrderLedgerError(
+            f"{row.client_order_id} was already observed at the venue "
+            f"with status {row.status!r}; a later absence is a "
+            f"contradiction, not proof it was never placed")
+    row.status = NEVER_PLACED
+    row.raw_status = None          # the venue never said this
+    row.remaining_quantity = 0.0
+    row.last_observed_at = observed_at
+    row.observations += 1
+    row.submission_outcome_known = True
 
 
 def _apply(row: ExternalOrderRecord, order: Dict, observed_at: str) -> None:
@@ -324,6 +380,27 @@ class DynamoDBOrderLedger(OrderLedger):
         except Exception as exc:                          # noqa: BLE001
             raise OrderLedgerError(
                 f"could not record observation for {client_order_id}: "
+                f"{type(exc).__name__}") from None
+        return row
+
+    def record_never_placed(self, client_order_id, observed_at):
+        row = self.get(client_order_id)
+        if row is None:
+            raise OrderLedgerError(
+                f"no intent recorded for {client_order_id}")
+        _mark_never_placed(row, observed_at)
+        try:
+            self.client.put_item(
+                TableName=self.table_name,
+                Item={"PK": {"S": f"EXTORDERS#{row.session_date}"},
+                      "SK": {"S": row.client_order_id},
+                      "payload": {"S": json.dumps(
+                          {k: getattr(row, k)
+                           for k in row.__dataclass_fields__},
+                          default=str)}})
+        except Exception as exc:                          # noqa: BLE001
+            raise OrderLedgerError(
+                f"could not record absence for {client_order_id}: "
                 f"{type(exc).__name__}") from None
         return row
 

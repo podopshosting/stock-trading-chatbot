@@ -181,6 +181,9 @@ def normalise_order(raw: Dict) -> Dict:
 class AlpacaPaperBroker(BrokerAdapter):
     name = "alpaca_paper"
     is_paper = True
+    # Orders leave this process over the network, so an order ledger is
+    # required before one may be sent. See BrokerAdapter.
+    is_external_venue = True
 
     def __init__(self, transport=None, base_url: str = PAPER_BASE_URL,
                  clock: Callable[[], float] = time.time,

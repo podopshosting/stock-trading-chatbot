@@ -145,3 +145,100 @@ class TestEvidenceStrength(unittest.TestCase):
     def test_a_different_decision_does_not_collide(self):
         self.assertNotEqual(client_order_id_for("risk_aaa", "ENTRY"),
                             client_order_id_for("risk_bbb", "ENTRY"))
+
+
+class TestTheTwoDerivationsCannotDrift(unittest.TestCase):
+    """The client order id is derived in TWO places, by design.
+
+    `agent/broker/execution.py` builds it when proposing an order;
+    `agent/broker/provenance.py` reconstructs it when deciding whose a
+    discovered position is. Provenance deliberately cannot import the
+    execution path, because the read API must not be able to reach it,
+    so the same rule is written twice.
+
+    Two implementations of one rule drift. If they ever disagreed the
+    ledger would key orders under one id while provenance reconstructed
+    another; adoption would quietly stop recognising the agent's own
+    positions, and every other test would still pass, because each side
+    is internally self-consistent. This is the only test that fails.
+
+    Canonical fixed decision ids, not generated ones: a generated
+    decision makes the comparison depend on hypothesis generation, and
+    a fixture that drifts cannot pin anything.
+    """
+
+    # Includes the real DRAM decision, whose id was proven byte-for-byte
+    # against the venue on 2026-10-02.
+    CANONICAL = (
+        "risk_adef08c5015b",
+        "risk_0000000000",
+        "risk_ffffffffffffffffffff",
+        "d1",
+        "risk_with:colon",
+        "risk_with spaces",
+        "risk_unicode_éè",
+    )
+    INTENTS = ("ENTRY", "EXIT", "REPLACE", "")
+
+    class _Decision:
+        """The minimum build_proposal needs, with a fixed decision id."""
+        approved = True
+        capital_required = 100.0
+        symbol = "XYZ"
+        hypothesis_id = "h1"
+
+        def __init__(self, decision_id):
+            self.decision_id = decision_id
+
+    def test_both_implementations_agree_byte_for_byte(self):
+        from agent.broker.execution import build_proposal
+        for decision_id in self.CANONICAL:
+            for intent in self.INTENTS:
+                with self.subTest(decision=decision_id, intent=intent):
+                    proposed = build_proposal(
+                        self._Decision(decision_id), 100.0,
+                        intent=intent).client_order_id
+                    reconstructed = client_order_id_for(decision_id, intent)
+                    self.assertEqual(
+                        proposed, reconstructed,
+                        "execution.py and provenance.py derive different "
+                        "client order ids; provenance can no longer prove "
+                        "a position is the agent's own")
+
+    def test_repeated_calls_are_stable_on_both_sides(self):
+        """Determinism is the property the whole scheme rests on: a
+        retry must produce the same id or the venue cannot dedupe it."""
+        from agent.broker.execution import build_proposal
+        for decision_id in self.CANONICAL[:3]:
+            first = build_proposal(self._Decision(decision_id), 100.0,
+                                   intent="ENTRY").client_order_id
+            for _ in range(5):
+                self.assertEqual(
+                    build_proposal(self._Decision(decision_id), 100.0,
+                                   intent="ENTRY").client_order_id, first)
+                self.assertEqual(
+                    client_order_id_for(decision_id, "ENTRY"), first)
+
+    def test_the_reference_price_does_not_enter_the_id(self):
+        """A retry at a different price is the SAME logical order. If
+        price entered the id, a retry after a tick would place a second
+        order and the venue would have no way to tell."""
+        from agent.broker.execution import build_proposal
+        a = build_proposal(self._Decision("risk_px"), 100.0).client_order_id
+        b = build_proposal(self._Decision("risk_px"), 987.65).client_order_id
+        self.assertEqual(a, b)
+        self.assertEqual(a, client_order_id_for("risk_px", "ENTRY"))
+
+    def test_the_shared_shape_holds_on_both_sides(self):
+        from agent.broker.execution import build_proposal
+        from agent.broker.provenance import CLIENT_ID_PREFIX, DIGEST_LENGTH
+        proposed = build_proposal(self._Decision("risk_shape"),
+                                  100.0).client_order_id
+        for cli in (proposed, client_order_id_for("risk_shape", "ENTRY")):
+            self.assertTrue(cli.startswith(CLIENT_ID_PREFIX))
+            self.assertEqual(len(cli), len(CLIENT_ID_PREFIX) + DIGEST_LENGTH)
+            self.assertLessEqual(len(cli), 128)   # Alpaca's limit
+
+    def test_different_intents_never_collide(self):
+        ids = {client_order_id_for("risk_same", i) for i in self.INTENTS}
+        self.assertEqual(len(ids), len(self.INTENTS))

@@ -86,6 +86,18 @@ EVENTS = frozenset({
     "order_rejected",
     "order_expired",
     "order_duplicate_suppressed",
+    # the durable record of an external order, written before it is sent
+    "order_intent_recorded",
+    "order_intent_unsent",
+    "order_recovered_by_client_id",
+    "order_observation_not_recorded",
+    # following up orders whose outcome is not yet known
+    "order_status_changed",
+    "order_never_placed",
+    "order_vanished_from_venue",
+    "order_poll_failed",
+    "order_poll_ledger_unreadable",
+    "entries_blocked_unknown_exposure",
     "position_opened",
     "position_reduced",
     "position_closed",

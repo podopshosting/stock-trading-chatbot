@@ -269,11 +269,18 @@ class TestNoExecutionRouteExists(unittest.TestCase):
         # own by reconstructing its deterministic client order id. Neither
         # contains a host of any kind, which the next test verifies
         # against the source rather than taking on trust.
+        #
+        # order_poller.py was added 2026-10-02 alongside them. It follows
+        # up orders whose outcome is not yet known. It is not an adapter
+        # and holds no endpoint: it is handed a broker and calls only the
+        # public lookup surface (get_order, find_by_client_order_id), so
+        # whatever venue it reaches is whatever the caller already had.
         self.assertEqual(
             modules,
             ["__init__.py", "alpaca_paper.py", "base.py", "execution.py",
              "live_contract.py", "models.py", "order_ledger.py",
-             "paper.py", "provenance.py", "shadow.py", "store.py"],
+             "order_poller.py", "paper.py", "provenance.py", "shadow.py",
+             "store.py"],
             "a new module appeared in agent/broker; if it is a live "
             "adapter, the readiness gate must be reconsidered")
 

@@ -45,6 +45,7 @@ from agent.broker import (
     PaperBroker, PaperBrokerConfig, Quote,
 )
 from agent.broker.alpaca_paper import AlpacaPaperBroker, RequestsTransport
+from agent.broker.order_ledger import DynamoDBOrderLedger
 from agent.broker.store import restore as restore_broker
 from agent.config import AgentConfig
 from agent.hypothesis import generate as generate_hypothesis
@@ -391,7 +392,20 @@ def _run(session_date: str) -> Dict:
         limits=RiskLimits(),
         cycle_lock=DynamoDBCycleLock(table_name=JOURNAL_TABLE),
         autonomy=policy, health=health, alerts=alerts, decisions=decisions,
-        versions=versions)
+        versions=versions,
+        # The durable record of every order sent to the venue, written
+        # BEFORE the order goes out. An external broker REFUSES to
+        # submit without it - see docs/INTENT-BEFORE-SUBMIT.md.
+        #
+        # Supplied only where the venue is external, which is where the
+        # orphan class exists: the in-process simulator's orders are
+        # serialised with its own state by agent/broker/store.py, so a
+        # ledger would add writes without adding recoverability. It uses
+        # the journal table that already exists, so there is no new
+        # table and no permission change.
+        order_ledger=(DynamoDBOrderLedger(table_name=JOURNAL_TABLE)
+                      if external is not None else None),
+        cohort=cohort)
 
     # --- daily counters from the JOURNAL, not from memory --------------
     counters = daily_counters(journal, manager, session_date)

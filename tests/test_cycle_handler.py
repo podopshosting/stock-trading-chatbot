@@ -29,6 +29,7 @@ from agent.autonomy import (                                      # noqa: E402
     Condition, InMemoryAlertSink, InMemoryDecisionLog,
     InMemoryHealthStore, InMemorySessionStore, InMemorySnapshotStore,
 )
+from agent.broker.order_ledger import InMemoryOrderLedger  # noqa: E402
 from agent.broker import InMemoryBrokerStateStore                  # noqa: E402
 from agent.journal import InMemoryJournal                         # noqa: E402
 from agent.market.session import MarketSessionResult, TradingDay  # noqa: E402
@@ -1314,6 +1315,10 @@ class StrictExternalBroker:
     base_url = "https://paper-api.alpaca.markets"
     name = "alpaca_paper"
     is_paper = True
+    # Faithful to the real adapter. Without this the double would take
+    # the in-process branch in submit_approved, and the handler tests
+    # would never exercise the external path they exist to cover.
+    is_external_venue = True
     quarantined = False
 
     def __init__(self, cash=100000.0):
@@ -1471,7 +1476,13 @@ class TestAnUnfilledEntryOrderIsNotAbandoned(unittest.TestCase):
     """
 
     def run_unfilled(self):
-        world = World()
+        # An external venue refuses to submit without a durable order
+        # record, which is the point of it - so this path needs a real
+        # ledger, not a stub that swallows writes. In-memory keeps the
+        # test hermetic while still exercising the intent-before-submit
+        # sequence. See docs/INTENT-BEFORE-SUBMIT.md.
+        self.ledger = InMemoryOrderLedger()
+        world = self.world = World()
         world.health = RecordingHealthStore()
         broker = UnfillingBroker()
         with mock.patch.object(cycle, "AlpacaPaperBroker",
@@ -1480,7 +1491,9 @@ class TestAnUnfilledEntryOrderIsNotAbandoned(unittest.TestCase):
                                lambda *_a, **_k: object()), \
              mock.patch.object(cycle, "_load_alpaca_credentials",
                                lambda *_a, **_k: {"api_key_id": "k",
-                                                 "api_secret_key": "s"}):
+                                                 "api_secret_key": "s"}), \
+             mock.patch.object(cycle, "DynamoDBOrderLedger",
+                               lambda **_kw: self.ledger):
             out = world.invoke(env={"AGENT_BROKER": "alpaca_paper"})
         return broker, out
 
@@ -1500,6 +1513,26 @@ class TestAnUnfilledEntryOrderIsNotAbandoned(unittest.TestCase):
     def test_no_position_is_claimed(self):
         broker, out = self.run_unfilled()
         self.assertEqual(out.get("entries_submitted", 0), 0)
+
+    def test_the_order_is_in_the_ledger_with_the_id_the_venue_got(self):
+        """End to end through the real handler: the orphan of
+        2026-10-02 was an order at the venue with no local record, so
+        the property is that the two agree on the id."""
+        broker, _out = self.run_unfilled()
+        rows = self.ledger.for_session(self.world.date)
+        self.assertEqual(len(rows), 1, "the handler recorded no intent")
+        self.assertEqual(rows[0].client_order_id,
+                         broker.submitted[0]["client_order_id"])
+        self.assertEqual(rows[0].symbol, "XYZ")
+        self.assertIsNotNone(rows[0].risk_decision_id)
+        self.assertIsNotNone(rows[0].intent_at)
+
+    def test_an_unfilled_order_keeps_reserving_exposure_in_the_ledger(self):
+        """It is cancelled at the venue, but until an observation says
+        so the record must not read as zero exposure."""
+        _broker, _out = self.run_unfilled()
+        row = self.ledger.for_session(self.world.date)[0]
+        self.assertNotEqual(row.potential_exposure, 0.0)
 
     def test_the_cycle_still_completes(self):
         _broker, out = self.run_unfilled()

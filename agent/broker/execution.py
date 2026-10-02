@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from ..observability import log_event
+from .order_ledger import ExternalOrderRecord, OrderLedgerError
 
 
 class ExecutionRefused(Exception):
@@ -94,9 +96,149 @@ def build_proposal(decision, reference_price: float,
         client_order_id=f"cli_{digest}")
 
 
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _recover_or_record_intent(broker, ledger, proposal, session_date,
+                              cohort, external, stamp):
+    """Make the order durable, or recover one already sent.
+
+    Returns a broker order dict if the order turns out to exist already,
+    in which case the caller must NOT submit. Returns None when it is
+    safe to submit.
+
+    Every failure path here raises rather than returning None. An
+    unreadable or unwritable ledger means the agent cannot tell whether
+    an order exists, and submitting under that uncertainty is exactly how
+    one order becomes two.
+    """
+    try:
+        existing = ledger.get(proposal.client_order_id)
+    except Exception as exc:                              # noqa: BLE001
+        # Not "assume absent". An absent record and an unreadable one
+        # look identical from here and mean opposite things.
+        raise ExecutionRefused(
+            f"the order ledger could not be read for "
+            f"{proposal.client_order_id}, so it cannot be established "
+            f"whether this order has already been sent: {exc}") from exc
+
+    if existing is not None:
+        lookup = getattr(broker, "find_by_client_order_id", None)
+        if callable(lookup):
+            try:
+                found = lookup(proposal.client_order_id)
+            except Exception as exc:                      # noqa: BLE001
+                raise ExecutionRefused(
+                    f"an intent already exists for "
+                    f"{proposal.client_order_id} and the venue could not "
+                    f"be queried to find out whether it was placed: "
+                    f"{exc}") from exc
+            if found is not None:
+                # The order exists. This is the lost-response case: the
+                # intent was written, the submission went out, and the
+                # answer never arrived. Adopting the venue's order is
+                # the whole purpose of a deterministic client id.
+                log_event("order_recovered_by_client_id",
+                          symbol=proposal.symbol,
+                          client_order_id=proposal.client_order_id,
+                          status=found.get("status"),
+                          detail="intent existed; the venue already has "
+                                 "this order, so it was not sent again")
+                _record_submission(ledger, proposal, found, stamp,
+                                   required=False)
+                return found
+            # `found is None` only where the adapter has CONFIRMED
+            # absence - AlpacaPaperBroker cross-checks a 404 against the
+            # order list for this exact reason. A confirmed absence means
+            # the earlier attempt never reached the venue, so the same
+            # id may be sent. No second logical order is created.
+            log_event("order_intent_unsent",
+                      symbol=proposal.symbol,
+                      client_order_id=proposal.client_order_id,
+                      detail="an intent existed but the venue confirms no "
+                             "such order; resending the same id")
+            return None
+        if existing.submission_outcome_known:
+            # No way to ask the venue, and the ledger says this order's
+            # outcome was already observed. Submitting again would be a
+            # duplicate on the strength of a record we already hold.
+            raise ExecutionRefused(
+                f"{proposal.client_order_id} has already been submitted "
+                f"and observed (status {existing.status}); this broker "
+                f"offers no client-id lookup, so resubmission is refused "
+                f"rather than risked")
+        return None
+
+    record = ExternalOrderRecord(
+        client_order_id=proposal.client_order_id,
+        session_date=session_date or "",
+        symbol=proposal.symbol,
+        side=proposal.side,
+        requested_quantity=proposal.quantity,
+        requested_notional=proposal.notional,
+        intent=proposal.intent,
+        broker_environment=(getattr(broker, "base_url", None)
+                            or getattr(broker, "name", None)),
+        hypothesis_id=proposal.hypothesis_id,
+        risk_decision_id=proposal.risk_decision_id,
+        cohort=cohort,
+        intent_at=stamp,
+    )
+    try:
+        ledger.record_intent(record)
+    except Exception as exc:                              # noqa: BLE001
+        # THE RULE. The intent is written before the order is sent, and
+        # if it cannot be written the order is not sent. Submitting
+        # first and recording afterwards leaves a window in which a
+        # crash produces a filled position that nothing in this system
+        # has any record of asking for - which is precisely the orphan
+        # this module exists to prevent.
+        raise ExecutionRefused(
+            f"the order intent for {proposal.client_order_id} could not "
+            f"be recorded, so the order was NOT submitted: {exc}") from exc
+
+    log_event("order_intent_recorded", symbol=proposal.symbol,
+              client_order_id=proposal.client_order_id,
+              session_date=session_date, external=external)
+    return None
+
+
+def _record_submission(ledger, proposal, order, stamp, required=False):
+    """Fold the venue's answer into the record.
+
+    Deliberately NOT fatal by default. By the time this runs the order
+    has been accepted by the venue, so raising here would report a
+    failure for an order that exists - and the caller's error handling
+    would be about the wrong thing. The intent record is already durable
+    and carries the client order id, so a lost observation is recoverable
+    by polling. It is logged loudly because an unrecorded observation is
+    a real integrity gap, just not one that unsends an order.
+    """
+    try:
+        ledger.record_observation(proposal.client_order_id, order, stamp)
+    except Exception as exc:                              # noqa: BLE001
+        log_event("order_observation_not_recorded",
+                  symbol=proposal.symbol,
+                  client_order_id=proposal.client_order_id,
+                  broker_order_id=order.get("order_id"),
+                  status=order.get("status"),
+                  error=str(exc),
+                  detail="the order WAS submitted; its observation was "
+                         "not stored and must be recovered by polling")
+        if required:
+            raise OrderLedgerError(
+                f"could not record the observation for "
+                f"{proposal.client_order_id}") from exc
+
+
 def submit_approved(broker, decision, hypothesis, reference_price: float,
                     execution_available: bool = False,
-                    intent: str = "ENTRY") -> Dict:
+                    intent: str = "ENTRY",
+                    ledger=None,
+                    session_date: Optional[str] = None,
+                    cohort: Optional[str] = None,
+                    now: Optional[str] = None) -> Dict:
     """The gate. Every condition is checked separately and explicitly."""
     if not execution_available:
         raise ExecutionRefused(
@@ -124,7 +266,30 @@ def submit_approved(broker, decision, hypothesis, reference_price: float,
               risk_decision_id=proposal.risk_decision_id,
               client_order_id=proposal.client_order_id)
 
-    return broker.submit_order(
+    external = bool(getattr(broker, "is_external_venue", False))
+    if external and ledger is None:
+        # An order sent over the network and recorded nowhere is an
+        # orphan waiting for a crash. The simulator is exempt because
+        # its orders are serialised with its own state.
+        raise ExecutionRefused(
+            "this broker submits to an external venue and no order "
+            "ledger was supplied; an order that is not durably recorded "
+            "before it is sent cannot be recovered")
+    if external and not session_date:
+        raise ExecutionRefused(
+            "a session_date is required to record an external order")
+
+    stamp = now or _utcnow()
+    if ledger is not None:
+        already = _recover_or_record_intent(
+            broker, ledger, proposal, session_date, cohort, external, stamp)
+        if already is not None:
+            return already
+
+    # Intent is durable from here. Anything that goes wrong below leaves
+    # a record whose outcome is unknown, which is the state polling and
+    # reconciliation are built to resolve.
+    order = broker.submit_order(
         symbol=proposal.symbol, side=proposal.side,
         quantity=proposal.quantity, order_type=proposal.order_type,
         limit_price=proposal.limit_price,
@@ -133,3 +298,7 @@ def submit_approved(broker, decision, hypothesis, reference_price: float,
         hypothesis_id=proposal.hypothesis_id,
         risk_decision_id=proposal.risk_decision_id,
         intent=proposal.intent)
+
+    if ledger is not None and isinstance(order, dict):
+        _record_submission(ledger, proposal, order, stamp)
+    return order

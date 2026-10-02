@@ -18,6 +18,18 @@ class BrokerAdapter(ABC):
     name: str = "unknown"
     is_paper: bool = True
 
+    # Does submit_order reach a venue outside this process?
+    #
+    # The distinction is not cosmetic. The in-process simulator's orders
+    # are serialised with its own state, so an order it accepted is
+    # recoverable after a crash. An order sent over the network exists
+    # only at the venue, and nothing in this system would know it had
+    # been placed. That is the condition that produces an orphan, so an
+    # external submit requires a durable intent record first and the
+    # default here is False precisely so that a new adapter has to say
+    # so deliberately rather than inherit the laxer path.
+    is_external_venue: bool = False
+
     @abstractmethod
     def get_account(self) -> Dict: ...
 

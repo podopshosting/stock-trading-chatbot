@@ -30,6 +30,9 @@ from agent.autonomy import health as health_module                # noqa: E402
 from agent.broker import (                                        # noqa: E402
     PaperBroker, PaperBrokerConfig, Quote,
 )
+from agent.broker.order_ledger import (                           # noqa: E402
+    ExternalOrderRecord, InMemoryOrderLedger, OrderLedgerError,
+)
 from agent.hypothesis import generate                             # noqa: E402
 from agent.journal import InMemoryJournal                         # noqa: E402
 from agent.orchestration import (                                 # noqa: E402
@@ -95,6 +98,10 @@ class Rig:
         self.health = InMemoryHealthStore()
         self.alerts = InMemoryAlertSink()
         self.decisions = InMemoryDecisionLog()
+        # Supplied for every broker, not only the external one. The
+        # record is useful either way, and a rig that only wires it for
+        # Alpaca would leave the simulator path untested against it.
+        self.ledger = InMemoryOrderLedger()
         self.lock = InMemoryCycleLock() if with_lock else None
         self.versions = {"strategy": "s1", "risk": "r1", "exits": "e1",
                          "orchestration": "o1", "code_sha": "abc"}
@@ -104,7 +111,8 @@ class Rig:
             limits=limits or RiskLimits(), cycle_lock=self.lock,
             autonomy=AutonomyPolicy(mode=mode), health=self.health,
             alerts=self.alerts, decisions=self.decisions,
-            versions=self.versions)
+            versions=self.versions, order_ledger=self.ledger,
+            cohort="TEST")
 
     def cycle(self, phase=CyclePhase.INTRADAY, quote=quote_for,
               hypothesis=hypothesis_for, candidates=("XYZ",),
@@ -897,3 +905,100 @@ class TestDailyCountersSurviveClosingAPosition(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===========================================================================
+# PENDING ORDERS ARE EXPOSURE
+# ===========================================================================
+
+class TestAnAcceptedOrderIsExposureBeforeItFills(unittest.TestCase):
+    """The arithmetic that keeps the ceiling real.
+
+    An order the venue has accepted but not filled may fill a moment
+    from now. A second entry sized as though it were not live puts the
+    account past the limit its own configuration describes - and nothing
+    in the daily counters would show it, because the counters are built
+    from JOURNALLED trades and an unfilled order has not traded yet.
+    """
+
+    def _pending(self, notional, cli="cli_pending"):
+        return ExternalOrderRecord(
+            client_order_id=cli, session_date=SESSION, symbol="PEND",
+            side="BUY", requested_quantity=1.0,
+            requested_notional=notional, intent="ENTRY",
+            intent_at="2026-09-30T13:00:00+00:00")
+
+    def test_a_pending_order_consumes_the_daily_capital_ceiling(self):
+        rig = Rig()
+        # The whole ceiling is already reserved by an accepted order.
+        rig.ledger.record_intent(self._pending(RiskLimits().daily_capital_limit))
+        result = rig.cycle()
+        self.assertEqual(result.entries_submitted, 0)
+        self.assertGreater(result.committed_exposure, 0.0)
+        self.assertTrue(result.committed_exposure_known)
+        # The reason is a BUDGET one, not a specific code. Reserving
+        # the whole ceiling leaves less room than min_position_value, so
+        # the governor refuses for INSUFFICIENT_CAPITAL before it ever
+        # reaches DAILY_CAPITAL_EXCEEDED. Asserting one exact code here
+        # would be asserting the order of the governor's checks rather
+        # than the property under test, which is that the pending order
+        # consumed the room.
+        from agent.autonomy.inactivity import CATEGORY
+        codes = {c for row in rig.decisions.for_session(SESSION)
+                 for c in ((row.get("risk") or {}).get("reason_codes") or [])}
+        self.assertTrue(codes, "no reason codes were recorded")
+        self.assertTrue(
+            any(CATEGORY.get(c) == "BUDGET" for c in codes),
+            f"expected a budget refusal, got {sorted(codes)}")
+
+    def test_without_the_pending_order_the_same_cycle_does_trade(self):
+        """The control. Without this, the test above would pass for a
+        cycle that was never going to trade anyway."""
+        rig = Rig()
+        self.assertEqual(rig.cycle().entries_submitted, 1)
+
+    def test_a_terminal_order_reserves_nothing(self):
+        rig = Rig()
+        row = self._pending(RiskLimits().daily_capital_limit)
+        rig.ledger.record_intent(row)
+        rig.ledger.record_observation(row.client_order_id, {
+            "order_id": "brk_done", "status": "CANCELLED",
+            "raw_status": "canceled", "filled_quantity": 0.0,
+            "remaining_quantity": 0.0}, "2026-09-30T13:05:00+00:00")
+        self.assertEqual(rig.cycle().entries_submitted, 1)
+
+    def test_unknown_exposure_opens_nothing_at_all(self):
+        """UNKNOWN is not zero. Zero is the one value that would let
+        every entry through."""
+        rig = Rig()
+
+        class Unreadable(InMemoryOrderLedger):
+            def for_session(self, session_date):
+                raise OrderLedgerError("ledger unreadable")
+
+        rig.orchestrator.order_ledger = Unreadable()
+        result = rig.cycle()
+        self.assertEqual(result.entries_submitted, 0)
+        self.assertFalse(result.committed_exposure_known)
+        self.assertIsNone(result.committed_exposure,
+                          "unknown exposure must not arrive as 0.0")
+        step = next(s for s in result.steps if s.name == "consider_entries")
+        self.assertTrue(step.skipped)
+        self.assertIn("could not be established", step.skip_reason)
+
+    def test_an_unsizeable_pending_order_also_blocks_entries(self):
+        rig = Rig()
+        row = self._pending(None, cli="cli_unsizeable")
+        row.requested_quantity = None
+        rig.ledger.record_intent(row)
+        result = rig.cycle()
+        self.assertFalse(result.committed_exposure_known)
+        self.assertEqual(result.entries_submitted, 0)
+
+    def test_the_poll_step_reports_its_integrity(self):
+        rig = Rig()
+        result = rig.cycle()
+        step = next(s for s in result.steps
+                    if s.name == "poll_external_orders")
+        self.assertIn("integrity=COMPLETE", step.detail)
+        self.assertIn("exposure_known=True", step.detail)

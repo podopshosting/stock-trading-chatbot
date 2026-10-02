@@ -56,6 +56,7 @@ RISK_MODELS = REPO / "agent" / "risk" / "models.py"
 BRK_PAPER = REPO / "agent" / "broker" / "paper.py"
 BRK_LEDGER = REPO / "agent" / "broker" / "order_ledger.py"
 BRK_PROV = REPO / "agent" / "broker" / "provenance.py"
+BRK_POLLER = REPO / "agent" / "broker" / "order_poller.py"
 BRK_EXEC = REPO / "agent" / "broker" / "execution.py"
 BRK_MODELS = REPO / "agent" / "broker" / "models.py"
 
@@ -1117,6 +1118,218 @@ MUTATIONS = [
         new='            "positions": [], "open_count": None, "total_open_risk": 0.0,  # MUTATION',
         expect=["unreadable", "open_risk", "zero"],
     ),
+    # --- following up orders whose outcome is not yet known, and
+    # --- counting them as exposure before they fill.
+    Mutation(
+        name="let-unknown-exposure-permit-entries",
+        description="open new exposure while the reserved amount from "
+                    "outstanding orders could not be established",
+        path=ORC_DAY,
+        old="        if self.order_ledger is not None and not "
+            "result.committed_exposure_known:",
+        new="        if False:  # MUTATION",
+        expect=["unknown", "exposure", "entries"],
+    ),
+    Mutation(
+        name="stop-counting-pending-orders-as-exposure",
+        description="size a new entry as though an accepted-but-unfilled "
+                    "order were not live",
+        path=ORC_DAY,
+        old="        deployed = capital_deployed + "
+            "(result.committed_exposure or 0.0)",
+        new="        deployed = capital_deployed  # MUTATION",
+        expect=["pending", "ceiling", "capital", "exposure"],
+    ),
+    Mutation(
+        name="never-poll-outstanding-orders",
+        description="leave every non-terminal order unfollowed, so an "
+                    "order's outcome is never learned",
+        path=ORC_DAY,
+        old="            self._poll_external_orders(result, session_date)",
+        new="            pass  # MUTATION",
+        expect=["poll", "exposure", "integrity"],
+    ),
+    Mutation(
+        name="treat-a-failed-lookup-as-a-confirmed-absence",
+        description="conclude an order was never placed because the venue "
+                    "could not be asked",
+        path=BRK_POLLER,
+        old="        if not confirmed:",
+        new="        if False:  # MUTATION",
+        expect=["absence", "silence", "lookup", "vanished"],
+    ),
+    Mutation(
+        name="drop-the-absence-grace-period",
+        description="conclude an order was never placed the instant the "
+                    "venue's list does not show it yet",
+        path=BRK_POLLER,
+        old="ABSENCE_GRACE_SECONDS = 60.0",
+        new="ABSENCE_GRACE_SECONDS = 0.0  # MUTATION",
+        expect=["grace", "absence", "inside"],
+    ),
+    Mutation(
+        name="mark-a-previously-seen-order-as-never-placed",
+        description="let an order we have watched at the venue be "
+                    "concluded never to have existed",
+        path=BRK_POLLER,
+        old="        if row.submission_outcome_known:",
+        new="        if False:  # MUTATION",
+        expect=["seen", "never_placed", "vanished"],
+    ),
+    Mutation(
+        name="report-a-bounded-poll-as-complete",
+        description="say the sweep was complete while a backlog of "
+                    "outstanding orders was not polled",
+        path=BRK_POLLER,
+        old='        result["integrity"] = INTEGRITY_PARTIAL\n        result["errors"].append(\n            f"{len(truncated)} order(s) not polled this pass (bound of "',
+        new='        result["errors"].append(  # MUTATION\n            f"{len(truncated)} order(s) not polled this pass (bound of "',
+        expect=["bound", "partial", "complete"],
+    ),
+    Mutation(
+        name="report-an-unreadable-ledger-as-zero-exposure",
+        description="an unreadable ledger reports no outstanding orders "
+                    "rather than unknown exposure",
+        path=BRK_POLLER,
+        old='        result["integrity"] = INTEGRITY_UNKNOWN\n        result["errors"].append(f"ledger unreadable: {exc}")',
+        new='        result["exposure_known"] = True  # MUTATION\n        result["errors"].append(f"ledger unreadable: {exc}")',
+        expect=["unreadable", "unknown", "exposure"],
+    ),
+    Mutation(
+        name="poll-with-no-lookup-and-call-it-complete",
+        description="a broker that cannot be asked about orders reports a "
+                    "clean sweep of zero",
+        path=BRK_POLLER,
+        old='        result["integrity"] = INTEGRITY_UNKNOWN\n        result["errors"].append(\n            "this broker offers no order lookup',
+        new='        result["errors"].append(  # MUTATION\n            "this broker offers no order lookup',
+        expect=["lookup", "unknown", "sweep"],
+    ),
+    Mutation(
+        name="let-a-filled-order-be-marked-never-placed",
+        description="release the reservation on an order that has a "
+                    "recorded fill",
+        path=BRK_LEDGER,
+        old="    if (row.filled_quantity or 0.0) > 0:",
+        new="    if False:  # MUTATION",
+        expect=["filled", "never", "placed"],
+    ),
+    # --- the deterministic client order id is derived in TWO modules
+    # --- that cannot import each other. One mutation per side, because
+    # --- a guard that only catches drift in one direction is half a
+    # --- guard.
+    Mutation(
+        name="drift-the-execution-side-client-id",
+        description="change the id execution.py derives so it no longer "
+                    "matches the one provenance.py reconstructs",
+        path=BRK_EXEC,
+        old='        f"{decision.decision_id}:{intent}".encode()).hexdigest()[:20]',
+        new='        f"{decision.decision_id}:{intent}:x".encode()'
+            ').hexdigest()[:20]  # MUTATION',
+        expect=["drift", "derivations", "byte_for_byte", "agree"],
+    ),
+    Mutation(
+        name="drift-the-provenance-side-client-id",
+        description="change the id provenance.py reconstructs so it no "
+                    "longer matches the one execution.py builds",
+        path=BRK_PROV,
+        old='        f"{risk_decision_id}:{intent}".encode()'
+            ').hexdigest()[:DIGEST_LENGTH]',
+        new='        f"{risk_decision_id}|{intent}".encode()'
+            ').hexdigest()[:DIGEST_LENGTH]  # MUTATION',
+        expect=["drift", "derivations", "byte_for_byte", "dram"],
+    ),
+    Mutation(
+        name="let-the-reference-price-enter-the-client-id",
+        description="make a retry at a different price produce a "
+                    "different id, defeating the venue's own dedupe",
+        path=BRK_EXEC,
+        old='        f"{decision.decision_id}:{intent}".encode()).hexdigest()[:20]',
+        new='        f"{decision.decision_id}:{intent}:{reference_price}"'
+            '.encode()).hexdigest()[:20]  # MUTATION',
+        expect=["reference_price", "price", "drift", "agree"],
+    ),
+    # --- intent before submit. The orphan on 2026-10-02 was a filled
+    # --- position that nothing in this system had recorded asking for.
+    # --- These seven are the window that produced it.
+    Mutation(
+        name="submit-first-record-intent-after",
+        description="send the order and write the durable intent "
+                    "afterwards, recreating the crash window exactly",
+        path=BRK_EXEC,
+        old="""    stamp = now or _utcnow()
+    if ledger is not None:
+        already = _recover_or_record_intent(""",
+        new="""    stamp = now or _utcnow()
+    if False:  # MUTATION
+        already = _recover_or_record_intent(""",
+        expect=["intent", "before", "recorded", "sent"],
+    ),
+    Mutation(
+        name="swallow-a-failed-intent-write",
+        description="let an order go to the venue even though its intent "
+                    "could not be recorded",
+        path=BRK_EXEC,
+        old="""        raise ExecutionRefused(
+            f"the order intent for {proposal.client_order_id} could not "
+            f"be recorded, so the order was NOT submitted: {exc}") from exc""",
+        new="        pass  # MUTATION",
+        expect=["intent", "prevents", "submission", "failed"],
+    ),
+    Mutation(
+        name="read-an-unreadable-ledger-as-empty",
+        description="treat a ledger that could not be read as proof that "
+                    "no such order exists",
+        path=BRK_EXEC,
+        old="""        raise ExecutionRefused(
+            f"the order ledger could not be read for "
+            f"{proposal.client_order_id}, so it cannot be established "
+            f"whether this order has already been sent: {exc}") from exc""",
+        new="        existing = None  # MUTATION",
+        expect=["unreadable", "ledger", "prevents"],
+    ),
+    Mutation(
+        name="submit-when-the-venue-cannot-be-asked",
+        description="an intent exists and the venue is unreachable, so "
+                    "assume the order was never placed and send it",
+        path=BRK_EXEC,
+        old="""                raise ExecutionRefused(
+                    f"an intent already exists for "
+                    f"{proposal.client_order_id} and the venue could not "
+                    f"be queried to find out whether it was placed: "
+                    f"{exc}") from exc""",
+        new="                found = None  # MUTATION",
+        expect=["unanswerable", "lookup", "refuses", "double"],
+    ),
+    Mutation(
+        name="resubmit-an-order-the-venue-already-has",
+        description="recover the existing order and then place a second "
+                    "one anyway",
+        path=BRK_EXEC,
+        old="""                _record_submission(ledger, proposal, found, stamp,
+                                   required=False)
+                return found""",
+        new="""                _record_submission(ledger, proposal, found, stamp,
+                                   required=False)  # MUTATION""",
+        expect=["venue", "already", "sent", "again"],
+    ),
+    Mutation(
+        name="make-the-ledger-optional-for-an-external-venue",
+        description="allow a network submission with no durable record "
+                    "of it anywhere",
+        path=BRK_EXEC,
+        old="    if external and ledger is None:",
+        new="    if False:  # MUTATION",
+        expect=["external", "ledger", "refuses"],
+    ),
+    Mutation(
+        name="make-a-lost-observation-unsend-the-order",
+        description="raise when the observation cannot be stored, "
+                    "reporting a failure for an order that exists",
+        path=BRK_EXEC,
+        old="        _record_submission(ledger, proposal, order, stamp)",
+        new="        _record_submission(ledger, proposal, order, stamp,"
+            " required=True)  # MUTATION",
+        expect=["observation", "unsend", "lost"],
+    ),
     # --- external order ledger: every guard here protects against a
     # --- defect that actually happened on 2026-10-02.
     Mutation(
@@ -1747,9 +1960,24 @@ def run_suites() -> Dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--only", action="append", default=None, metavar="SUBSTR",
+                    help="run only mutations whose name contains SUBSTR. "
+                         "For iterating on a NEW control; a filtered run is "
+                         "not a gate and says so in its own output.")
     args = ap.parse_args()
 
-    targets = {m.path for m in MUTATIONS}
+    mutations = list(MUTATIONS)
+    filtered = False
+    if args.only:
+        wanted = [w.lower() for w in args.only]
+        mutations = [m for m in mutations
+                     if any(w in m.name.lower() for w in wanted)]
+        filtered = True
+        if not mutations:
+            print(f"no mutation name matches {args.only}")
+            return 3
+
+    targets = {m.path for m in mutations}
 
     # --- pre-flight: refuse to snapshot an already-mutated tree -------
     #
@@ -1796,13 +2024,21 @@ def main() -> int:
     #
     # A committed tree makes both impossible to lose and trivial to
     # detect.
+    # The WHOLE tree, not just the files this harness rewrites.
+    #
+    # The narrower check let a real contamination through on
+    # 2026-10-02: an edit to lambda-micro/agent-cycle/handler.py landed
+    # mid-run, handler.py is not a mutation target, so the check passed
+    # - and the post-run baseline then came back RED and every verdict
+    # in that run had to be discarded. The harness runs the FULL suite
+    # for each mutation, so any file the suite imports can change what
+    # a verdict means, not only the files being mutated.
     dirty = subprocess.run(
-        ["git", "status", "--porcelain", "--"] + [str(t) for t in targets],
+        ["git", "status", "--porcelain"],
         cwd=REPO, capture_output=True, text=True).stdout.strip()
     if dirty:
         print("=" * 74)
-        print("HARNESS ABORTED: uncommitted changes in files this harness "
-              "rewrites.")
+        print("HARNESS ABORTED: the working tree has uncommitted changes.")
         print("The first restore would destroy them, and an edit made while "
               "the run is in")
         print("progress replaces the mutation, making every later verdict "
@@ -1834,10 +2070,15 @@ def main() -> int:
             print(f"   {name}")
         return 3
     print(f"\nbaseline: suite is GREEN\n")
+    if filtered:
+        print(f"FILTERED RUN: {len(mutations)} of {len(MUTATIONS)} mutations "
+              f"selected by --only.")
+        print("This is NOT a gate result. Only an unfiltered run certifies "
+              "the suite.\n")
 
     results = []
     try:
-        for mutation in MUTATIONS:
+        for mutation in mutations:
             source = originals[mutation.path]
             if mutation.old not in source:
                 print(f"  {mutation.name:34} HARNESS ERROR: anchor not found")

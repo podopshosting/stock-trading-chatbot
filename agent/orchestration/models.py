@@ -160,6 +160,16 @@ class CycleResult:
     quotes_stale: int = 0
     duplicate_attempts: int = 0
     eod_flatten_failed: bool = False
+
+    # Orders the venue has not finished with. `committed_exposure` is
+    # Optional and `committed_exposure_known` is separate on purpose:
+    # an exposure that could not be established must not arrive as 0.0,
+    # because 0.0 is the one value that would let a new entry through.
+    pending_external_orders: Optional[int] = None
+    committed_exposure: Optional[float] = None
+    committed_exposure_known: bool = False
+    oldest_pending_order_age_seconds: Optional[float] = None
+    order_poll: Optional[Dict] = None
     versions: Dict = field(default_factory=dict)
 
     @staticmethod
@@ -244,5 +254,11 @@ class CycleResult:
             "quotes_stale": self.quotes_stale,
             "duplicate_attempts": self.duplicate_attempts,
             "eod_flatten_failed": self.eod_flatten_failed,
+            "pending_external_orders": self.pending_external_orders,
+            "committed_exposure": self.committed_exposure,
+            "committed_exposure_known": self.committed_exposure_known,
+            "oldest_pending_order_age_seconds":
+                self.oldest_pending_order_age_seconds,
+            "order_poll": self.order_poll,
             "versions": self.versions,
         }
