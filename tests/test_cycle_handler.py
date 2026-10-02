@@ -1299,3 +1299,124 @@ class TestUnreadablePositionsAreRecordedAndRefuseExposure(unittest.TestCase):
         # "ran" key; phase is what distinguishes it from a skip.
         self.assertEqual(out["phase"], "INTRADAY")
         self.assertIs(out.get("exposure_known", True), True)
+
+
+class StrictExternalBroker:
+    """A broker that exposes ONLY the public adapter surface.
+
+    Every defect in the external-broker path so far has been code
+    written against the internal simulator's privates and never run
+    against anything else. This double has no `_account`, `_positions`,
+    `_orders` or `_client_ids`, so any such access fails here instead of
+    in Lambda.
+    """
+
+    base_url = "https://paper-api.alpaca.markets"
+    name = "alpaca_paper"
+    is_paper = True
+    quarantined = False
+
+    def __init__(self, cash=100000.0):
+        self._cash = cash          # deliberately not the simulator's name
+
+    def get_account(self):
+        return {"cash": self._cash, "equity": self._cash,
+                "account_id": "paper", "buying_power": self._cash}
+
+    def get_positions(self):
+        return []
+
+    def get_orders(self, **_kw):
+        return []
+
+    def get_order(self, _order_id):
+        return None
+
+    def find_by_client_order_id(self, _cid):
+        return None
+
+    def submit_order(self, *_a, **_kw):
+        raise AssertionError("this test must not submit an order")
+
+    def cancel_order(self, _order_id):
+        return None
+
+    def replace_order(self, *_a, **_kw):
+        return None
+
+    def close_position(self, _symbol):
+        return None
+
+    def capabilities(self):
+        # Mirrors AlpacaPaperBroker.capabilities(). The orchestrator
+        # refuses any broker that does not DECLARE itself paper in
+        # PAPER mode, which is a guard worth leaving intact.
+        return {"name": self.name, "is_paper": True,
+                "shorting": False, "margin": False, "options": False,
+                "models_spread": True, "models_slippage": True,
+                "models_partial_fills": True,
+                "order_types": ["LIMIT", "MARKETABLE_LIMIT"],
+                "authoritative_for_state": True,
+                "base_url": self.base_url}
+
+
+class TestTheCycleRunsAgainstAnExternalBroker(unittest.TestCase):
+    """
+    Found by deployment on 2026-10-02, the fifth defect in this path:
+    `AttributeError: 'AlpacaPaperBroker' object has no attribute
+    '_account'`. agent/broker/store.py persists the internal simulator by
+    reaching into its privates, and the cycle handed it the external
+    adapter instead.
+
+    Nothing had ever run a cycle with an external broker selected, so
+    every line that assumed the simulator's internals was unverified.
+    """
+
+    def run_external(self, status="PRE_MARKET", clock="08:00"):
+        world = World()
+        world.health = RecordingHealthStore()
+        world.at(clock, status=status)
+        with mock.patch.object(cycle, "AlpacaPaperBroker",
+                               lambda **_kw: StrictExternalBroker()), \
+             mock.patch.object(cycle, "RequestsTransport",
+                               lambda *_a, **_k: object()), \
+             mock.patch.object(cycle, "_load_alpaca_credentials",
+                               lambda *_a, **_k: {"api_key_id": "k",
+                                                 "api_secret_key": "s"}):
+            out = world.invoke(env={"AGENT_BROKER": "alpaca_paper"})
+        return world, out
+
+    def test_an_off_hours_cycle_completes_with_an_external_broker(self):
+        _world, out = self.run_external()
+        self.assertNotEqual(out.get("terminal_state"), "ABORTED",
+                            out.get("detail") or out.get("error"))
+        self.assertEqual(out["terminal_state"], "SKIPPED_MARKET_CLOSED")
+
+    def test_the_external_broker_is_recorded_as_authoritative(self):
+        _world, out = self.run_external()
+        self.assertEqual(out["broker"]["name"], "alpaca_paper")
+        self.assertIs(out["broker"]["authoritative"], True)
+        self.assertEqual(out["broker"]["base_url"],
+                         "https://paper-api.alpaca.markets")
+
+    def test_an_intraday_cycle_completes_with_an_external_broker(self):
+        """The path that actually matters: a full trading cycle, which is
+        where broker state is persisted."""
+        _world, out = self.run_external(status="OPEN", clock="15:00")
+        self.assertNotEqual(out.get("terminal_state"), "ABORTED",
+                            out.get("detail") or out.get("error"))
+
+    def test_no_private_simulator_attribute_is_touched(self):
+        """The assertion that generalises: a cycle that completes against
+        this double cannot have reached for _account, _positions,
+        _orders or _client_ids, because they do not exist."""
+        _world, out = self.run_external(status="OPEN", clock="15:00")
+        self.assertNotIn("_account", str(out.get("detail") or ""))
+        self.assertIsNone(out.get("error"))
+
+    def test_the_internal_broker_path_still_works(self):
+        """The control: without it these would pass for a cycle that can
+        no longer run at all."""
+        world = World()
+        out = world.invoke()
+        self.assertEqual(out["terminal_state"], "COMPLETED")

@@ -397,7 +397,18 @@ def _run(session_date: str) -> Dict:
         positions_opened_today=counters["positions_opened_today"])
 
     # --- persist, then account ----------------------------------------
-    saved = _persist(broker, broker_store, revision if snapshot else None,
+    # The INTERNAL simulator is what the broker-state store round-trips.
+    # It reaches into PaperBroker's privates (_account, _positions,
+    # _orders, _client_ids), which the external adapter does not have -
+    # handing it `broker` aborted every intraday cycle with
+    # "'AlpacaPaperBroker' object has no attribute '_account'".
+    #
+    # Passing `internal` is also the correct semantics, not just the
+    # working one: the external venue is authoritative for its own state
+    # and is queried live through get_account/get_positions/get_orders.
+    # Caching a second copy locally would create a second source of
+    # truth about real exposure, which is worse than not caching it.
+    saved = _persist(internal, broker_store, revision if snapshot else None,
                      manager, position_store, session_date, health, alerts)
     payload = cycle.as_dict()
     payload.update({
@@ -491,9 +502,12 @@ def _off_hours(phase, session_date, session, state_service, sessions,
     return _write_terminal(out)
 
 
-def _persist(broker, broker_store, expected_revision, manager,
+def _persist(state_broker, broker_store, expected_revision, manager,
              position_store, session_date, health, alerts) -> Dict:
     """Save broker and position state.
+
+    `state_broker` is always the INTERNAL simulator: the store persists
+    its private state, and the external venue keeps its own.
 
     A failure raises STATE_PERSISTENCE_FAILURE, which halts new entries:
     the journal may already record an exit the saved account does not,
@@ -501,7 +515,7 @@ def _persist(broker, broker_store, expected_revision, manager,
     """
     detail, ok = [], True
     try:
-        broker_store.save(broker, ACCOUNT_ID,
+        broker_store.save(state_broker, ACCOUNT_ID,
                           expected_revision=expected_revision)
     except ConcurrentBrokerUpdate as exc:
         ok = False

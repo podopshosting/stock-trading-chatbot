@@ -290,3 +290,45 @@ exist.
 `REALTIME_SIP_STRATEGY_EVIDENCE` begins at the first regular-market
 cycle on a runtime that has been verified end to end, not at either of
 these timestamps.
+
+---
+
+## VOID cutover attempt 3 — 2026-10-02 14:09:47Z
+
+| | |
+|---|---|
+| Deployed | 2026-10-02T14:09:51Z, SHA `d07c6a3` |
+| Config | `alpaca_paper`, `sip`, `PAPER` — all correct |
+| API half | 14:08:20Z, **verified and kept**; all 10 semantic checks passed |
+| Verification | **FAILED** — `AttributeError: 'AlpacaPaperBroker' object has no attribute '_account'` |
+| Trades | none. The venue stayed flat: 0 orders of any status, 0 positions |
+| Evidence value | **none.** No cohort was opened. |
+
+The fifth defect in the external-broker path, and the same class as the
+four before it: `agent/broker/store.py` persists the internal simulator
+by reaching into its private attributes, and the cycle handed it the
+external adapter. Nothing had ever run a cycle with an external broker
+selected, so every line assuming the simulator's internals was
+unverified.
+
+Note where it surfaced: off-hours cycles completed fine, because broker
+state is only persisted on the intraday path. The deploy's verification
+runs one cycle, and at 14:09 that cycle was intraday — which is why this
+appeared now rather than during last night's closed-market checks.
+
+Fixed by passing the internal simulator to the state store, which is
+also the correct semantics: the external venue is authoritative for its
+own state and is queried live, so caching a second copy locally would
+create a second source of truth about real exposure.
+
+The structural fix is the test, not the one-line change. A
+`StrictExternalBroker` double now exposes only the public adapter
+surface - no `_account`, `_positions`, `_orders` or `_client_ids` - and
+the cycle is run against it both off-hours and intraday. Any future
+reach into the simulator's internals fails in the suite.
+
+### All three attempts remain VOID
+
+21:06:32Z, 00:01:43Z and 14:09:47Z. None produced a completed trading
+cycle. The API deployments at 00:02:06Z and 14:08:20Z both succeeded and
+are not void, but a cohort is a property of the trading runtime.

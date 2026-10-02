@@ -849,6 +849,32 @@
 
 
   // ---- autonomy --------------------------------------------------------
+  // A cycle from an earlier session is history, not today's state. The
+  // API now carries the snapshot's own session date, so the label can
+  // say which it is instead of implying the current one.
+  function lastCycleLabel(d, c) {
+    var when = d.last_cycle_at || c.finished_at;
+    if (!when) { return "none yet"; }
+    var state = c.terminal_state ? " [" + c.terminal_state + "]" : "";
+    if (d.last_cycle_is_current_session === false) {
+      return when + state + " — PREVIOUS SESSION ("
+             + (d.last_cycle_session_date || "unknown date") + ")";
+    }
+    return when + state;
+  }
+
+  // Zero and unknown are different claims and must not look alike.
+  function todayLabel(d) {
+    var y = d.daily || {};
+    if (y.positions_opened_today === null
+        || y.positions_opened_today === undefined) {
+      return "UNKNOWN — " + (y.basis || "not established");
+    }
+    return y.positions_opened_today + " opened, "
+           + y.trades_closed_today + " closed, realized "
+           + fmt(y.realized_pnl_today, 2);
+  }
+
   function loadAutonomy() {
     var st = document.getElementById("autoStatus");
     get("/agent/autonomy").then(function (d) {
@@ -861,11 +887,18 @@
         ["agent state", d.agent_state || "no cycle recorded"],
         ["regime", (d.regime || {}).market_regime || "unknown"],
         ["risk posture", (d.regime || {}).risk_posture || "unknown"],
-        ["last cycle", c.finished_at || "none yet"],
+        ["last cycle", lastCycleLabel(d, c)],
         ["next cycle", d.next_cycle_at],
         ["overnight positions", d.overnight_positions],
         ["live cycles today", t.cycles_live_market],
-        ["open positions", (d.positions || []).length]
+        // (d.positions || []).length rendered an UNREADABLE book as 0,
+        // reintroducing in the UI the exact masquerade the API now
+        // refuses: empty means a successful read proved zero.
+        ["open positions", d.positions_known === false
+          ? "UNKNOWN - store unreadable"
+          : (d.positions || []).length,
+         d.positions_known === false ? "down" : null],
+        ["today's activity", todayLabel(d)]
       ]);
       (h.blocking_reasons || []).forEach(function (r) {
         st.appendChild(el("dd", "err", r));
