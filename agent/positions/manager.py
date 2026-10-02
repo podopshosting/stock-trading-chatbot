@@ -32,9 +32,23 @@ class PositionManagerError(Exception):
 class PositionManager:
     """Tracks managed positions and drives their exits."""
 
-    def __init__(self, broker=None, execution_available: bool = False):
+    def __init__(self, broker=None, execution_available: bool = False,
+                 order_ledger=None, session_date: Optional[str] = None,
+                 cohort: Optional[str] = None, exit_submitter=None):
         self.broker = broker
         self.execution_available = execution_available
+        # Supplied where the venue is external, so an exit order is
+        # recorded before it is sent. See docs/INTENT-BEFORE-SUBMIT.md.
+        self.order_ledger = order_ledger
+        self.session_date = session_date
+        self.cohort = cohort
+        # INJECTED, never imported. agent/broker/execution.py is the
+        # submission path, and the read API must not be able to reach it
+        # - a test asserts that importing the API handler loads no broker
+        # and no orchestrator. Importing submit_exit here broke that, and
+        # a lazy import would still leave it reachable. The orchestrator
+        # supplies it; the API never does, so the API cannot submit.
+        self.exit_submitter = exit_submitter
         self._positions: Dict[str, ManagedPosition] = {}   # by symbol
         self._closed: List[ManagedPosition] = []
         self._halted: bool = False
@@ -281,9 +295,16 @@ class PositionManager:
         if self.broker is None:
             raise PositionManagerError("no broker attached")
 
-        order = self.broker.close_position(
-            intent.symbol, intent=str(intent.primary_reason))
+        order = self._submit_exit_order(position, intent)
         position.exit_order_id = order.get("order_id")
+        cli = order.get("client_order_id")
+        if cli and cli not in position.exit_client_order_ids:
+            # Counted only once per logical order. A retry that the
+            # venue suppressed returns the SAME client order id, so it
+            # must not advance the attempt number - advancing it would
+            # mint a new id on the next try and defeat the suppression.
+            position.exit_client_order_ids.append(cli)
+            position.exit_attempts += 1
         if (order.get("status") == "FILLED"
                 and order.get("filled_quantity", 0) > 0):
             self._close(position, intent)
@@ -293,6 +314,37 @@ class PositionManager:
                   status=order.get("status"),
                   primary_reason=str(intent.primary_reason))
         return order
+
+    def _submit_exit_order(self, position: ManagedPosition,
+                           intent: ExitIntent) -> Dict:
+        """Send the exit, durably where the venue is external.
+
+        An external exit goes through submit_order with a deterministic
+        client order id rather than DELETE /v2/positions, which accepts
+        no client order id and so could never be idempotent: a lost
+        response left no way to tell whether the position had been
+        closed, and the only safe options were to leave it open or risk
+        closing it twice.
+
+        The in-process simulator keeps close_position. Its orders are
+        serialised with its own state, so the durability the ledger adds
+        is already there.
+        """
+        external = bool(getattr(self.broker, "is_external_venue", False))
+        if (not external or self.order_ledger is None
+                or self.exit_submitter is None):
+            return self.broker.close_position(
+                intent.symbol, intent=str(intent.primary_reason))
+
+        reference = intent.reference_price or position.entry_price
+        return self.exit_submitter(
+            self.broker, symbol=intent.symbol,
+            quantity=intent.quantity or position.quantity,
+            reference_price=reference,
+            risk_decision_id=position.risk_decision_id,
+            ledger=self.order_ledger, session_date=self.session_date,
+            cohort=self.cohort, attempt=position.exit_attempts + 1,
+            hypothesis_id=position.hypothesis_id)
 
     def _close(self, position: ManagedPosition,
                intent: Optional[ExitIntent] = None) -> None:

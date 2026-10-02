@@ -50,11 +50,18 @@ def client_order_id_for(risk_decision_id: str, intent: str = "ENTRY") -> str:
     return f"{CLIENT_ID_PREFIX}{digest}"
 
 
+# Every intent the agent can derive a client order id for. Exit
+# attempts beyond the first carry a suffix, and leaving them out here
+# would mean a position closed on a second attempt could not be
+# recognised as the agent's own.
+DEFAULT_INTENTS = ("ENTRY", "EXIT", "EXIT#2", "EXIT#3")
+
+
 def classify_position(symbol: str,
                       broker_orders: Optional[Sequence[Dict]],
                       ledger_rows: Optional[Sequence] = None,
                       decisions: Optional[Sequence[Dict]] = None,
-                      intents: Iterable[str] = ("ENTRY", "EXIT")) -> Dict:
+                      intents: Iterable[str] = DEFAULT_INTENTS) -> Dict:
     """Decide whether an external position is the agent's own.
 
     `broker_orders` is None when the order history could not be read. In

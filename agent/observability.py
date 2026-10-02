@@ -88,6 +88,7 @@ EVENTS = frozenset({
     "order_duplicate_suppressed",
     # the durable record of an external order, written before it is sent
     "order_intent_recorded",
+    "exit_order_proposed",
     "order_intent_unsent",
     "order_recovered_by_client_id",
     "order_observation_not_recorded",

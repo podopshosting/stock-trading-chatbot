@@ -232,6 +232,123 @@ def _record_submission(ledger, proposal, order, stamp, required=False):
                 f"{proposal.client_order_id}") from exc
 
 
+EXIT_INTENT = "EXIT"
+
+# Exit attempts beyond the first get a distinguishable intent, because a
+# remainder left by a partial fill is a NEW logical order rather than a
+# retry of the old one - and reusing the first id for it would be
+# suppressed by the venue as a duplicate, leaving the remainder open.
+MAX_EXIT_ATTEMPTS = 3
+
+
+def exit_intent_name(attempt: int = 1) -> str:
+    return EXIT_INTENT if attempt <= 1 else f"{EXIT_INTENT}#{attempt}"
+
+
+def exit_client_order_id(risk_decision_id: str, attempt: int = 1) -> str:
+    """The deterministic id for closing the position that decision opened.
+
+    Derived the same way as the entry id, from the same decision, with
+    the intent as the discriminator. A retry of the same attempt
+    therefore produces the same id and the venue suppresses the
+    duplicate, which is the whole reason exits move off
+    DELETE /v2/positions - that endpoint accepts no client order id at
+    all, so an exit sent through it could never be made idempotent and a
+    lost response left no way to tell whether the position had been
+    closed.
+    """
+    if not risk_decision_id:
+        raise ExecutionRefused(
+            "an exit through an external venue needs the risk decision id "
+            "that opened the position, because the client order id is "
+            "derived from it and without one the exit cannot be made "
+            "idempotent")
+    intent = exit_intent_name(attempt)
+    digest = hashlib.sha256(
+        f"{risk_decision_id}:{intent}".encode()).hexdigest()[:20]
+    return f"cli_{digest}"
+
+
+def build_exit_proposal(symbol: str, quantity: float, reference_price: float,
+                        risk_decision_id: str, attempt: int = 1,
+                        hypothesis_id=None) -> OrderProposal:
+    """A marketable limit SELL that closes a position.
+
+    The limit reaches DOWN through the spread by the same buffer an
+    entry reaches up by: an exit that does not fill is worse than an
+    exit that pays a little, because the position stays live.
+    """
+    if quantity is None or quantity <= 0:
+        raise ExecutionRefused("an exit needs a positive quantity")
+    if reference_price is None or reference_price <= 0:
+        raise ExecutionRefused("an exit needs a reference price")
+    if attempt < 1 or attempt > MAX_EXIT_ATTEMPTS:
+        raise ExecutionRefused(
+            f"exit attempt {attempt} is outside 1..{MAX_EXIT_ATTEMPTS}; "
+            f"a position that cannot be closed in that many attempts is a "
+            f"state for a human to look at, not one to keep retrying")
+    limit = reference_price * (1 - MARKETABLE_LIMIT_BUFFER_PCT / 100.0)
+    return OrderProposal(
+        symbol=symbol, side="SELL", notional=quantity * reference_price,
+        quantity=quantity, reference_price=reference_price,
+        order_type="MARKETABLE_LIMIT", limit_price=round(limit, 4),
+        hypothesis_id=hypothesis_id, risk_decision_id=risk_decision_id,
+        intent=exit_intent_name(attempt),
+        client_order_id=exit_client_order_id(risk_decision_id, attempt))
+
+
+def submit_exit(broker, *, symbol: str, quantity: float,
+                reference_price: float, risk_decision_id: str,
+                ledger=None, session_date: Optional[str] = None,
+                cohort: Optional[str] = None, attempt: int = 1,
+                hypothesis_id=None, now: Optional[str] = None) -> Dict:
+    """Close a position through the same discipline as opening one.
+
+    Deliberately NOT gated on execution_available or on any halt: exits
+    are always permitted, and a position that cannot be closed is
+    unmanaged risk. The only things refused here are an exit that cannot
+    be made durable or idempotent.
+    """
+    proposal = build_exit_proposal(symbol, quantity, reference_price,
+                                   risk_decision_id, attempt, hypothesis_id)
+    external = bool(getattr(broker, "is_external_venue", False))
+    if external and ledger is None:
+        raise ExecutionRefused(
+            "this broker submits to an external venue and no order ledger "
+            "was supplied; an exit order that is not durably recorded "
+            "before it is sent cannot be recovered")
+    if external and not session_date:
+        raise ExecutionRefused(
+            "a session_date is required to record an external exit order")
+
+    log_event("exit_order_proposed", symbol=proposal.symbol,
+              quantity=round(proposal.quantity, 6),
+              limit_price=proposal.limit_price,
+              client_order_id=proposal.client_order_id,
+              intent=proposal.intent, attempt=attempt)
+
+    stamp = now or _utcnow()
+    if ledger is not None:
+        already = _recover_or_record_intent(
+            broker, ledger, proposal, session_date, cohort, external, stamp)
+        if already is not None:
+            return already
+
+    order = broker.submit_order(
+        symbol=proposal.symbol, side=proposal.side,
+        quantity=proposal.quantity, order_type=proposal.order_type,
+        limit_price=proposal.limit_price,
+        time_in_force=proposal.time_in_force,
+        client_order_id=proposal.client_order_id,
+        hypothesis_id=proposal.hypothesis_id,
+        risk_decision_id=proposal.risk_decision_id,
+        intent=proposal.intent)
+
+    if ledger is not None and isinstance(order, dict):
+        _record_submission(ledger, proposal, order, stamp)
+    return order
+
+
 def submit_approved(broker, decision, hypothesis, reference_price: float,
                     execution_available: bool = False,
                     intent: str = "ENTRY",

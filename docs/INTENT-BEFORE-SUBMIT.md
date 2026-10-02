@@ -107,13 +107,7 @@ unimplemented link:
   not yet reserve room.
 - **No DynamoDB table in dev.** `DynamoDBOrderLedger` is written and
   untested against a real table.
-- **Exits are not recorded.** Only entries pass through
-  `submit_approved`; `PositionManager` calls `broker.close_position`
-  directly, so an exit order gets no ledger row and no lost-response
-  recovery. That is tolerable only while exits are driven from
-  positions the agent already holds in its own store, and it stops
-  being tolerable the moment adoption lands - an adopted position's
-  exit is precisely the order that most needs a durable record.
+- ~~Exits are not recorded.~~ **Done.** See below.
 
 Each of those is a separate step, and none of them is a reason to soften
 this one.
@@ -149,3 +143,55 @@ One of those mutations is worth naming: putting `reference_price` into
 the id. It looks harmless and it would mean a retry after a single tick
 produced a different id, so the venue could no longer dedupe the retry -
 turning the idempotency mechanism into a duplicate generator.
+
+## Exits go the same way, and they could not before
+
+An exit used to call `broker.close_position`, which on Alpaca is
+`DELETE /v2/positions/{symbol}`. That endpoint accepts **no client order
+id**. An exit sent through it therefore could not be made idempotent: if
+the response was lost there was no handle to ask the venue about, and
+the only choices were to leave the position open or risk selling twice.
+This was not a missing feature in the exit path - it was unreachable
+through the endpoint the exit path used.
+
+An external exit now goes out as a deterministic marketable-limit SELL
+through the same chokepoint an entry uses, so intent-before-submit,
+lost-response recovery, polling, partial fills and restart recovery all
+apply to it unchanged. The id is
+`sha256(f"{risk_decision_id}:EXIT")[:20]`, which is exactly what
+`provenance.client_order_id_for(decision, "EXIT")` reconstructs - so an
+exit order is recognisable as the agent's own too.
+
+A retry reuses its attempt's id, so the venue suppresses the duplicate.
+A **remainder** left by a partial fill is a different matter: it is a new
+logical order, and reusing the first id for it would be suppressed and
+leave the remainder open. Later attempts therefore carry a suffixed
+intent (`EXIT#2`, `EXIT#3`), bounded at `MAX_EXIT_ATTEMPTS` - a position
+that cannot be closed in three attempts is a state for a human to look
+at rather than one to keep retrying. Those suffixes are in
+`provenance.DEFAULT_INTENTS`; leaving them out would mean a position
+closed on a second attempt could not be proved to be the agent's own,
+and a mutation checks it.
+
+The in-process simulator keeps `close_position`: its orders are
+serialised with its own state, so the durability is already there.
+
+### A boundary that nearly broke
+
+The obvious implementation imports `submit_exit` into
+`agent/positions/manager.py`. That makes the submission path reachable
+from the read API, which imports positions - and a test asserts that
+importing the API handler loads no broker and no orchestrator. It
+failed immediately. A lazy import would have hidden the failure while
+leaving the path reachable, so the submitter is **injected** by the
+orchestrator instead and `manager.py` imports nothing from
+`agent/broker/`. The API never supplies it, so the API cannot submit.
+
+### What this did not fix
+
+`session_date` is set on the position manager per cycle rather than at
+construction, because a warm Lambda's manager outlives a session and a
+stale date would file an exit under the wrong day. When it was not set
+at all the exit was *refused* and the position stayed open with
+`EOD_FLATTEN_FAILURE` raised - correct fail-closed behaviour, and still
+a bug, which is how it was found.

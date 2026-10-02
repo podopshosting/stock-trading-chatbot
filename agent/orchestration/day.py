@@ -29,7 +29,7 @@ from ..autonomy.alerts import Alert, AlertKind
 from ..autonomy.health import Condition
 from ..autonomy.policy import Action, AutonomyPolicy, PolicyViolation
 from ..broker.alpaca_paper import UncertainSubmission
-from ..broker.execution import ExecutionRefused, submit_approved
+from ..broker.execution import ExecutionRefused, submit_approved, submit_exit
 from ..broker.order_poller import poll_outstanding
 from ..positions.adoption import adopt_external_positions
 from ..journal import record_closed_position
@@ -136,6 +136,20 @@ class MarketDayOrchestrator:
         # again after a crash.
         self.order_ledger = order_ledger
         self.cohort = cohort
+        # The position manager cannot import the submission path without
+        # putting it within reach of the read API, so the orchestrator -
+        # which legitimately owns that path - supplies it.
+        if getattr(position_manager, "exit_submitter", None) is None:
+            try:
+                position_manager.exit_submitter = submit_exit
+            except AttributeError:
+                pass
+        if getattr(position_manager, "order_ledger", None) is None:
+            try:
+                position_manager.order_ledger = order_ledger
+                position_manager.cohort = cohort
+            except AttributeError:
+                pass
 
         if autonomy is not None:
             # The policy is the single source of truth. The two legacy
@@ -215,6 +229,17 @@ class MarketDayOrchestrator:
             # lock is checked here as well. The exits step re-checks with
             # fresh prices so unrealised losses count too.
             self._check_daily_loss(result, realized_pnl_today, 0.0)
+
+            # The session the exit ledger keys on. Set per cycle rather
+            # than at construction: the manager outlives a single
+            # session in a warm Lambda, and a stale date would file an
+            # exit order under the wrong day - or, when it was never set
+            # at all, refuse the exit entirely and leave the position
+            # open, which is how this was found.
+            try:
+                self.positions.session_date = session_date
+            except AttributeError:
+                pass
 
             # --- 1. learn what is actually held, THEN reconcile ----------
             #

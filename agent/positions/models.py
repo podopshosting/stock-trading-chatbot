@@ -168,6 +168,14 @@ class ManagedPosition:
     risk_decision_id: Optional[str] = None
     entry_order_id: Optional[str] = None
     exit_order_id: Optional[str] = None
+    # How many exit orders have been SENT for this position. A retry of
+    # the same attempt reuses its deterministic client order id so the
+    # venue suppresses the duplicate; a remainder left by a partial fill
+    # is a new logical order and needs the next attempt number, because
+    # reusing the first id for it would be suppressed and the remainder
+    # would stay open.
+    exit_attempts: int = 0
+    exit_client_order_ids: List[str] = field(default_factory=list)
     config_version: str = ""
 
     stop_history: List[Dict] = field(default_factory=list)

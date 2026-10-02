@@ -75,6 +75,7 @@ RISK_GOV2 = REPO / "agent" / "risk" / "governor.py"
 BRK_ALPACA = REPO / "agent" / "broker" / "alpaca_paper.py"
 POS_EXITS = REPO / "agent" / "positions" / "exits.py"
 POS_MANAGER = REPO / "agent" / "positions" / "manager.py"
+AUT_ORDERVIEW = REPO / "agent" / "autonomy" / "order_view.py"
 
 JNL_MODELS = REPO / "agent" / "journal" / "models.py"
 JNL_METRICS = REPO / "agent" / "journal" / "metrics.py"
@@ -1118,6 +1119,148 @@ MUTATIONS = [
         old='            "positions": [], "open_count": None, "total_open_risk": None,',
         new='            "positions": [], "open_count": None, "total_open_risk": 0.0,  # MUTATION',
         expect=["unreadable", "open_risk", "zero"],
+    ),
+    # --- the read API's own view of the order ledger. A SECOND
+    # --- implementation, because the API may not import agent/broker at
+    # --- all, so each of these also guards against drift from the
+    # --- writer rather than only against a local mistake.
+    Mutation(
+        name="view-reads-the-wrong-partition",
+        description="look in a partition the ledger never writes, so "
+                    "the API reports zero outstanding orders",
+        path=AUT_ORDERVIEW,
+        old='PARTITION_PREFIX = "EXTORDERS#"',
+        new='PARTITION_PREFIX = "EXTORDER#"  # MUTATION',
+        expect=["partition", "writer", "drift"],
+    ),
+    Mutation(
+        name="view-forgets-never-placed-is-terminal",
+        description="let the API and the cycle disagree about which "
+                    "statuses are finished",
+        path=AUT_ORDERVIEW,
+        old='TERMINAL = frozenset({"FILLED", "CANCELLED", "REJECTED", "EXPIRED",\n'
+            '                      "NEVER_PLACED"})',
+        new='TERMINAL = frozenset({"FILLED", "CANCELLED", "REJECTED", '
+            '"EXPIRED"})  # MUTATION',
+        expect=["terminal", "identical", "drift"],
+    ),
+    Mutation(
+        name="view-treats-every-status-as-terminal",
+        description="report every order as finished, so nothing reads "
+                    "as outstanding",
+        path=AUT_ORDERVIEW,
+        old='    return str(row.get("status") or "") in TERMINAL',
+        new='    return True  # MUTATION',
+        expect=["terminal", "outstanding", "agrees"],
+    ),
+    Mutation(
+        name="view-reports-unestablished-exposure-as-zero",
+        description="an order that cannot be sized reserves nothing",
+        path=AUT_ORDERVIEW,
+        old="    return None\n\n\ndef _age_seconds",
+        new="    return 0.0  # MUTATION\n\n\ndef _age_seconds",
+        expect=["unsizeable", "unknown", "exposure", "agrees"],
+    ),
+    Mutation(
+        name="view-renders-unknown-exposure-as-a-number",
+        description="emit a number for an exposure that could not be "
+                    "established, which is the one value a reader acts on",
+        path=AUT_ORDERVIEW,
+        old='        "committed_exposure": round(total, 6) if known else None,',
+        new='        "committed_exposure": round(total, 6),  # MUTATION',
+        expect=["unknown", "null", "render"],
+    ),
+    Mutation(
+        name="view-skips-a-malformed-ledger-row",
+        description="read past a row it cannot parse, so a partial "
+                    "ledger reads as a complete one",
+        path=AUT_ORDERVIEW,
+        old='                raise OrderViewError(\n'
+            '                    "an order ledger row has no payload; a partial read "\n'
+            '                    "cannot establish exposure")',
+        new='                continue  # MUTATION',
+        expect=["malformed", "payload", "skipped", "partial"],
+    ),
+    # --- exits are as durable as entries. They were not: an exit went
+    # --- through DELETE /v2/positions, which accepts no client order id,
+    # --- so a lost response left no handle to ask the venue about.
+    Mutation(
+        name="allow-an-external-exit-with-no-ledger",
+        description="send an exit to a network venue with no durable "
+                    "record of it anywhere",
+        path=BRK_EXEC,
+        old='    if external and ledger is None:\n'
+            '        raise ExecutionRefused(\n'
+            '            "this broker submits to an external venue and no order ledger "\n'
+            '            "was supplied; an exit order that is not durably recorded "\n'
+            '            "before it is sent cannot be recovered")',
+        new='    if False:  # MUTATION\n'
+            '        raise ExecutionRefused("x")',
+        expect=["exit", "ledger", "refused"],
+    ),
+    Mutation(
+        name="randomise-the-exit-client-id",
+        description="give each exit attempt a fresh random id, so a "
+                    "retry cannot be suppressed as a duplicate",
+        path=BRK_EXEC,
+        old='    intent = exit_intent_name(attempt)\n'
+            '    digest = hashlib.sha256(\n'
+            '        f"{risk_decision_id}:{intent}".encode()).hexdigest()[:20]',
+        new='    import uuid  # MUTATION\n'
+            '    digest = uuid.uuid4().hex[:20]',
+        expect=["deterministic", "exit", "reconstruction", "retry"],
+    ),
+    Mutation(
+        name="reuse-the-first-exit-id-for-a-remainder",
+        description="close a remainder under the id the venue has "
+                    "already seen, so the order is suppressed and the "
+                    "remainder stays open",
+        path=BRK_EXEC,
+        old='def exit_intent_name(attempt: int = 1) -> str:\n'
+            '    return EXIT_INTENT if attempt <= 1 else f"{EXIT_INTENT}#{attempt}"',
+        new='def exit_intent_name(attempt: int = 1) -> str:\n'
+            '    return EXIT_INTENT  # MUTATION',
+        expect=["attempt", "remainder", "collide", "distinguishable"],
+    ),
+    Mutation(
+        name="make-the-exit-limit-reach-the-wrong-way",
+        description="price the exit above the market so it does not "
+                    "fill and the position stays live",
+        path=BRK_EXEC,
+        old='    limit = reference_price * (1 - MARKETABLE_LIMIT_BUFFER_PCT / 100.0)',
+        new='    limit = reference_price * (1 + MARKETABLE_LIMIT_BUFFER_PCT '
+            '/ 100.0)  # MUTATION',
+        expect=["limit", "spread", "down"],
+    ),
+    Mutation(
+        name="drop-the-suffixed-exit-intents",
+        description="leave later exit attempts out of the provenance "
+                    "intents, so a position closed on a second attempt "
+                    "cannot be proved to be the agent's own",
+        path=BRK_PROV,
+        old='DEFAULT_INTENTS = ("ENTRY", "EXIT", "EXIT#2", "EXIT#3")',
+        new='DEFAULT_INTENTS = ("ENTRY", "EXIT")  # MUTATION',
+        expect=["intent", "provenance", "recognised"],
+    ),
+    Mutation(
+        name="send-every-exit-through-close-position",
+        description="keep exits on the endpoint that accepts no client "
+                    "order id and so cannot be made idempotent",
+        path=POS_MANAGER,
+        old='        if (not external or self.order_ledger is None\n'
+            '                or self.exit_submitter is None):',
+        new='        if True:  # MUTATION',
+        expect=["exit", "intent", "recorded", "submit"],
+    ),
+    Mutation(
+        name="advance-the-exit-attempt-on-a-suppressed-retry",
+        description="advance the exit attempt on a suppressed retry, so "
+                    "the next try mints a new id and defeats the "
+                    "venue's duplicate suppression",
+        path=POS_MANAGER,
+        old='        if cli and cli not in position.exit_client_order_ids:',
+        new='        if cli:  # MUTATION',
+        expect=["attempt", "retry", "suppress"],
     ),
     # --- adoption: taking back a position the agent provably created.
     # --- The DRAM position on 2026-10-02 was the agent's own and could

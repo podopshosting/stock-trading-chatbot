@@ -46,8 +46,12 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
+from agent.autonomy.order_view import (
+    OrderLedgerView, summarise as summarise_orders,
+)
 from agent.config import AgentConfig
 from agent.market import MarketRegimeService, MarketSessionService
 from agent.observability import log_event
@@ -938,6 +942,46 @@ def handle_risk_preview(event) -> Dict:
     })
 
 
+def handle_orders(event) -> Dict:
+    """External orders the venue has not finished with.
+
+    Everything here distinguishes "we read it and it is zero" from "we
+    could not read it". `committed_exposure` is null rather than 0.0
+    when it cannot be established, because 0.0 is the one value a reader
+    would act on.
+
+    Reads through agent/autonomy/order_view.py, NOT through
+    agent/broker/. The API may not import that package at all - the
+    submission path lives there, and an API that cannot reach it cannot
+    submit. Two tests enforce that textually.
+    """
+    session_date = _query(event).get("date") or today_market_date()
+    rows, error = _safe(lambda: OrderLedgerView(
+        table_name=os.environ.get("AGENT_JOURNAL_TABLE",
+                                  "stock-agent-dev-journal")
+    ).for_session(session_date))
+    if error:
+        return _response(200, {
+            "session_date": session_date, "orders": None,
+            "outstanding": None, "read_integrity": "UNKNOWN",
+            "committed_exposure": None, "committed_exposure_known": False,
+            "detail": error,
+            "note": ("The order ledger could not be read. This is NOT a "
+                     "report of zero outstanding orders, and no new "
+                     "exposure may be opened while it reads this way."),
+        })
+
+    rows = list(rows or [])
+    summary = summarise_orders(rows)
+    payload = {"session_date": session_date, "orders": rows,
+               "read_integrity": "COMPLETE",
+               "note": ("An accepted-but-unfilled order reserves its "
+                        "notional. committed_exposure is null when it "
+                        "cannot be established, which is not zero.")}
+    payload.update(summary)
+    return _response(200, payload)
+
+
 def handle_positions(event) -> Dict:
     """Open positions, read from the store the cycle writes.
 
@@ -1727,6 +1771,7 @@ ROUTES = {
     ("GET", "/agent/risk/preview"): handle_risk_preview,
     ("GET", "/agent/hypothesis"): handle_hypothesis,
     ("GET", "/agent/positions"): handle_positions,
+    ("GET", "/agent/orders"): handle_orders,
     ("GET", "/agent/journal"): handle_journal,
     ("GET", "/agent/performance"): handle_performance,
     ("GET", "/agent/pipeline"): handle_pipeline,

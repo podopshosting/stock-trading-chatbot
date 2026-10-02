@@ -657,12 +657,21 @@ class TestCycleCrashes(unittest.TestCase):
         saved = list(rig.manager.open_positions())
         self.assertEqual(len(saved), 1)
 
-        real_close = rig.broker.close_position
+        # The hook is on submit_order, not close_position: an external
+        # exit now goes out as a deterministic SELL rather than through
+        # DELETE /v2/positions, which accepts no client order id and so
+        # could never be made idempotent. The scenario is unchanged -
+        # the venue acts, then the process dies before the local record
+        # - but it has to be injected where the venue call actually is,
+        # or the kill never fires and the test passes for nothing.
+        real_submit = rig.broker.submit_order
 
-        def close_then_die(symbol, intent="EXIT"):
-            real_close(symbol, intent=intent)
-            raise Killed()
-        rig.broker.close_position = close_then_die
+        def submit_then_die(*args, **kwargs):
+            order = real_submit(*args, **kwargs)
+            if str(kwargs.get("side", "")).upper() == "SELL":
+                raise Killed()
+            return order
+        rig.broker.submit_order = submit_then_die
         with self.assertRaises(Killed):
             rig.cycle(quote=stopping_quote, hypothesis=nothing)
         self.assertEqual(venue.positions, {})
