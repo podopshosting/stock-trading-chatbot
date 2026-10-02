@@ -967,3 +967,118 @@ class TestAnEarlyAbortIsVisibleToHealth(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(body["error"], "RuntimeError")
         self.assertFalse(body["ran"])
+
+
+class TestBrokerSelectionActuallyRuns(unittest.TestCase):
+    """
+    This branch shipped three defects and 2042 tests caught none of
+    them, because nothing could reach it: both log events were
+    unregistered, `creds` was a local of _provider() and undefined here,
+    and the alert sink's method is `emit`, not `send`. Each surfaced one
+    deployment at a time, from production.
+
+    So these tests call it. Asserting things *about* the source was what
+    let the second and third defects through.
+    """
+
+    class Sink:
+        """Only `emit`, deliberately. The real sink has no `send`, so a
+        wrong method name must raise here rather than in Lambda."""
+
+        def __init__(self):
+            self.emitted = []
+
+        def emit(self, alert):
+            self.emitted.append(alert)
+
+    def cfg(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(storage=SimpleNamespace(
+            alpaca_secret_id="stock-agent/alpaca-paper", region="us-east-2"))
+
+    def select(self, env, creds=None, raises=None):
+        sink = self.Sink()
+        internal = object()
+        fake = mock.Mock(base_url="https://paper-api.alpaca.markets")
+
+        def load(secret_id, region):
+            if raises == "creds":
+                raise RuntimeError("secrets manager unavailable")
+            self.loaded = (secret_id, region)
+            return creds or {"api_key_id": "k", "api_secret_key": "s"}
+
+        def build(**_kw):
+            if raises == "build":
+                raise ValueError("bad transport")
+            return fake
+
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(cycle, "_load_alpaca_credentials", load), \
+             mock.patch.object(cycle, "AlpacaPaperBroker", build), \
+             mock.patch.object(cycle, "RequestsTransport",
+                               lambda *_a, **_k: object()):
+            broker, external = cycle._select_broker(
+                internal, self.cfg(), sink, "2026-10-02")
+        return broker, external, internal, sink, fake
+
+    def test_unset_broker_keeps_the_internal_simulator(self):
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_BROKER"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            broker, external = cycle._select_broker(
+                internal := object(), self.cfg(), self.Sink(), "2026-10-02")
+        self.assertIs(broker, internal)
+        self.assertIsNone(external)
+
+    def test_internal_is_explicitly_selectable(self):
+        broker, external, internal, sink, _ = self.select(
+            {"AGENT_BROKER": "internal"})
+        self.assertIs(broker, internal)
+        self.assertIsNone(external)
+        self.assertEqual(sink.emitted, [])
+
+    def test_alpaca_paper_selects_the_external_venue(self):
+        broker, external, internal, sink, fake = self.select(
+            {"AGENT_BROKER": "alpaca_paper"})
+        self.assertIs(broker, fake)
+        self.assertIs(external, fake)
+        self.assertIsNot(broker, internal)
+        self.assertEqual(sink.emitted, [],
+                         "a successful selection must raise no alert")
+
+    def test_credentials_come_from_the_configured_secret(self):
+        """Not a hardcoded id. `creds` being undefined here is what the
+        NameError in production was."""
+        self.select({"AGENT_BROKER": "alpaca_paper"})
+        self.assertEqual(self.loaded,
+                         ("stock-agent/alpaca-paper", "us-east-2"))
+
+    def test_a_construction_failure_falls_back_and_alerts(self):
+        broker, external, internal, sink, _ = self.select(
+            {"AGENT_BROKER": "alpaca_paper"}, raises="build")
+        self.assertIs(broker, internal)
+        self.assertIsNone(external)
+        self.assertEqual(len(sink.emitted), 1)
+        self.assertIn("unavailable", sink.emitted[0].detail)
+
+    def test_a_credential_failure_also_falls_back(self):
+        """The secret read is inside the guard on purpose: Secrets
+        Manager being down must degrade, not abort the cycle."""
+        broker, external, internal, sink, _ = self.select(
+            {"AGENT_BROKER": "alpaca_paper"}, raises="creds")
+        self.assertIs(broker, internal)
+        self.assertIsNone(external)
+        self.assertEqual(len(sink.emitted), 1)
+
+    def test_the_fallback_uses_the_method_the_sink_actually_has(self):
+        """The Sink above defines only `emit`. If the code calls `send`
+        this raises AttributeError, which is precisely the production
+        failure of 2026-10-02T00:01."""
+        from agent.autonomy.alerts import AlertSink
+        self.assertTrue(hasattr(AlertSink, "emit"))
+        self.assertFalse(hasattr(AlertSink, "send"))
+        self.select({"AGENT_BROKER": "alpaca_paper"}, raises="build")
+
+    def test_the_case_of_the_variable_does_not_matter(self):
+        broker, external, _i, _s, fake = self.select(
+            {"AGENT_BROKER": "ALPACA_PAPER"})
+        self.assertIs(external, fake)

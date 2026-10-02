@@ -159,3 +159,52 @@ class TestALoggingFailureIsNotABrokerFailure(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEveryAlertKindReferencedExists(unittest.TestCase):
+    """
+    Same defect class as the unregistered log events, one layer over.
+    `AlertKind.BROKER_UNAVAILABLE` did not exist, and the only code that
+    referenced it was a fallback path nothing could reach, so it failed
+    in Lambda on 2026-10-02 after two earlier defects in the same four
+    lines had already been fixed one at a time.
+    """
+
+    def referenced_kinds(self, path):
+        tree = ast.parse(path.read_text())
+        found = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "AlertKind"):
+                found.add(node.attr)
+        return found
+
+    def test_every_referenced_kind_is_defined(self):
+        from agent.autonomy.alerts import AlertKind
+        defined = {m.name for m in AlertKind}
+        offenders = {}
+        for path in ALL_EMITTERS:
+            missing = sorted(self.referenced_kinds(path) - defined)
+            if missing:
+                offenders[str(path.relative_to(REPO))] = missing
+        self.assertEqual(offenders, {})
+
+    def test_the_scan_finds_kinds_at_all(self):
+        """The control: a silent zero would make the test above vacuous."""
+        found = self.referenced_kinds(
+            REPO / "lambda-micro" / "agent-cycle" / "handler.py")
+        self.assertGreaterEqual(len(found), 2)
+        self.assertIn("BROKER_UNAVAILABLE", found)
+
+    def test_broker_unavailable_is_not_critical(self):
+        """It degrades to the simulator rather than leaving exposure
+        wrong, so it must not sit with the emergency kinds - a CRITICAL
+        that fires on a recoverable degradation is one that gets muted."""
+        from agent.autonomy.alerts import AlertKind, CRITICAL_KINDS
+        self.assertNotIn(AlertKind.BROKER_UNAVAILABLE, CRITICAL_KINDS)
+
+    def test_the_critical_set_is_not_simply_empty(self):
+        """The control for the assertion above."""
+        from agent.autonomy.alerts import AlertKind, CRITICAL_KINDS
+        self.assertIn(AlertKind.EMERGENCY_STOP, CRITICAL_KINDS)

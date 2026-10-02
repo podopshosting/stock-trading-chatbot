@@ -42,6 +42,12 @@ class AlertKind(str, enum.Enum):
     UNCERTAIN_ORDER_STATE = "UNCERTAIN_ORDER_STATE"
     EOD_FLATTEN_FAILURE = "EOD_FLATTEN_FAILURE"
     LIVE_MODE_REQUESTED = "LIVE_MODE_REQUESTED"
+    # Deliberately NOT in CRITICAL_KINDS below: the agent degrades to the
+    # internal simulator rather than trading against an adapter in an
+    # unknown state, so exposure is not wrong - the evidence label would
+    # be, which is serious but not an emergency. docs/AGENT-ALERTING.md
+    # describes it under HIGH for that reason.
+    BROKER_UNAVAILABLE = "BROKER_UNAVAILABLE"
 
     def __str__(self) -> str:
         return self.value

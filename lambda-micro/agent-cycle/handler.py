@@ -164,6 +164,57 @@ def lambda_handler(event, context) -> Dict:
     return {"statusCode": 200, "body": json.dumps(result, default=str)}
 
 
+def _select_broker(internal, cfg, alerts, session_date):
+    """Choose the execution venue. Returns (broker, external).
+
+    `external` is None when the internal simulator is authoritative.
+
+    Extracted because the inline version could not be reached from a
+    test, and three separate defects survived 2042 tests as a result:
+    both log events were unregistered, `creds` was a local of
+    _provider() and so undefined here, and the alert sink's method is
+    `emit`, not `send`. Each was found one deployment at a time, by
+    production, in a path that only runs when AGENT_BROKER selects it.
+
+    Alpaca's PAPER venue becomes authoritative for broker facts - fills,
+    positions, cash - and the internal simulator stays available as a
+    shadow so its expected fill can be compared with what the venue
+    actually did. The adapter refuses any base URL but the paper domain,
+    so this cannot reach real money.
+    """
+    if os.environ.get("AGENT_BROKER", "internal").lower() != "alpaca_paper":
+        return internal, None
+
+    # ONLY the credential read and the construction are guarded. The
+    # success log used to sit inside this try, so when it raised the
+    # except clause caught its own logging failure and reported it as a
+    # broker failure - which would downgrade to the simulator and file
+    # the result under a cohort labelled external, the one thing the
+    # fallback exists to prevent.
+    try:
+        creds = _load_alpaca_credentials(cfg.storage.alpaca_secret_id,
+                                         cfg.storage.region)
+        external = AlpacaPaperBroker(
+            transport=RequestsTransport(creds["api_key_id"],
+                                        creds["api_secret_key"]))
+    except Exception as exc:                              # noqa: BLE001
+        # Fall back to the internal simulator rather than trading
+        # against an adapter in an unknown state, and say so loudly: a
+        # silent downgrade would put simulator fills into a cohort
+        # labelled external.
+        log_event("broker_unavailable", broker="alpaca_paper",
+                  error=f"{type(exc).__name__}: {exc}"[:200])
+        alerts.emit(Alert(
+            kind=AlertKind.BROKER_UNAVAILABLE,
+            detail=f"alpaca paper adapter unavailable: "
+                   f"{type(exc).__name__}", session_date=session_date))
+        return internal, None
+
+    log_event("broker_selected", broker="alpaca_paper",
+              base_url=external.base_url, authoritative=True)
+    return external, external
+
+
 def _run(session_date: str) -> Dict:
     cfg = _config()
     policy = policy_from_environment(os.environ.get("AGENT_EXECUTION_MODE"))
@@ -208,43 +259,7 @@ def _run(session_date: str) -> Dict:
     if snapshot:
         restore_broker(internal, snapshot)
 
-    # Alpaca's PAPER venue, when configured. It becomes authoritative for
-    # broker facts - fills, positions, cash - and the internal simulator
-    # stays available as a shadow so its expected fill can be compared
-    # with what the venue actually did. The adapter refuses any base URL
-    # but the paper domain, so this cannot reach real money.
-    broker = internal
-    external = None
-    if os.environ.get("AGENT_BROKER", "internal").lower() == "alpaca_paper":
-        # ONLY the construction is guarded. The success log used to sit
-        # inside this try, so when it raised - both event names were
-        # unregistered - the except clause caught its own logging
-        # failure, reported it as `broker_unavailable`, and then died on
-        # that log too. A logging fault must never be reported as a
-        # broker fault: it would downgrade to the simulator and file the
-        # result under a cohort labelled external, which is exactly what
-        # the fallback below exists to prevent.
-        try:
-            external = AlpacaPaperBroker(
-                transport=RequestsTransport(creds["api_key_id"],
-                                            creds["api_secret_key"]))
-        except Exception as exc:                          # noqa: BLE001
-            # Fall back to the internal simulator rather than trading
-            # against an adapter in an unknown state, and say so loudly:
-            # a silent downgrade would put delayed-grade evidence into a
-            # cohort labelled external.
-            external = None
-            log_event("broker_unavailable", broker="alpaca_paper",
-                      error=f"{type(exc).__name__}: {exc}"[:200])
-            alerts.send(Alert(
-                kind=AlertKind.BROKER_UNAVAILABLE,
-                detail=f"alpaca paper adapter unavailable: "
-                       f"{type(exc).__name__}", session_date=session_date))
-            broker = internal
-        if external is not None:
-            broker = external
-            log_event("broker_selected", broker="alpaca_paper",
-                      base_url=external.base_url, authoritative=True)
+    broker, external = _select_broker(internal, cfg, alerts, session_date)
 
     position_store = DynamoDBPositionStore(table_name=os.environ.get(
         "AGENT_POSITIONS_TABLE", "stock-agent-dev-positions"))
