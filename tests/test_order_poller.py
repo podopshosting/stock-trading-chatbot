@@ -139,7 +139,7 @@ class TestAbsenceIsNotTheSameAsSilence(unittest.TestCase):
 
     def test_a_confirmed_absence_after_the_grace_period_releases_it(self):
         ledger = InMemoryOrderLedger()
-        ledger.record_intent(intent(age=ABSENCE_GRACE_SECONDS + 10))
+        ledger.record_intent(intent(age=600))
         out = poll_outstanding(Venue(), ledger, SESSION, now=NOW)
         self.assertEqual(out["never_placed"], 1)
         row = ledger.get("cli_a")
@@ -150,13 +150,30 @@ class TestAbsenceIsNotTheSameAsSilence(unittest.TestCase):
 
     def test_a_confirmed_absence_inside_the_grace_period_does_not(self):
         """An order list that has not caught up looks exactly like an
-        order that was never placed."""
+        order that was never placed.
+
+        The age here is a FIXED 5 seconds, not a value derived from
+        ABSENCE_GRACE_SECONDS. Deriving it from the constant made this
+        test move with the constant: setting the grace period to zero
+        also moved the test's age to -10, which is still "inside", so
+        the test passed and the mutation survived. A test that pins a
+        threshold cannot be written in terms of that threshold.
+        """
         ledger = InMemoryOrderLedger()
-        ledger.record_intent(intent(age=ABSENCE_GRACE_SECONDS - 10))
+        ledger.record_intent(intent(age=5))
         out = poll_outstanding(Venue(), ledger, SESSION, now=NOW)
         self.assertEqual(out["never_placed"], 0)
         self.assertEqual(out["still_open"], 1)
         self.assertNotEqual(ledger.get("cli_a").potential_exposure, 0.0)
+
+    def test_the_grace_period_is_long_enough_to_outlast_a_lagging_list(self):
+        """A second value, so the boundary is pinned rather than one
+        point either side of whatever the constant happens to be."""
+        self.assertGreaterEqual(ABSENCE_GRACE_SECONDS, 30.0)
+        ledger = InMemoryOrderLedger()
+        ledger.record_intent(intent(age=29))
+        out = poll_outstanding(Venue(), ledger, SESSION, now=NOW)
+        self.assertEqual(out["never_placed"], 0)
 
     def test_an_intent_with_no_timestamp_is_never_concluded_absent(self):
         ledger = InMemoryOrderLedger()
@@ -188,16 +205,42 @@ class TestAbsenceIsNotTheSameAsSilence(unittest.TestCase):
         self.assertGreater(out["exposure"]["reserved"], 0.0)
 
     def test_an_order_seen_once_is_never_marked_never_placed(self):
+        """Reached through the CLIENT-ID path, deliberately.
+
+        The first version of this test let the row pick up a
+        broker_order_id from its first observation, so the second poll
+        took the get_order path and returned (None, confirmed=False) -
+        which exits at the "not confirmed" branch and never reaches the
+        previously-observed check at all. The mutation that removed that
+        check survived, because nothing ever executed it.
+
+        Here the venue never supplies an order id, so the lookup goes by
+        client id and reports a CONFIRMED absence, which is the only way
+        to reach the branch under test.
+        """
         ledger = InMemoryOrderLedger()
-        ledger.record_intent(intent())
-        venue = Venue(by_cli={"cli_a": order(status="SUBMITTED", filled=0.0,
-                                             avg=None)})
+        ledger.record_intent(intent(age=600))
+        seen = {"order_id": None, "status": "SUBMITTED",
+                "raw_status": "accepted", "filled_quantity": 0.0,
+                "remaining_quantity": 1.0, "average_fill_price": None}
+        venue = Venue(by_cli={"cli_a": seen})
         poll_outstanding(venue, ledger, SESSION, now=NOW)
-        venue._by_cli.clear()
+        row = ledger.get("cli_a")
+        self.assertTrue(row.submission_outcome_known)
+        self.assertIsNone(row.broker_order_id,
+                          "the client-id path must be the one exercised")
+
+        venue._by_cli.clear()          # the venue now denies it exists
         out = poll_outstanding(venue, ledger, SESSION, now=NOW)
-        self.assertEqual(out["never_placed"], 0)
+        self.assertEqual(out["never_placed"], 0,
+                         "an order we have watched at the venue must not "
+                         "be concluded never to have existed")
         self.assertEqual(out["vanished"], 1)
+        self.assertEqual(out["unresolved"], 1)
+        self.assertEqual(out["integrity"], INTEGRITY_PARTIAL)
         self.assertNotEqual(ledger.get("cli_a").status, NEVER_PLACED)
+        self.assertGreater(out["exposure"]["reserved"], 0.0,
+                           "the reservation must stand")
 
     def test_a_filled_order_cannot_be_marked_never_placed(self):
         ledger = InMemoryOrderLedger()
