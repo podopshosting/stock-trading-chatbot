@@ -23,16 +23,48 @@ There is **no** `order_filled`, `position_opened`, `trade_recorded` or
 `position_state_saved` event. The order left the agent, the venue
 executed it, and the agent kept no record of it.
 
-## Why
+## Why — CORRECTED
 
-The fifth defect in the external-broker path.
-`agent/broker/store.py` persists the internal simulator by reaching into
-its private attributes, and the cycle handed it the external adapter, so
-`_persist` raised `AttributeError` on `broker._account`.
+My first reading of this blamed the `_account` crash for losing the
+record of a fill. **That was wrong**, and the decision log says so.
 
-`_persist` runs **after** the orchestrator has already submitted orders.
-So the crash landed in the window between "order submitted" and
-"position written", which is the one window where a fill can be lost.
+The agent's own decision log holds a DRAM row with outcome
+`ORDER_NOT_FILLED`, `filled_quantity: 0.0`, `average_fill_price: None`,
+against the same order id. So the real sequence is:
+
+1. the agent submits a MARKETABLE_LIMIT order for DRAM
+2. it reads the order back immediately: **zero filled**
+3. it records `ORDER_NOT_FILLED` and moves on - correct, by its own
+   information at that instant
+4. the cycle later crashes on `_account`, which is a separate defect
+5. **the venue fills the order afterwards**
+6. the next cycle sees a position the agent never opened
+
+The `_account` crash is incidental. The orphan would have happened
+without it.
+
+### The actual defect
+
+`agent/orchestration/day.py` abandons an unfilled entry order:
+
+```python
+if (order.get("filled_quantity") or 0) <= 0:
+    self._record_decision(result, symbol, "ORDER_NOT_FILLED", ...)
+    continue
+```
+
+There is no cancel. `cancel_order` does not appear anywhere in that
+module. The order is left **working at the venue**.
+
+Against the internal simulator this is harmless, because it fills
+synchronously or never - so "not filled on read-back" really does mean
+"will never fill". A real venue does not work that way: a marketable
+limit can fill milliseconds after the agent looks. The assumption was
+true of the simulator and false of the market, and nothing had ever run
+this path against a real venue.
+
+That is why this surfaced on the first external-broker session and not
+in any of 2109 tests.
 
 ## What worked, and should be said plainly
 
@@ -50,15 +82,16 @@ broker's book against the agent's rather than trusting its own.
 
 ## The architectural finding
 
-This is not only a missing attribute. **Persistence happens at the end
-of a cycle, after orders have been submitted.** Any failure in that
-window loses the record of a fill that has already happened.
+**An order that has left the agent is exposure, whether or not it has
+filled yet.** The code treated a submitted-but-unfilled order as
+nothing at all: not tracked, not cancelled, not reconciled against.
+There is no state in which that is safe with a real venue.
 
-The guarantee that matters is: *an order that has left the agent must be
-recoverable from durable state before anything else can fail.* Today it
-was not. `client_order_ids` - the idempotency guard - is itself part of
-the broker state that failed to save, so the mechanism that prevents a
-duplicate was lost in the same crash that created the need for it.
+A secondary weakness stands regardless: persistence runs at the end of
+a cycle, after orders have been submitted, and `client_order_ids` - the
+idempotency guard - is part of the broker state that failed to save. So
+the mechanism that prevents a duplicate was lost in the same crash that
+would have created the need for it.
 
 This wants fixing before the first strategy cohort, and it is a
 trading-path change, so it needs its own regression proof and gate.
@@ -99,3 +132,40 @@ flat start, and the start is not flat.
    `d7eaecdd-4c25-4273-8685-8085e60d48b4`, submitted by the agent at
    13:37:43 and filled. Closing it restores a flat book. The agent has
    deliberately not closed it.
+
+---
+
+## Fix
+
+`_cancel_abandoned_entry` now cancels any entry order that reads back
+unfilled, and the decision detail records whether the cancel succeeded.
+If the cancel fails - including because the order filled while the
+cancel was in flight - `UNCERTAIN_ORDER_STATE` is raised as a condition
+and an alert, because exposure is then unknown and must not be reported
+as absent. Reconciliation on the next cycle is what resolves it.
+
+Five regression tests, with both controls:
+
+- an order really was submitted (without this, the cancel assertion
+  would pass for a cycle that never traded)
+- the unfilled order is cancelled
+- no position is claimed
+- the cycle still completes
+- **a filled order is NOT cancelled** - cancelling a filled entry would
+  close a position the agent had just correctly opened
+
+The defect test fails against the unfixed orchestrator with
+`Lists differ: [] != ['ord_1']`.
+
+## What this says about the test suite
+
+2114 tests did not catch it, and no amount of care in writing them
+would have. Every test ran against the internal simulator, where
+"unfilled on read-back" genuinely means "will never fill". The
+assumption was true of the fake and false of the market.
+
+The `StrictExternalBroker` and `UnfillingBroker` doubles added today are
+the first things in the suite that behave like a venue rather than like
+the simulator: public interface only, and asynchronous fills. Both
+defects found this afternoon were invisible until something in the
+tests stopped pretending to be the simulator.

@@ -1420,3 +1420,94 @@ class TestTheCycleRunsAgainstAnExternalBroker(unittest.TestCase):
         world = World()
         out = world.invoke()
         self.assertEqual(out["terminal_state"], "COMPLETED")
+
+
+class UnfillingBroker(StrictExternalBroker):
+    """Accepts an order and reports it unfilled, like a real venue does
+    for a limit order that has not traded yet. Records cancellations."""
+
+    def __init__(self):
+        super().__init__()
+        self.cancelled = []
+        self.submitted = []
+
+    def submit_order(self, *_a, **kw):
+        oid = "ord_%d" % (len(self.submitted) + 1)
+        order = {"order_id": oid,
+                 "client_order_id": kw.get("client_order_id") or "cid_1",
+                 "symbol": kw.get("symbol") or "AAA",
+                 "side": "BUY", "order_type": "MARKETABLE_LIMIT",
+                 "quantity": kw.get("quantity") or 1.0,
+                 "status": "NEW",
+                 "filled_quantity": 0.0,
+                 "average_fill_price": None}
+        self.submitted.append(order)
+        return order
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+        return {"order_id": order_id, "status": "CANCELLED"}
+
+    def get_order(self, order_id):
+        for o in self.submitted:
+            if o["order_id"] == order_id:
+                return dict(o, status="CANCELLED")
+        return None
+
+
+class TestAnUnfilledEntryOrderIsNotAbandoned(unittest.TestCase):
+    """
+    The root cause of the 2026-10-02 orphan. The agent submitted a
+    MARKETABLE_LIMIT for DRAM, read it back unfilled, recorded
+    ORDER_NOT_FILLED and moved on - leaving the order WORKING at the
+    venue. It filled afterwards, and the agent held a position it had no
+    record of.
+
+    Against the internal simulator the assumption held: it fills
+    synchronously or never, so "unfilled on read-back" really meant
+    "will never fill". A real venue can fill a marketable limit
+    milliseconds after the agent looks. An order that has left the agent
+    is exposure whether or not it has filled yet.
+    """
+
+    def run_unfilled(self):
+        world = World()
+        world.health = RecordingHealthStore()
+        broker = UnfillingBroker()
+        with mock.patch.object(cycle, "AlpacaPaperBroker",
+                               lambda **_kw: broker), \
+             mock.patch.object(cycle, "RequestsTransport",
+                               lambda *_a, **_k: object()), \
+             mock.patch.object(cycle, "_load_alpaca_credentials",
+                               lambda *_a, **_k: {"api_key_id": "k",
+                                                 "api_secret_key": "s"}):
+            out = world.invoke(env={"AGENT_BROKER": "alpaca_paper"})
+        return broker, out
+
+    def test_an_order_was_actually_submitted(self):
+        """The control: if nothing was submitted the cancel assertion
+        below would pass for a cycle that never traded."""
+        broker, _out = self.run_unfilled()
+        self.assertEqual(len(broker.submitted), 1, "nothing was submitted")
+
+    def test_the_unfilled_order_is_cancelled(self):
+        broker, _out = self.run_unfilled()
+        self.assertEqual(
+            broker.cancelled, [broker.submitted[0]["order_id"]],
+            "an unfilled entry order was left working at the venue, where "
+            "it can fill later with no position record")
+
+    def test_no_position_is_claimed(self):
+        broker, out = self.run_unfilled()
+        self.assertEqual(out.get("entries_submitted", 0), 0)
+
+    def test_the_cycle_still_completes(self):
+        _broker, out = self.run_unfilled()
+        self.assertEqual(out["terminal_state"], "COMPLETED")
+
+    def test_a_filled_order_is_not_cancelled(self):
+        """The other control. Cancelling a filled entry would close a
+        position the agent had just correctly opened."""
+        world = World()
+        out = world.invoke()
+        self.assertEqual(out["entries_submitted"], 1)

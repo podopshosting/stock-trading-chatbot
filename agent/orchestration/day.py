@@ -961,10 +961,12 @@ class MarketDayOrchestrator:
                 continue
 
             if (order.get("filled_quantity") or 0) <= 0:
+                cancel_note = self._cancel_abandoned_entry(
+                    result, symbol, order)
                 self._record_decision(
                     result, symbol, "ORDER_NOT_FILLED",
                     hypothesis=hypothesis, decision=decision, order=order,
-                    detail=f"status {order.get('status')}")
+                    detail=f"status {order.get('status')}; {cancel_note}")
                 continue
 
             result.entries_submitted += 1
@@ -982,6 +984,45 @@ class MarketDayOrchestrator:
                         f"{result.entries_submitted} entry(ies) submitted")
         if failures:
             result.errors.extend(failures)
+
+    def _cancel_abandoned_entry(self, result: CycleResult, symbol: str,
+                                order: Dict) -> str:
+        """Cancel an entry order that read back unfilled.
+
+        An order that has left the agent is exposure whether or not it
+        has filled yet. This path used to record ORDER_NOT_FILLED and
+        move on, leaving the order WORKING at the venue.
+
+        Against the internal simulator that was safe, because it fills
+        synchronously or never - so "unfilled on read-back" really did
+        mean "will never fill". A real venue can fill a marketable limit
+        milliseconds after the agent looks. On 2026-10-02 it did: a DRAM
+        order was abandoned here and filled afterwards, and the agent
+        held a position it had no record of until reconciliation halted
+        the next cycle.
+        """
+        order_id = order.get("order_id")
+        if not order_id:
+            return "no order id, so the order could not be cancelled"
+        try:
+            self.broker.cancel_order(order_id)
+        except Exception as exc:                          # noqa: BLE001
+            # The order may still be working, or may have filled while
+            # the cancel was in flight. Either way exposure is now
+            # UNCERTAIN and must not be reported as absent - the next
+            # cycle's reconciliation is what resolves it.
+            self._raise(result, Condition.UNCERTAIN_ORDER_STATE,
+                        f"{symbol}: unfilled entry order {order_id} could "
+                        f"not be cancelled: {type(exc).__name__}")
+            self._alert(result, AlertKind.UNCERTAIN_ORDER_STATE,
+                        f"{symbol}: an unfilled entry order could not be "
+                        f"cancelled and may still fill", symbol=symbol)
+            return (f"cancel FAILED ({type(exc).__name__}); the order may "
+                    f"still fill")
+        log_event("entry_remainder_cancelled", symbol=symbol,
+                  order_id=order_id, filled_quantity=0,
+                  reason="entry read back unfilled; not left working")
+        return "cancelled so it cannot fill later"
 
     def _open_position(self, result, order, decision, hypothesis) -> None:
         """Attach the exit plan.
