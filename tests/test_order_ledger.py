@@ -6,6 +6,7 @@ unfilled, recorded as not filled, and filled by the venue afterwards.
 Every case here is one the internal simulator cannot produce, because it
 fills synchronously or never.
 """
+import json
 import os
 import sys
 import unittest
@@ -13,7 +14,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.broker.order_ledger import (                              # noqa: E402
-    ExternalOrderRecord, InMemoryOrderLedger, OrderLedgerError,
+    DynamoDBOrderLedger, ExternalOrderRecord, InMemoryOrderLedger,
+    OrderLedgerError,
     committed_exposure, TERMINAL,
     LIFECYCLE_CANCELLED_PARTIAL, LIFECYCLE_CANCELLED_UNFILLED,
     LIFECYCLE_EXPECTED_NOT_FILLED, LIFECYCLE_FILLED,
@@ -353,3 +355,87 @@ class TestAnUnreadableLedgerIsNotAnEmptyOne(unittest.TestCase):
         led = DynamoDBOrderLedger(table_name="t", client=fake)
         with self.assertRaises(OrderLedgerError):
             led.record_intent(intent())
+
+
+class TestAbsenceVersusNotSearched(unittest.TestCase):
+    """`get()` must not report "not recently" as "does not exist".
+
+    Found by running against the real dev table on 2026-10-02. The
+    method guessed the session date from the wall clock and searched a
+    four-day window, so a row outside it read as absent - and the
+    caller asking is deciding whether an order was ever placed. The
+    comment that sat above it claimed the method did not guess the date
+    while it was guessing the date.
+    """
+
+    PAYLOAD = json.dumps({
+        "client_order_id": "cli_x", "session_date": "2020-01-01",
+        "symbol": "XYZ", "side": "BUY", "requested_notional": 100.0,
+        "filled_quantity": 0.0, "submission_outcome_known": False})
+
+    def _client(self, present_in=None):
+        present_in = present_in or set()
+        calls = []
+
+        class Fake:
+            def get_item(_self, **kw):
+                pk = kw["Key"]["PK"]["S"]
+                calls.append(pk)
+                if pk in present_in:
+                    return {"Item": {"payload": {"S": self.PAYLOAD}}}
+                return {}
+
+        return Fake(), calls
+
+    def test_a_known_session_reads_exactly_one_partition(self):
+        client, calls = self._client({"EXTORDERS#2020-01-01"})
+        ledger = DynamoDBOrderLedger(table_name="t", client=client)
+        row = ledger.get("cli_x", session_date="2020-01-01")
+        self.assertIsNotNone(row)
+        self.assertEqual(calls, ["EXTORDERS#2020-01-01"],
+                         "a known session must not be searched for")
+
+    def test_a_miss_in_a_known_partition_is_established_absence(self):
+        client, calls = self._client(set())
+        ledger = DynamoDBOrderLedger(table_name="t", client=client)
+        self.assertIsNone(ledger.get("cli_x", session_date="2020-01-01"))
+        self.assertEqual(len(calls), 1)
+
+    def test_a_miss_without_a_session_raises_rather_than_returning_none(self):
+        """The property. Returning None here would tell the submit path
+        that no intent exists, on the strength of a search that only
+        covered a few recent days."""
+        client, _calls = self._client(set())
+        ledger = DynamoDBOrderLedger(table_name="t", client=client)
+        with self.assertRaises(OrderLedgerError) as caught:
+            ledger.get("cli_x")
+        self.assertIn("NOT established", str(caught.exception))
+
+    def test_a_hit_inside_the_window_still_works_without_a_session(self):
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date()
+        client, _calls = self._client({f"EXTORDERS#{today}"})
+        ledger = DynamoDBOrderLedger(table_name="t", client=client)
+        self.assertIsNotNone(ledger.get("cli_x"))
+
+    def test_the_in_memory_ledger_accepts_the_same_signature(self):
+        """The two implementations must stay interchangeable, or the
+        tests would be exercising a different contract from production."""
+        ledger = InMemoryOrderLedger()
+        ledger.record_intent(ExternalOrderRecord(
+            client_order_id="cli_m", session_date="2026-10-02",
+            symbol="XYZ", side="BUY"))
+        self.assertIsNotNone(ledger.get("cli_m"))
+        self.assertIsNotNone(ledger.get("cli_m", session_date="2026-10-02"))
+        self.assertIsNone(ledger.get("cli_absent",
+                                     session_date="2026-10-02"))
+
+    def test_the_submit_path_supplies_the_session_it_knows(self):
+        """A caller that knows the partition must not make the ledger
+        guess. Asserted against the source, because the alternative is
+        a passing test over a search that happens to hit."""
+        import inspect
+        from agent.broker import execution
+        source = inspect.getsource(execution._recover_or_record_intent)
+        self.assertIn("session_date=session_date", source)
+        self.assertNotIn("ledger.get(proposal.client_order_id)", source)

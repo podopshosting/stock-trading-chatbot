@@ -105,8 +105,9 @@ unimplemented link:
 - **No Risk Governor integration.** `committed_exposure()` exists and the
   Governor does not consult it, so an accepted-but-unfilled order does
   not yet reserve room.
-- **No DynamoDB table in dev.** `DynamoDBOrderLedger` is written and
-  untested against a real table.
+- ~~No DynamoDB table in dev.~~ **Validated** against
+  `stock-agent-dev-journal` on 2026-10-02, 23/23 checks - and it found
+  a real defect. See below.
 - ~~Exits are not recorded.~~ **Done.** See below.
 
 Each of those is a separate step, and none of them is a reason to soften
@@ -195,3 +196,41 @@ stale date would file an exit under the wrong day. When it was not set
 at all the exit was *refused* and the position stayed open with
 `EOD_FLATTEN_FAILURE` raised - correct fail-closed behaviour, and still
 a bug, which is how it was found.
+
+## What the real table found that the tests could not
+
+`scripts/validate_order_ledger.py` exercises `DynamoDBOrderLedger`
+against `stock-agent-dev-journal` in an isolated partition - the session
+is a sentinel that cannot be a market date, so these rows can never be
+read by a query for a real session and cannot contaminate strategy
+evidence. The script removes only the rows it wrote and then proves the
+partition is empty.
+
+The first run was 11/20. `get()` returned `None` for a row that
+`for_session` read back perfectly.
+
+The cause: `get()` had no session parameter, so it guessed, taking
+today's date from the wall clock and probing four consecutive
+partitions. A row outside that window read as absent. The comment above
+it said *"Scanning the session's partition rather than guessing the
+date"* while the code was guessing the date.
+
+Why that mattered more than a failed lookup: the caller asking is
+`_recover_or_record_intent`, deciding whether an order was ever placed.
+`None` there means "no intent exists", so it would write a fresh intent
+and submit. The adapter's own `find_by_client_order_id` would have
+stopped an actual duplicate order - defence in depth earning its keep -
+but the recovery logic was reasoning from a false premise, and the one
+distinction this whole system is built around, between *absent* and
+*unknown*, was collapsed.
+
+`get()` now takes a `session_date`. With it, one partition is read and a
+miss is established absence. Without it, the window is searched and a
+miss **raises**, because "not in the last four days" is not "does not
+exist". Every caller that knows the session now passes it, which is all
+of them, asserted against the source rather than against a search that
+happens to hit.
+
+No unit test with a fake could have found this. The fake had full
+visibility, so `get()` always worked; only a real partition key could
+expose a method that was looking in the wrong place.

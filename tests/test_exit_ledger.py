@@ -73,9 +73,11 @@ class RecordingLedger(InMemoryOrderLedger):
         self.events.append("intent")
         return super().record_intent(record)
 
-    def record_observation(self, cli, order, observed_at):
+    def record_observation(self, cli, order, observed_at,
+                           session_date=None):
         self.events.append("observation")
-        return super().record_observation(cli, order, observed_at)
+        return super().record_observation(cli, order, observed_at,
+                                          session_date)
 
 
 class TestTheExitIdIsDeterministic(unittest.TestCase):

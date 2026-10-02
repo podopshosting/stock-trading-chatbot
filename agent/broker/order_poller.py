@@ -170,7 +170,8 @@ def poll_outstanding(broker, ledger, session_date: str, *,
         if order is not None:
             try:
                 updated = ledger.record_observation(
-                    row.client_order_id, order, stamp)
+                    row.client_order_id, order, stamp,
+                    session_date=session_date)
             except Exception as exc:                      # noqa: BLE001
                 result["unresolved"] += 1
                 result["integrity"] = (
@@ -244,7 +245,8 @@ def poll_outstanding(broker, ledger, session_date: str, *,
             continue
 
         try:
-            ledger.record_never_placed(row.client_order_id, stamp)
+            ledger.record_never_placed(row.client_order_id, stamp,
+                                       session_date=session_date)
         except Exception as exc:                          # noqa: BLE001
             result["unresolved"] += 1
             result["integrity"] = (INTEGRITY_PARTIAL

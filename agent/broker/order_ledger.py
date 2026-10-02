@@ -202,17 +202,28 @@ class OrderLedger:
         raise NotImplementedError
 
     def record_observation(self, client_order_id: str, order: Dict,
-                           observed_at: str) -> ExternalOrderRecord:
+                           observed_at: str,
+                           session_date: Optional[str] = None
+                           ) -> ExternalOrderRecord:
         raise NotImplementedError
 
-    def get(self, client_order_id: str) -> Optional[ExternalOrderRecord]:
+    def get(self, client_order_id: str,
+            session_date: Optional[str] = None
+            ) -> Optional[ExternalOrderRecord]:
+        """The record, or None where absence is ESTABLISHED.
+
+        `session_date` is the partition. A caller that knows it must
+        pass it: without it an implementation can only search, and a
+        search that finds nothing has not established absence.
+        """
         raise NotImplementedError
 
     def for_session(self, session_date: str) -> List[ExternalOrderRecord]:
         raise NotImplementedError
 
-    def record_never_placed(self, client_order_id: str,
-                            observed_at: str) -> ExternalOrderRecord:
+    def record_never_placed(self, client_order_id: str, observed_at: str,
+                            session_date: Optional[str] = None
+                            ) -> ExternalOrderRecord:
         raise NotImplementedError
 
     def non_terminal(self, session_date: str) -> List[ExternalOrderRecord]:
@@ -233,7 +244,8 @@ class InMemoryOrderLedger(OrderLedger):
             return
         self._rows[record.client_order_id] = record
 
-    def record_observation(self, client_order_id, order, observed_at):
+    def record_observation(self, client_order_id, order, observed_at,
+                           session_date=None):
         row = self._rows.get(client_order_id)
         if row is None:
             raise OrderLedgerError(
@@ -242,7 +254,8 @@ class InMemoryOrderLedger(OrderLedger):
         _apply(row, order, observed_at)
         return row
 
-    def record_never_placed(self, client_order_id, observed_at):
+    def record_never_placed(self, client_order_id, observed_at,
+                            session_date=None):
         row = self._rows.get(client_order_id)
         if row is None:
             raise OrderLedgerError(
@@ -250,7 +263,8 @@ class InMemoryOrderLedger(OrderLedger):
         _mark_never_placed(row, observed_at)
         return row
 
-    def get(self, client_order_id):
+    def get(self, client_order_id, session_date=None):
+        # Full visibility, so None really is absence.
         return self._rows.get(client_order_id)
 
     def for_session(self, session_date):
@@ -361,8 +375,9 @@ class DynamoDBOrderLedger(OrderLedger):
                 f"could not record order intent for "
                 f"{record.client_order_id}: {type(exc).__name__}") from None
 
-    def record_observation(self, client_order_id, order, observed_at):
-        row = self.get(client_order_id)
+    def record_observation(self, client_order_id, order, observed_at,
+                           session_date=None):
+        row = self.get(client_order_id, session_date=session_date)
         if row is None:
             raise OrderLedgerError(
                 f"no intent recorded for {client_order_id}; an order "
@@ -383,8 +398,9 @@ class DynamoDBOrderLedger(OrderLedger):
                 f"{type(exc).__name__}") from None
         return row
 
-    def record_never_placed(self, client_order_id, observed_at):
-        row = self.get(client_order_id)
+    def record_never_placed(self, client_order_id, observed_at,
+                            session_date=None):
+        row = self.get(client_order_id, session_date=session_date)
         if row is None:
             raise OrderLedgerError(
                 f"no intent recorded for {client_order_id}")
@@ -404,10 +420,40 @@ class DynamoDBOrderLedger(OrderLedger):
                 f"{type(exc).__name__}") from None
         return row
 
-    def get(self, client_order_id):
-        # Scanning the session's partition rather than guessing the date
-        # keeps the key honest: a caller recovering from a lost response
-        # knows the id, not necessarily the session.
+    def get(self, client_order_id, session_date=None):
+        """The record, or None where absence is ESTABLISHED.
+
+        With a session_date this reads that one partition, and a miss is
+        proof the row is not there.
+
+        Without one it can only guess, because the partition key is the
+        session. It searches a short window of recent dates, and if the
+        row is not in any of them it RAISES rather than returning None -
+        because "not in the last few days" is not "does not exist", and
+        the caller that asks this question is deciding whether an order
+        was ever placed. That conflation was real: this method used to
+        scan the window unconditionally, so an order outside it read as
+        absent. Validation against the dev table on 2026-10-02 found it,
+        and the comment that used to sit here claimed the method did not
+        guess the date while it was guessing the date.
+        """
+        if session_date:
+            try:
+                r = self.client.get_item(
+                    TableName=self.table_name,
+                    Key={"PK": {"S": f"EXTORDERS#{session_date}"},
+                         "SK": {"S": client_order_id}},
+                    ConsistentRead=True)
+            except Exception as exc:                      # noqa: BLE001
+                raise OrderLedgerError(
+                    f"order ledger unreadable: {type(exc).__name__}"
+                ) from None
+            item = r.get("Item")
+            if not item:
+                return None            # absence, within a known partition
+            return ExternalOrderRecord.from_dict(
+                json.loads(item["payload"]["S"]))
+
         for date in self._candidate_dates():
             try:
                 r = self.client.get_item(
@@ -423,7 +469,12 @@ class DynamoDBOrderLedger(OrderLedger):
             if item:
                 return ExternalOrderRecord.from_dict(
                     json.loads(item["payload"]["S"]))
-        return None
+        raise OrderLedgerError(
+            f"{client_order_id} was not found in the last "
+            f"{len(self._candidate_dates())} session partitions and no "
+            f"session_date was supplied, so its absence is NOT "
+            f"established; pass the session_date to ask a question that "
+            f"can be answered")
 
     def _candidate_dates(self) -> List[str]:
         from datetime import datetime, timedelta, timezone

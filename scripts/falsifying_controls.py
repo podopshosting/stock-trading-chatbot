@@ -1120,6 +1120,45 @@ MUTATIONS = [
         new='            "positions": [], "open_count": None, "total_open_risk": 0.0,  # MUTATION',
         expect=["unreadable", "open_risk", "zero"],
     ),
+    # --- absence versus not-searched. Found by running against the
+    # --- real dev table: get() guessed the session from the wall clock
+    # --- and searched four days, so a row outside that window read as
+    # --- absent - to a caller deciding whether an order was ever placed.
+    Mutation(
+        name="unsessioned-miss-reads-as-absence",
+        description="report a row missing from a short date window as "
+                    "proof that no such order exists",
+        path=BRK_LEDGER,
+        old='        raise OrderLedgerError(\n'
+            '            f"{client_order_id} was not found in the last "',
+        new='        return None  # MUTATION\n'
+            '        raise OrderLedgerError(\n'
+            '            f"{client_order_id} was not found in the last "',
+        expect=["absence", "established", "raises"],
+    ),
+    Mutation(
+        name="ignore-the-supplied-session-and-guess",
+        description="search a window of dates even when the caller "
+                    "supplied the partition",
+        path=BRK_LEDGER,
+        old='        if session_date:\n'
+            '            try:\n'
+            '                r = self.client.get_item(',
+        new='        if False:  # MUTATION\n'
+            '            try:\n'
+            '                r = self.client.get_item(',
+        expect=["session", "partition", "searched"],
+    ),
+    Mutation(
+        name="make-the-submit-path-guess-the-session",
+        description="ask the ledger a question it cannot answer, at the "
+                    "one point that decides whether to send an order",
+        path=BRK_EXEC,
+        old='        existing = ledger.get(proposal.client_order_id,\n'
+            '                              session_date=session_date)',
+        new='        existing = ledger.get(proposal.client_order_id)  # MUTATION',
+        expect=["session", "supplies", "knows"],
+    ),
     # --- the read API's own view of the order ledger. A SECOND
     # --- implementation, because the API may not import agent/broker at
     # --- all, so each of these also guards against drift from the
@@ -1548,10 +1587,12 @@ MUTATIONS = [
                     "one anyway",
         path=BRK_EXEC,
         old="""                _record_submission(ledger, proposal, found, stamp,
-                                   required=False)
+                                   required=False,
+                                   session_date=session_date)
                 return found""",
         new="""                _record_submission(ledger, proposal, found, stamp,
-                                   required=False)  # MUTATION""",
+                                   required=False,
+                                   session_date=session_date)  # MUTATION""",
         expect=["venue", "already", "sent", "again"],
     ),
     Mutation(
@@ -1568,9 +1609,10 @@ MUTATIONS = [
         description="raise when the observation cannot be stored, "
                     "reporting a failure for an order that exists",
         path=BRK_EXEC,
-        old="        _record_submission(ledger, proposal, order, stamp)",
-        new="        _record_submission(ledger, proposal, order, stamp,"
-            " required=True)  # MUTATION",
+        old="def _record_submission(ledger, proposal, order, stamp, "
+            "required=False,",
+        new="def _record_submission(ledger, proposal, order, stamp, "
+            "required=True,  # MUTATION",
         expect=["observation", "unsend", "lost"],
     ),
     # --- external order ledger: every guard here protects against a

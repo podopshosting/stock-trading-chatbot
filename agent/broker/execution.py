@@ -114,7 +114,11 @@ def _recover_or_record_intent(broker, ledger, proposal, session_date,
     one order becomes two.
     """
     try:
-        existing = ledger.get(proposal.client_order_id)
+        # The session is the partition key, and this caller knows
+        # it. Without it the ledger can only search a window of
+        # recent dates, and a miss there is not absence.
+        existing = ledger.get(proposal.client_order_id,
+                              session_date=session_date)
     except Exception as exc:                              # noqa: BLE001
         # Not "assume absent". An absent record and an unreadable one
         # look identical from here and mean opposite things.
@@ -146,7 +150,8 @@ def _recover_or_record_intent(broker, ledger, proposal, session_date,
                           detail="intent existed; the venue already has "
                                  "this order, so it was not sent again")
                 _record_submission(ledger, proposal, found, stamp,
-                                   required=False)
+                                   required=False,
+                                   session_date=session_date)
                 return found
             # `found is None` only where the adapter has CONFIRMED
             # absence - AlpacaPaperBroker cross-checks a 404 against the
@@ -204,7 +209,8 @@ def _recover_or_record_intent(broker, ledger, proposal, session_date,
     return None
 
 
-def _record_submission(ledger, proposal, order, stamp, required=False):
+def _record_submission(ledger, proposal, order, stamp, required=False,
+                       session_date=None):
     """Fold the venue's answer into the record.
 
     Deliberately NOT fatal by default. By the time this runs the order
@@ -216,7 +222,8 @@ def _record_submission(ledger, proposal, order, stamp, required=False):
     a real integrity gap, just not one that unsends an order.
     """
     try:
-        ledger.record_observation(proposal.client_order_id, order, stamp)
+        ledger.record_observation(proposal.client_order_id, order, stamp,
+                                  session_date=session_date)
     except Exception as exc:                              # noqa: BLE001
         log_event("order_observation_not_recorded",
                   symbol=proposal.symbol,
@@ -345,7 +352,8 @@ def submit_exit(broker, *, symbol: str, quantity: float,
         intent=proposal.intent)
 
     if ledger is not None and isinstance(order, dict):
-        _record_submission(ledger, proposal, order, stamp)
+        _record_submission(ledger, proposal, order, stamp,
+                           session_date=session_date)
     return order
 
 
@@ -417,5 +425,6 @@ def submit_approved(broker, decision, hypothesis, reference_price: float,
         intent=proposal.intent)
 
     if ledger is not None and isinstance(order, dict):
-        _record_submission(ledger, proposal, order, stamp)
+        _record_submission(ledger, proposal, order, stamp,
+                           session_date=session_date)
     return order

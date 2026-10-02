@@ -550,10 +550,10 @@ class _RecordingLedger(InMemoryOrderLedger):
         self._obs_raises = obs_raises
         self._get_raises = get_raises
 
-    def get(self, client_order_id):
+    def get(self, client_order_id, session_date=None):
         if self._get_raises:
             raise self._get_raises
-        return super().get(client_order_id)
+        return super().get(client_order_id, session_date)
 
     def record_intent(self, record):
         if self._intent_raises:
@@ -561,11 +561,13 @@ class _RecordingLedger(InMemoryOrderLedger):
         self.events.append("intent")
         return super().record_intent(record)
 
-    def record_observation(self, client_order_id, order, observed_at):
+    def record_observation(self, client_order_id, order, observed_at,
+                           session_date=None):
         if self._obs_raises:
             raise self._obs_raises
         self.events.append("observation")
-        return super().record_observation(client_order_id, order, observed_at)
+        return super().record_observation(client_order_id, order,
+                                          observed_at, session_date)
 
 
 class TestIntentBeforeSubmit(unittest.TestCase):
