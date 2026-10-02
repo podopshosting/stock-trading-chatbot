@@ -122,6 +122,10 @@ SKIPPED_MARKET_CLOSED = "SKIPPED_MARKET_CLOSED"
 ABORTED = "ABORTED"
 TERMINAL_STATES = (COMPLETED, SKIPPED_MARKET_CLOSED, ABORTED)
 
+# One failure is noise; three in a row is a pattern. Mirrors the
+# orchestrator's own threshold so the two paths escalate alike.
+REPEATED_FAILURE_THRESHOLD = 3
+
 # Reconciliation has three readings, and only one of them is a claim
 # that it was checked and agreed. A cycle that never reconciled must not
 # report PASS.
@@ -213,7 +217,21 @@ def lambda_handler(event, context) -> Dict:
         # that is broken, the abort must still be returned rather than
         # replaced by a second, different error.
         try:
-            DynamoDBHealthStore(table_name=JOURNAL_TABLE).record_cycle(False)
+            _health = DynamoDBHealthStore(table_name=JOURNAL_TABLE)
+            streak = _health.record_cycle(False)
+            # Recording a failure is not the same as acting on one. The
+            # escalation to REPEATED_CYCLE_FAILURE lives inside the
+            # orchestrator, which an early abort never reaches - so on
+            # 2026-10-02 a long run of aborted cycles incremented the
+            # streak and raised nothing. A streak nobody escalates is a
+            # number, not a signal.
+            if streak >= REPEATED_FAILURE_THRESHOLD:
+                _health.raise_condition(
+                    Condition.REPEATED_CYCLE_FAILURE,
+                    f"{streak} consecutive cycles aborted before the "
+                    f"orchestration could run")
+                log_event("health_condition_raised",
+                          condition="REPEATED_CYCLE_FAILURE", streak=streak)
         except Exception as health_exc:                   # noqa: BLE001
             log_event("cycle_failure_recorded", recorded=False,
                       detail=f"{type(health_exc).__name__}: "

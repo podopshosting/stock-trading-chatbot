@@ -1511,3 +1511,76 @@ class TestAnUnfilledEntryOrderIsNotAbandoned(unittest.TestCase):
         world = World()
         out = world.invoke()
         self.assertEqual(out["entries_submitted"], 1)
+
+
+class TestEarlyAbortsEscalate(unittest.TestCase):
+    """
+    On 2026-10-02 a long run of cycles aborted before the orchestration
+    could run. Each recorded a health failure - the streak climbed - and
+    REPEATED_CYCLE_FAILURE was never raised, because the escalation lives
+    inside the orchestrator, which an early abort never reaches.
+
+    The agent kept reporting HEALTHY. It only halted because of an
+    unrelated reconciliation mismatch; without that, 21 consecutive
+    aborted cycles would have looked like a healthy agent. A streak
+    nobody escalates is a number, not a signal.
+    """
+
+    def abort_n(self, n):
+        from agent.autonomy.health import Condition
+        world = World()
+        world.health = RecordingHealthStore()
+        for _ in range(n):
+            with mock.patch.object(cycle, "_run",
+                                   side_effect=RuntimeError("boom")), \
+                 mock.patch.object(cycle, "DynamoDBHealthStore",
+                                   lambda **kw: world.health), \
+                 mock.patch.object(cycle, "DynamoDBSnapshotStore",
+                                   lambda **kw: world.snapshot), \
+                 mock.patch.dict(os.environ, {"AGENT_CODE_SHA": "deadbeef"}):
+                cycle.lambda_handler({}, None)
+        active = {c.condition for c in world.health.snapshot().active}
+        return world, active, Condition
+
+    def test_one_abort_does_not_escalate(self):
+        """The control: escalating on the first failure would make the
+        condition meaningless, since one failure is noise."""
+        _w, active, Condition = self.abort_n(1)
+        self.assertNotIn(Condition.REPEATED_CYCLE_FAILURE, active)
+
+    def test_two_aborts_do_not_escalate(self):
+        _w, active, Condition = self.abort_n(2)
+        self.assertNotIn(Condition.REPEATED_CYCLE_FAILURE, active)
+
+    def test_three_aborts_escalate(self):
+        _w, active, Condition = self.abort_n(3)
+        self.assertIn(Condition.REPEATED_CYCLE_FAILURE, active,
+                      "a run of early aborts raised nothing")
+
+    def test_the_streak_is_recorded_every_time(self):
+        world, _active, _C = self.abort_n(3)
+        self.assertEqual(world.health.record_cycle_calls, [False]*3)
+
+    def test_the_streak_is_surfaced_in_the_snapshot(self):
+        """It was stored and never reported, so a reader saw no field at
+        all - indistinguishable from zero."""
+        world, _a, _C = self.abort_n(3)
+        d = world.health.snapshot().as_dict()
+        self.assertIn("consecutive_failures", d)
+        self.assertEqual(d["consecutive_failures"], 3)
+
+    def test_a_successful_cycle_resets_the_streak(self):
+        world, _a, _C = self.abort_n(3)
+        world.health.record_cycle(True)
+        self.assertEqual(world.health.get_streak(), 0)
+
+    def test_repeated_cycle_failure_is_not_latching(self):
+        """It must be able to recover on its own, unlike the conditions
+        that need a human."""
+        from agent.autonomy.health import Condition, LATCHING
+        self.assertNotIn(Condition.REPEATED_CYCLE_FAILURE, LATCHING)
+
+    def test_it_still_blocks_new_exposure_while_active(self):
+        _w, _a, _C = self.abort_n(3)
+        from agent.autonomy.health import Condition, HALTING
+        self.assertIn(Condition.REPEATED_CYCLE_FAILURE, HALTING)

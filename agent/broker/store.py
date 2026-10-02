@@ -42,8 +42,38 @@ class ConcurrentBrokerUpdate(BrokerStateError):
     blindly: its decisions were made against stale state."""
 
 
+# The simulator's own private state. Serialising it is this module's
+# whole purpose; doing it to anything else is a category error.
+SIMULATOR_STATE = ("_account", "_positions", "_orders", "_client_ids")
+
+
+def _require_simulator(broker, what: str) -> None:
+    """Refuse any broker that is not the internal simulator.
+
+    This store round-trips PaperBroker's private state. An external
+    adapter is authoritative for its own book and must never be
+    round-tripped through here: a second local copy of real exposure is
+    a second source of truth about real money.
+
+    Before this guard the refusal arrived as an AttributeError deep
+    inside serialise(), and on 2026-10-02 it arrived AFTER an order had
+    been submitted - aborting the cycle in the one window where a fill
+    can be lost. A named refusal at the boundary fails in the same
+    direction and says what is wrong.
+    """
+    missing = [a for a in SIMULATOR_STATE if not hasattr(broker, a)]
+    if missing:
+        raise BrokerStateError(
+            f"{what}: this store serialises the internal simulator's own "
+            f"state, and {type(broker).__name__} has no {missing}. An "
+            f"external broker is authoritative for its own book - pass the "
+            f"internal simulator, and read external exposure from the "
+            f"venue rather than caching it here.")
+
+
 def serialise(broker) -> Dict:
     """Capture everything needed to resume a paper account."""
+    _require_simulator(broker, "serialise")
     account = broker._account
     return {
         "account": {
@@ -116,6 +146,7 @@ def restore(broker, data: Dict) -> None:
     Mutates the broker rather than constructing one, so the caller keeps
     control of the config and the clock.
     """
+    _require_simulator(broker, "restore")
     if not data:
         raise BrokerStateError("cannot restore from an empty snapshot")
 

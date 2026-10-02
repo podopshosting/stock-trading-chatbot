@@ -456,3 +456,79 @@ class TestSerialisationIsLossless(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheSimulatorStoreRefusesAnExternalBroker(unittest.TestCase):
+    """
+    This store serialises PaperBroker's private state. On 2026-10-02 the
+    cycle handed it AlpacaPaperBroker, and the refusal arrived as
+    `AttributeError: 'AlpacaPaperBroker' object has no attribute
+    '_account'` from deep inside serialise() - AFTER an order had been
+    submitted, which is the one window where a fill can be lost.
+
+    The guard does not change the direction of failure. It makes the
+    failure legible, and places it at the boundary rather than in the
+    middle of a cycle.
+    """
+
+    class External:
+        """An external adapter: the public surface, none of the
+        simulator's private state."""
+        name = "alpaca_paper"
+        base_url = "https://paper-api.alpaca.markets"
+
+        def get_account(self):
+            return {"cash": 100000.0}
+
+        def get_positions(self):
+            return []
+
+        def get_orders(self, **_kw):
+            return []
+
+    def test_serialise_refuses_with_a_named_error(self):
+        from agent.broker.store import serialise, BrokerStateError
+        with self.assertRaises(BrokerStateError) as ctx:
+            serialise(self.External())
+        self.assertIn("internal simulator", str(ctx.exception))
+        self.assertIn("authoritative for its own book", str(ctx.exception))
+
+    def test_restore_refuses_too(self):
+        from agent.broker.store import restore, BrokerStateError
+        with self.assertRaises(BrokerStateError):
+            restore(self.External(), {})
+
+    def test_the_error_names_what_is_missing(self):
+        from agent.broker.store import serialise, BrokerStateError
+        with self.assertRaises(BrokerStateError) as ctx:
+            serialise(self.External())
+        self.assertIn("_account", str(ctx.exception))
+
+    def test_it_is_not_an_attribute_error(self):
+        """The point of the guard: a legible refusal, not a crash whose
+        message is an implementation detail."""
+        from agent.broker.store import serialise, BrokerStateError
+        try:
+            serialise(self.External())
+        except BrokerStateError:
+            pass
+        except AttributeError:
+            self.fail("still failing with AttributeError from inside")
+
+    def test_the_internal_simulator_is_still_accepted(self):
+        """The control. Without it the guard could refuse everything."""
+        from agent.broker.paper import PaperBroker, PaperBrokerConfig
+        from agent.broker.store import serialise
+        broker = PaperBroker(config=PaperBrokerConfig(starting_cash=100.0))
+        data = serialise(broker)
+        self.assertIn("account", data)
+
+    def test_a_round_trip_still_works(self):
+        """The other control: the guard must not break the thing the
+        store exists to do."""
+        from agent.broker.paper import PaperBroker, PaperBrokerConfig
+        from agent.broker.store import serialise, restore
+        a = PaperBroker(config=PaperBrokerConfig(starting_cash=250.0))
+        b = PaperBroker(config=PaperBrokerConfig(starting_cash=1.0))
+        restore(b, serialise(a))
+        self.assertAlmostEqual(b.get_account()["cash"], 250.0, places=4)

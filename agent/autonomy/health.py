@@ -120,6 +120,11 @@ class ActiveCondition:
 class HealthSnapshot:
     active: List[ActiveCondition] = field(default_factory=list)
     assessed_at: str = field(default_factory=utcnow)
+    # The consecutive-failure streak was stored and never reported, so
+    # /agent/autonomy showed no field at all - indistinguishable from
+    # zero to anything reading it. None means "not established"; an int
+    # means a read established it.
+    consecutive_failures: Optional[int] = None
 
     @property
     def state(self) -> HealthState:
@@ -160,6 +165,7 @@ class HealthSnapshot:
 
     def as_dict(self) -> Dict:
         return {
+            "consecutive_failures": self.consecutive_failures,
             "state": str(self.state),
             "entries_permitted": self.entries_permitted,
             "exits_permitted": self.exits_permitted,
@@ -220,7 +226,15 @@ class HealthStore:
         return True
 
     def snapshot(self) -> HealthSnapshot:
-        return HealthSnapshot(active=list(self._load().values()))
+        # The streak is part of health, not a separate curiosity: three
+        # failures in a row is the signal, and it cannot be acted on if
+        # it is never reported.
+        try:
+            streak = self.get_streak()
+        except Exception:                                 # noqa: BLE001
+            streak = None
+        return HealthSnapshot(active=list(self._load().values()),
+                              consecutive_failures=streak)
 
     # Consecutive failed cycles. One failure is noise; three in a row is
     # a pattern worth a human's attention.
