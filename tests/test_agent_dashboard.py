@@ -643,6 +643,16 @@ class TestUnreadablePositionStoreClaimsNothing(unittest.TestCase):
         self.assertEqual(body["open_count"], 0)
 
 
+class _HealthSnap:
+    """Minimal stand-in for a health snapshot: the autonomy context only
+    calls .as_dict() on it."""
+
+    def as_dict(self):
+        return {"state": "HEALTHY", "entries_permitted": True,
+                "exits_permitted": True, "active": [],
+                "blocking_reasons": []}
+
+
 class TestTodayIsNeverYesterday(unittest.TestCase):
     """
     Observed on 2026-10-02 at 11:50 UTC, before any cycle had traded:
@@ -683,6 +693,10 @@ class TestTodayIsNeverYesterday(unittest.TestCase):
         left the handler's own instance untouched - and the proven-zero
         assertions failed, which is what the control is for."""
         from agent.autonomy.snapshot import DynamoDBSnapshotStore
+        from agent.autonomy.alerts import DynamoDBAlertSink
+        from agent.autonomy.health import DynamoDBHealthStore
+        from agent.autonomy.sessions import DynamoDBSessionStore
+        from agent.autonomy import DynamoDBDecisionLog
         from agent.positions import DynamoDBPositionStore
         from agent.journal import DynamoDBJournal
 
@@ -691,11 +705,26 @@ class TestTodayIsNeverYesterday(unittest.TestCase):
                 raise RuntimeError("journal unavailable")
             return list(trades)
 
+        # Every remaining reader is stubbed so this test makes no network
+        # call. Left unstubbed, each one retried against a table that
+        # does not exist and these 11 tests took 25 seconds - which is
+        # also 25 seconds per mutation in the falsifying-control harness,
+        # turning a 35-minute gate into a 2-hour one.
         with mock.patch.object(DynamoDBSnapshotStore, "get",
                                lambda *_a, **_k: snapshot), \
              mock.patch.object(DynamoDBPositionStore, "load_open",
                                lambda *_a, **_k: list(positions)), \
-             mock.patch.object(DynamoDBJournal, "list_trades", listed):
+             mock.patch.object(DynamoDBJournal, "list_trades", listed), \
+             mock.patch.object(DynamoDBHealthStore, "snapshot",
+                               lambda *_a, **_k: _HealthSnap()), \
+             mock.patch.object(DynamoDBSessionStore, "get",
+                               lambda *_a, **_k: None), \
+             mock.patch.object(DynamoDBSessionStore, "get_report",
+                               lambda *_a, **_k: None), \
+             mock.patch.object(DynamoDBDecisionLog, "for_session",
+                               lambda *_a, **_k: []), \
+             mock.patch.object(DynamoDBAlertSink, "recent",
+                               lambda *_a, **_k: []):
             _code, body = call("/agent/autonomy", date=date)
         return body
 
