@@ -260,11 +260,20 @@ class TestNoExecutionRouteExists(unittest.TestCase):
         # are paper-only: the first pins the paper host and refuses any
         # other, the second only compares. The next test checks that
         # claim against the SOURCE rather than trusting this list.
+        #
+        # order_ledger.py and provenance.py were added 2026-10-02 after an
+        # order was submitted, filled asynchronously, and left unmanaged.
+        # Neither is an adapter and neither speaks to a venue: the ledger
+        # records what the agent asked for and last observed, and
+        # provenance decides whether a discovered position is the agent's
+        # own by reconstructing its deterministic client order id. Neither
+        # contains a host of any kind, which the next test verifies
+        # against the source rather than taking on trust.
         self.assertEqual(
             modules,
             ["__init__.py", "alpaca_paper.py", "base.py", "execution.py",
-             "live_contract.py", "models.py", "paper.py", "shadow.py",
-             "store.py"],
+             "live_contract.py", "models.py", "order_ledger.py",
+             "paper.py", "provenance.py", "shadow.py", "store.py"],
             "a new module appeared in agent/broker; if it is a live "
             "adapter, the readiness gate must be reconsidered")
 

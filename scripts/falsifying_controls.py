@@ -54,6 +54,8 @@ RISK_GOV = REPO / "agent" / "risk" / "governor.py"
 RISK_MODELS = REPO / "agent" / "risk" / "models.py"
 
 BRK_PAPER = REPO / "agent" / "broker" / "paper.py"
+BRK_LEDGER = REPO / "agent" / "broker" / "order_ledger.py"
+BRK_PROV = REPO / "agent" / "broker" / "provenance.py"
 BRK_EXEC = REPO / "agent" / "broker" / "execution.py"
 BRK_MODELS = REPO / "agent" / "broker" / "models.py"
 
@@ -1114,6 +1116,107 @@ MUTATIONS = [
         old='            "positions": [], "open_count": None, "total_open_risk": None,',
         new='            "positions": [], "open_count": None, "total_open_risk": 0.0,  # MUTATION',
         expect=["unreadable", "open_risk", "zero"],
+    ),
+    # --- external order ledger: every guard here protects against a
+    # --- defect that actually happened on 2026-10-02.
+    Mutation(
+        name="treat-an-unknown-status-as-terminal",
+        description="let an order the venue described in words we do not "
+                    "recognise count as finished",
+        path=BRK_LEDGER,
+        old='        return (self.status or "") in TERMINAL',
+        new='        return True  # MUTATION',
+        expect=["terminal", "nonterminal", "unknown", "live"],
+    ),
+    Mutation(
+        name="let-filled-quantity-decrease",
+        description="allow a stale observation to un-fill a position",
+        path=BRK_LEDGER,
+        old="    row.filled_quantity = max(row.filled_quantity or 0.0, seen)",
+        new="    row.filled_quantity = seen  # MUTATION",
+        expect=["unfill", "decrease", "out_of_order", "stale"],
+    ),
+    Mutation(
+        name="let-a-repeated-intent-overwrite-observations",
+        description="overwrite a record that already carries observed "
+                    "broker state",
+        path=BRK_LEDGER,
+        old="""        existing = self._rows.get(record.client_order_id)
+        if existing is not None:""",
+        new="""        existing = self._rows.get(record.client_order_id)
+        if False:  # MUTATION""",
+        expect=["overwrite", "intent", "observation"],
+    ),
+    Mutation(
+        name="accept-an-observation-without-an-intent",
+        description="invent a ledger record for an order nobody recorded "
+                    "asking for",
+        path=BRK_LEDGER,
+        old="""        row = self._rows.get(client_order_id)
+        if row is None:
+            raise OrderLedgerError(""",
+        new="""        row = self._rows.get(client_order_id)
+        if row is None and False:
+            raise OrderLedgerError(""",
+        expect=["intent", "attribut", "refus"],
+    ),
+    Mutation(
+        name="treat-unsizeable-exposure-as-zero",
+        description="report a total that silently omits an order whose "
+                    "size could not be established",
+        path=BRK_LEDGER,
+        old='    return {"reserved": round(total, 6),',
+        new='    unknown = []  # MUTATION\n    return {"reserved": round(total, 6),',
+        expect=["unknown", "known", "unestablish"],
+    ),
+    Mutation(
+        name="let-an-accepted-unfilled-order-reserve-nothing",
+        description="stop reserving the notional of an order the venue "
+                    "has accepted but not yet filled",
+        path=BRK_LEDGER,
+        old="""        if self.is_terminal and self.submission_outcome_known:
+            return 0.0
+        if self.requested_notional is not None:""",
+        new="""        if True:  # MUTATION
+            return 0.0
+        if self.requested_notional is not None:""",
+        expect=["reserve", "exposure", "notional", "unfilled"],
+    ),
+    Mutation(
+        name="skip-a-malformed-order-row",
+        description="drop an unparseable order row and report the rest as "
+                    "though the ledger were complete",
+        path=BRK_LEDGER,
+        old="""            except Exception:                             # noqa: BLE001
+                # One unreadable row must not hide the rest, and must not
+                # vanish silently either.
+                raise OrderLedgerError(""",
+        new="""            except Exception:                             # noqa: BLE001
+                continue  # MUTATION
+                raise OrderLedgerError(""",
+        expect=["malformed", "partial", "unreadable"],
+    ),
+    # --- provenance
+    Mutation(
+        name="call-an-unreadable-history-preexisting",
+        description="decide a position belongs to somebody else because "
+                    "the order history could not be read",
+        path=BRK_PROV,
+        old="""    if broker_orders is None:
+        return _result(symbol, ORIGIN_UNKNOWN, EVIDENCE_UNREADABLE,""",
+        new="""    if broker_orders is None:
+        return _result(symbol, ORIGIN_PREEXISTING_EXTERNAL, EVIDENCE_UNREADABLE,  # MUTATION""",
+        expect=["unknown", "preexist", "unreadable"],
+    ),
+    Mutation(
+        name="call-a-prefix-match-proven",
+        description="treat a client-id prefix anyone could choose as "
+                    "proof the agent created the position",
+        path=BRK_PROV,
+        old="""           "proven": evidence in (EVIDENCE_LEDGER,
+                                  EVIDENCE_RECONSTRUCTED_ID)}""",
+        new="""           "proven": True}  # MUTATION""",
+        expect=["proven", "prefix", "weaker"],
     ),
     Mutation(
         name="drop-the-paper-banner",
