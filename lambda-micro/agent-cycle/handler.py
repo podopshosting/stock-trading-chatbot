@@ -107,6 +107,69 @@ def _config() -> AgentConfig:
     return AgentConfig.from_env()
 
 
+# --- the cycle lifecycle ---------------------------------------------
+#
+# Every invocation ends in exactly ONE terminal state, and every
+# terminal state is recorded. Before this, a cycle that ran and
+# correctly did nothing wrote no tally, no snapshot and no health
+# record, so it was indistinguishable from a cycle that never ran -
+# which is the distinction autonomous operation depends on most.
+#
+# SKIPPED_MARKET_CLOSED is an outcome, not a fault: health records it as
+# a successful invocation.
+COMPLETED = "COMPLETED"
+SKIPPED_MARKET_CLOSED = "SKIPPED_MARKET_CLOSED"
+ABORTED = "ABORTED"
+TERMINAL_STATES = (COMPLETED, SKIPPED_MARKET_CLOSED, ABORTED)
+
+# Reconciliation has three readings, and only one of them is a claim
+# that it was checked and agreed. A cycle that never reconciled must not
+# report PASS.
+RECONCILED_PASS = "PASS"
+RECONCILED_FAIL = "FAIL"
+RECONCILED_NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+def _terminal(payload: Dict, state: str, reason: str = "") -> Dict:
+    """Stamp the fields every terminal record must carry.
+
+    One function so there is one definition of "the cycle ran", rather
+    than a separate answer per reader.
+    """
+    payload["terminal_state"] = state
+    payload["invoked_at"] = _now_iso()
+    payload["code_sha"] = os.environ.get("AGENT_CODE_SHA", "unknown")
+    if reason:
+        payload.setdefault("reason", reason)
+    payload.setdefault("orders_submitted", 0)
+    payload.setdefault("fills", 0)
+    payload.setdefault("positions_changed", 0)
+    payload.setdefault("reconciliation", RECONCILED_NOT_APPLICABLE)
+    payload.setdefault("data_quality", "UNKNOWN")
+    return payload
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _write_terminal(payload: Dict) -> Dict:
+    """Persist the terminal record. Best effort, and said when it fails:
+    a cycle must not fail because its own bookkeeping did."""
+    try:
+        DynamoDBSnapshotStore(table_name=JOURNAL_TABLE).put(payload)
+    except Exception as exc:                              # noqa: BLE001
+        payload["snapshot_error"] = f"{type(exc).__name__}: {exc}"[:120]
+    return payload
+
+
+def _broker_record(broker, external) -> Dict:
+    return {"name": "alpaca_paper" if external is not None else "internal",
+            "base_url": getattr(external, "base_url", None),
+            "authoritative": external is not None}
+
+
 def _load_alpaca_credentials(secret_id: str, region: str) -> Dict:
     """Market-DATA credentials. Read from Secrets Manager, never from the
     environment, never logged. Used for quotes and bars only."""
@@ -155,12 +218,12 @@ def lambda_handler(event, context) -> Dict:
             log_event("cycle_failure_recorded", recorded=False,
                       detail=f"{type(health_exc).__name__}: "
                              f"{health_exc}"[:200])
-        result = {
+        result = _write_terminal(_terminal({
             "session_date": session_date, "ran": False,
             "error": type(exc).__name__, "detail": str(exc)[:300],
             "traceback": traceback.format_exc()[-800:],
             "new_exposure_permitted": False,
-        }
+        }, ABORTED, reason=f"{type(exc).__name__}: {str(exc)[:160]}"))
     return {"statusCode": 200, "body": json.dumps(result, default=str)}
 
 
@@ -271,7 +334,7 @@ def _run(session_date: str) -> Dict:
                  CyclePhase.UNKNOWN):
         return _off_hours(phase, session_date, session, state_service,
                           sessions, journal, broker, manager,
-                          position_store)
+                          position_store, health, external)
 
     try:
         for position in position_store.load_open(session_date):
@@ -346,26 +409,39 @@ def _run(session_date: str) -> Dict:
 
     payload["state_sync"] = sync_state(state_service, payload, session_date)
 
-    # Written where the dashboard and the chat can read it. Best effort:
-    # failing to record this must never be a reason a cycle fails.
-    try:
-        DynamoDBSnapshotStore(table_name=JOURNAL_TABLE).put(payload)
-    except Exception as exc:                              # noqa: BLE001
-        payload["snapshot_error"] = str(exc)[:120]
-    return payload
+    reconciled = payload.get("positions_reconciled")
+    payload["reconciliation"] = (
+        RECONCILED_PASS if reconciled is True
+        else RECONCILED_FAIL if reconciled is False
+        else RECONCILED_NOT_APPLICABLE)
+    payload["orders_submitted"] = (payload.get("entries_submitted") or 0) + \
+                                  (payload.get("exits_submitted") or 0)
+    payload["fills"] = payload.get("fills", payload["orders_submitted"])
+    payload["positions_changed"] = payload["orders_submitted"]
+    payload["broker"] = _broker_record(broker, external)
+    _terminal(payload, COMPLETED)
+    return _write_terminal(payload)
 
 
 def _off_hours(phase, session_date, session, state_service, sessions,
-               journal, broker, manager, position_store) -> Dict:
+               journal, broker, manager, position_store,
+               health=None, external=None) -> Dict:
     """Closed, pre-market or unknown: nothing to trade.
 
     The first CLOSED cycle after a session that really ran finalises it.
+
+    This is still a complete invocation and leaves a terminal record. It
+    reconciled nothing, so reconciliation reads NOT_APPLICABLE rather
+    than PASS, and it read no quote, so data quality is UNKNOWN rather
+    than any feed name.
     """
     out = {"session_date": session_date, "ran": False,
            "phase": str(phase),
            "reason": "the market cannot be reached in this phase",
            "new_exposure_permitted": False,
-           "market": session.as_dict()}
+           "market": session.as_dict(),
+           "broker": _broker_record(broker, external)}
+    _terminal(out, SKIPPED_MARKET_CLOSED)
 
     if phase is CyclePhase.CLOSED:
         try:
@@ -389,7 +465,15 @@ def _off_hours(phase, session_date, session, state_service, sessions,
     else:
         log_event("cycle_skipped_market_closed", session_date=session_date,
                   phase=str(phase))
-    return out
+
+    # A successful skip is a successful invocation: it resets the failure
+    # streak rather than being invisible to it.
+    if health is not None:
+        try:
+            health.record_cycle(True)
+        except Exception as exc:                          # noqa: BLE001
+            out["health_record_error"] = f"{type(exc).__name__}"[:60]
+    return _write_terminal(out)
 
 
 def _persist(broker, broker_store, expected_revision, manager,

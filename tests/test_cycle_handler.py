@@ -1082,3 +1082,152 @@ class TestBrokerSelectionActuallyRuns(unittest.TestCase):
         broker, external, _i, _s, fake = self.select(
             {"AGENT_BROKER": "ALPACA_PAPER"})
         self.assertIs(external, fake)
+
+
+class RecordingHealthStore(InMemoryHealthStore):
+    """Tracks record_cycle so a test can assert the invocation was
+    observed. Subclassed rather than patched so every other behaviour of
+    the real in-memory store is unchanged."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.record_cycle_calls = []
+
+    def record_cycle(self, ok):
+        self.record_cycle_calls.append(bool(ok))
+        return super().record_cycle(ok)
+
+
+class TestEveryInvocationLeavesATerminalRecord(unittest.TestCase):
+    """
+    Observed on 2026-10-02: a pre-market cycle selected the broker,
+    recognised the phase, submitted nothing and returned successfully -
+    and wrote no tally, no snapshot and no health record. So "the cycle
+    ran and correctly did nothing" was indistinguishable from "the cycle
+    never ran", which is the one distinction autonomous operation needs
+    most.
+    """
+
+    TERMINAL = ("COMPLETED", "SKIPPED_MARKET_CLOSED", "ABORTED")
+
+    # --- A: closed / pre-market invocation ---------------------------
+    def skipped(self, clock="08:00", status="PRE_MARKET"):
+        world = World()
+        world.health = RecordingHealthStore()
+        world.at(clock, status=status)
+        out = world.invoke()
+        return world, out
+
+    def test_a_skipped_cycle_records_a_terminal_state(self):
+        _world, out = self.skipped()
+        self.assertEqual(out["terminal_state"], "SKIPPED_MARKET_CLOSED")
+        self.assertIn(out["terminal_state"], self.TERMINAL)
+
+    def test_a_skipped_cycle_is_not_counted_as_a_failure(self):
+        """SKIPPED is an outcome, not a fault."""
+        _world, out = self.skipped()
+        self.assertFalse(out.get("ran"))
+        self.assertNotEqual(out["terminal_state"], "ABORTED")
+
+    def test_a_skipped_cycle_writes_the_last_cycle_snapshot(self):
+        world, _out = self.skipped()
+        snap = world.snapshot.get()
+        self.assertIsNotNone(snap, "no terminal record was written")
+        self.assertEqual(snap["terminal_state"], "SKIPPED_MARKET_CLOSED")
+
+    def test_the_snapshot_carries_when_and_what_it_was(self):
+        world, _out = self.skipped()
+        snap = world.snapshot.get()
+        self.assertTrue(snap.get("invoked_at"))
+        self.assertEqual(snap["session_date"], world.date)
+        self.assertEqual(snap["code_sha"], "deadbeef")
+        self.assertTrue(snap.get("reason"))
+
+    def test_health_knows_the_cycle_ran(self):
+        world, _out = self.skipped()
+        self.assertEqual(world.health.record_cycle_calls, [True],
+                         "health did not observe a successful invocation")
+
+    def test_a_skipped_cycle_claims_no_activity(self):
+        _world, out = self.skipped()
+        for field in ("orders_submitted", "fills", "positions_changed"):
+            with self.subTest(field=field):
+                self.assertEqual(out[field], 0)
+
+    def test_reconciliation_is_not_applicable_not_pass(self):
+        """Reporting PASS for a check that never ran is the error this
+        exists to prevent: nothing was reconciled, so nothing passed."""
+        _world, out = self.skipped()
+        self.assertEqual(out["reconciliation"], "NOT_APPLICABLE")
+        self.assertNotEqual(out["reconciliation"], "PASS")
+
+    def test_the_broker_selection_is_recorded_when_it_happened(self):
+        _world, out = self.skipped()
+        self.assertIn("broker", out)
+
+    def test_data_quality_is_unknown_not_real_time(self):
+        """No quote was read, so the feed's quality is not established."""
+        _world, out = self.skipped()
+        self.assertEqual(out["data_quality"], "UNKNOWN")
+
+    def test_a_closed_phase_also_records_its_terminal_state(self):
+        _world, out = self.skipped(clock="20:30", status="CLOSED")
+        self.assertEqual(out["terminal_state"], "SKIPPED_MARKET_CLOSED")
+
+    # --- B: never invoked --------------------------------------------
+    def test_never_invoked_is_distinguishable_from_skipped(self):
+        """The control that gives the others meaning."""
+        world = World()
+        world.health = RecordingHealthStore()
+        self.assertIsNone(world.snapshot.get())
+        self.assertEqual(world.health.record_cycle_calls, [])
+
+    # --- C: aborted ---------------------------------------------------
+    def test_an_aborted_cycle_records_a_terminal_state(self):
+        world = World()
+        world.health = RecordingHealthStore()
+        with mock.patch.object(cycle, "_run",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(cycle, "DynamoDBHealthStore",
+                               lambda **kw: world.health), \
+             mock.patch.object(cycle, "DynamoDBSnapshotStore",
+                               lambda **kw: world.snapshot), \
+             mock.patch.dict(os.environ, {"AGENT_CODE_SHA": "deadbeef"}):
+            body = json.loads(cycle.lambda_handler({}, None)["body"])
+        self.assertEqual(body["terminal_state"], "ABORTED")
+
+    def test_an_abort_is_visible_in_the_terminal_record(self):
+        world = World()
+        world.health = RecordingHealthStore()
+        with mock.patch.object(cycle, "_run",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(cycle, "DynamoDBHealthStore",
+                               lambda **kw: world.health), \
+             mock.patch.object(cycle, "DynamoDBSnapshotStore",
+                               lambda **kw: world.snapshot), \
+             mock.patch.dict(os.environ, {"AGENT_CODE_SHA": "deadbeef"}):
+            cycle.lambda_handler({}, None)
+        snap = world.snapshot.get()
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap["terminal_state"], "ABORTED")
+
+    def test_an_abort_increments_failure_accounting(self):
+        world = World()
+        world.health = RecordingHealthStore()
+        with mock.patch.object(cycle, "_run",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(cycle, "DynamoDBHealthStore",
+                               lambda **kw: world.health), \
+             mock.patch.object(cycle, "DynamoDBSnapshotStore",
+                               lambda **kw: world.snapshot), \
+             mock.patch.dict(os.environ, {"AGENT_CODE_SHA": "deadbeef"}):
+            cycle.lambda_handler({}, None)
+        self.assertEqual(world.health.record_cycle_calls, [False])
+
+    def test_a_completed_cycle_still_says_completed(self):
+        """The control for the terminal vocabulary: if everything read
+        SKIPPED the field would carry no information."""
+        world = World()
+        out = world.invoke()
+        self.assertEqual(out["terminal_state"], "COMPLETED")
+        self.assertNotEqual(out["reconciliation"], "NOT_APPLICABLE")

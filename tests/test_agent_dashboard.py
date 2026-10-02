@@ -641,3 +641,131 @@ class TestUnreadablePositionStoreClaimsNothing(unittest.TestCase):
             _code, body = call("/agent/positions")
         self.assertEqual(body["source"], "position store")
         self.assertEqual(body["open_count"], 0)
+
+
+class TestTodayIsNeverYesterday(unittest.TestCase):
+    """
+    Observed on 2026-10-02 at 11:50 UTC, before any cycle had traded:
+
+        session_date : 2026-10-02
+        daily        : {"positions_opened_today": 2,
+                        "realized_pnl_today": -0.448, ...}
+
+    Those were 2026-10-01's figures. The stored object is legitimately
+    CONTROL#LAST_CYCLE / LATEST - "the last cycle, whenever it was" - but
+    the endpoint printed it beside an independently computed
+    session_date, which makes a false statement about today.
+
+    The rule: 0 means a successful read proved zero. UNKNOWN means it was
+    not established. A previous session's value is history and is never
+    today's.
+    """
+
+    YESTERDAY = {
+        "session_date": "2026-10-01", "terminal_state": "COMPLETED",
+        "invoked_at": "2026-10-01T20:02:00+00:00", "phase": "PRE_CLOSE",
+        "daily": {"positions_opened_today": 2, "realized_pnl_today": -0.448,
+                  "open_positions": 0, "trades_closed_today": 2},
+    }
+
+    def trade(self, pnl):
+        from agent.journal.models import TradeRecord
+        return TradeRecord(
+            trade_id="t1", symbol="AAA", quantity=1.0, entry_price=10.0,
+            exit_price=10.0 + pnl, opened_at="2026-10-02T14:00:00Z",
+            closed_at="2026-10-02T15:00:00Z", planned_stop=9.0,
+            session_date="2026-10-02")
+
+    def read(self, snapshot=None, trades=(), positions=(),
+             trades_fail=False, date="2026-10-02"):
+        """Patches the CLASSES, not instances. _journal() builds a new
+        DynamoDBJournal on every call, so patching the object it returned
+        left the handler's own instance untouched - and the proven-zero
+        assertions failed, which is what the control is for."""
+        from agent.autonomy.snapshot import DynamoDBSnapshotStore
+        from agent.positions import DynamoDBPositionStore
+        from agent.journal import DynamoDBJournal
+
+        def listed(_self, **_kw):
+            if trades_fail:
+                raise RuntimeError("journal unavailable")
+            return list(trades)
+
+        with mock.patch.object(DynamoDBSnapshotStore, "get",
+                               lambda *_a, **_k: snapshot), \
+             mock.patch.object(DynamoDBPositionStore, "load_open",
+                               lambda *_a, **_k: list(positions)), \
+             mock.patch.object(DynamoDBJournal, "list_trades", listed):
+            _code, body = call("/agent/autonomy", date=date)
+        return body
+
+    # --- D: today with no activity -----------------------------------
+    def test_a_quiet_today_does_not_inherit_yesterdays_numbers(self):
+        body = self.read(snapshot=self.YESTERDAY)
+        d = body["daily"]
+        self.assertNotEqual(d.get("positions_opened_today"), 2)
+        self.assertNotEqual(d.get("realized_pnl_today"), -0.448)
+
+    def test_a_proven_quiet_today_reads_zero(self):
+        body = self.read(snapshot=self.YESTERDAY)
+        d = body["daily"]
+        self.assertEqual(d["positions_opened_today"], 0)
+        self.assertEqual(d["realized_pnl_today"], 0)
+
+    def test_an_unreadable_today_reads_unknown_not_zero(self):
+        """A store that could not be read has not proved zero."""
+        body = self.read(snapshot=self.YESTERDAY, trades_fail=True)
+        d = body["daily"]
+        self.assertIsNone(d["positions_opened_today"])
+        self.assertIsNone(d["realized_pnl_today"])
+        self.assertIn("UNKNOWN", str(d.get("basis", "")).upper())
+
+    def test_the_current_session_states_what_it_was_computed_from(self):
+        body = self.read(snapshot=self.YESTERDAY)
+        self.assertTrue(body["daily"].get("basis"))
+
+    # --- E: last_cycle from a prior session --------------------------
+    def test_the_last_cycle_keeps_its_own_session_date(self):
+        body = self.read(snapshot=self.YESTERDAY)
+        self.assertEqual(body["last_cycle"]["session_date"], "2026-10-01")
+        self.assertEqual(body["last_cycle_session_date"], "2026-10-01")
+
+    def test_a_stale_last_cycle_is_labelled_as_not_current(self):
+        body = self.read(snapshot=self.YESTERDAY)
+        self.assertFalse(body["last_cycle_is_current_session"])
+
+    def test_the_last_cycle_timestamp_is_exposed(self):
+        body = self.read(snapshot=self.YESTERDAY)
+        self.assertEqual(body["last_cycle_at"],
+                         "2026-10-01T20:02:00+00:00")
+
+    def test_yesterdays_daily_is_still_available_under_last_cycle(self):
+        """Not deleted - relocated. It is a true statement about
+        2026-10-01 and only false when relabelled as today."""
+        body = self.read(snapshot=self.YESTERDAY)
+        self.assertEqual(
+            body["last_cycle"]["daily"]["positions_opened_today"], 2)
+
+    # --- F: a cycle in the current session ---------------------------
+    def test_a_current_session_cycle_is_labelled_current(self):
+        snap = dict(self.YESTERDAY, session_date="2026-10-02",
+                    invoked_at="2026-10-02T14:05:00+00:00")
+        body = self.read(snapshot=snap)
+        self.assertTrue(body["last_cycle_is_current_session"])
+        self.assertEqual(body["last_cycle_session_date"], "2026-10-02")
+
+    def test_todays_activity_replaces_the_empty_state(self):
+        body = self.read(snapshot=self.YESTERDAY,
+                         trades=[self.trade(0.5)])
+        d = body["daily"]
+        self.assertEqual(d["trades_closed_today"], 1)
+        self.assertAlmostEqual(d["realized_pnl_today"], 0.5, places=4)
+        self.assertEqual(d["positions_opened_today"], 1)
+
+    def test_no_snapshot_at_all_is_not_an_error(self):
+        """A fresh table: today is proven quiet, and there is no last
+        cycle to report."""
+        body = self.read(snapshot=None)
+        self.assertIsNone(body["last_cycle"])
+        self.assertIsNone(body["last_cycle_session_date"])
+        self.assertEqual(body["daily"]["positions_opened_today"], 0)

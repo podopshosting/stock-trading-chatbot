@@ -237,3 +237,56 @@ Both are fixed, with regression tests proven to fail first:
 The 21:06:32Z deployment is void and must not be cited as a cohort
 start. `REALTIME_SIP_STRATEGY_EVIDENCE` begins at the timestamp of the
 redeploy that carries these fixes, on the SHA that deploy pins.
+
+
+---
+
+## VOID cutover attempt 2 — 2026-10-02 00:01:43Z
+
+The second attempt deployed and failed its verification on the next
+statement of the same never-executed path. Recorded permanently
+alongside the first; neither is a partial success.
+
+| | |
+|---|---|
+| Deployed | 2026-10-02T00:01:43Z, SHA `a1bccb8` |
+| Config | `AGENT_BROKER=alpaca_paper`, `ALPACA_QUOTE_FEED=sip`, mode `PAPER` |
+| Verification | **FAILED** — `AttributeError: 'DynamoDBAlertSink' object has no attribute 'send'` |
+| Cycles on this artifact | aborted; market closed, no order reached |
+| API deployed in the same window | 00:02:06Z — **this half succeeded** and the peer fix went live |
+| Evidence value | **none.** No cohort was opened. |
+
+### What it actually was
+
+The CloudWatch line above the abort named the real cause:
+`NameError: name 'creds' is not defined`. `creds` was a local of
+`_provider()` and had never been in scope in the broker branch, so
+construction always raised, and the fallback then broke on its own
+second and third statements.
+
+Four defects in the same four lines, none of which 2042 tests could
+see, because the branch ran only when `AGENT_BROKER` selected it and
+nothing ever had:
+
+1. `broker_selected` / `broker_unavailable` not in `observability.EVENTS`
+2. `creds` undefined
+3. `alerts.send` — the method is `emit`
+4. `AlertKind.BROKER_UNAVAILABLE` did not exist
+
+The first was found by the 21:06 deploy, the second and third by this
+one, and the fourth only after the branch was extracted into
+`_select_broker` so a test could call it. Fixing the statement each
+error named, three times, was the mistake: an unexecuted path has no
+reason to contain only one fault.
+
+### Why both attempts stay VOID
+
+Neither produced a cycle that completed. The second attempt's API
+deployment did succeed and is not void, but a cohort is a property of
+the trading runtime, and that runtime aborted. Reinterpreting either as
+a partial cohort start would put a timestamp on evidence that does not
+exist.
+
+`REALTIME_SIP_STRATEGY_EVIDENCE` begins at the first regular-market
+cycle on a runtime that has been verified end to end, not at either of
+these timestamps.

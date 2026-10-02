@@ -1210,6 +1210,15 @@ def _autonomy_context(session_date):
         table_name=_autonomy_tables()[1]).get())
     ctx["last_cycle"] = snapshot
     errors["last_cycle"] = e
+    # The snapshot is CONTROL#LAST_CYCLE / LATEST - the last cycle,
+    # whenever it was. It carries its own session date, and saying so is
+    # the difference between a history and a false claim about today.
+    snap_date = (snapshot or {}).get("session_date")
+    ctx["last_cycle_session_date"] = snap_date
+    ctx["last_cycle_at"] = ((snapshot or {}).get("invoked_at")
+                            or (snapshot or {}).get("finished_at"))
+    ctx["last_cycle_is_current_session"] = bool(
+        snap_date and snap_date == session_date)
 
     health, e = _safe(lambda: DynamoDBHealthStore(
         table_name=_autonomy_tables()[1]).snapshot().as_dict())
@@ -1262,7 +1271,43 @@ def _autonomy_context(session_date):
 
     limits = RiskLimits()
     ctx["limits"] = {k: v for k, v in vars(limits).items()}
-    ctx["daily"] = (snapshot or {}).get("daily")
+    # Current-session activity, computed from today's own stores and
+    # never taken from the snapshot. A zero here means a successful read
+    # proved zero; None means it was not established. Those are
+    # different claims and must not share a representation.
+    trades_known = errors.get("trades") is None
+    positions_known = errors.get("positions") is None
+    if trades_known and positions_known:
+        closed = ctx["trades"]
+        open_rows = ctx["positions"]
+        ctx["daily"] = {
+            "positions_opened_today": len(closed) + len(open_rows),
+            "trades_closed_today": len(closed),
+            "realized_pnl_today": round(
+                sum(float(t.get("net_pnl") or 0.0) for t in closed), 6),
+            "open_positions": len(open_rows),
+            "capital_deployed_today": round(
+                sum(float(t.get("quantity") or 0) *
+                    float(t.get("entry_price") or 0) for t in closed)
+                + sum(float(p.get("cost_basis") or 0) for p in open_rows), 6),
+            "unrealized_pnl": round(
+                sum(float(p.get("unrealized_pnl") or 0)
+                    for p in open_rows), 6),
+            "basis": (f"computed from the journal and position store for "
+                      f"{session_date}"),
+        }
+    else:
+        unreadable = [k for k in ("trades", "positions") if errors.get(k)]
+        ctx["daily"] = {
+            "positions_opened_today": None,
+            "trades_closed_today": None,
+            "realized_pnl_today": None,
+            "open_positions": None,
+            "capital_deployed_today": None,
+            "unrealized_pnl": None,
+            "basis": (f"UNKNOWN - could not read {', '.join(unreadable)} "
+                      f"for {session_date}; this is not a report of zero"),
+        }
     ctx["mode"] = (snapshot or {}).get("execution_mode") or "UNKNOWN"
     ctx["errors"] = {k: v for k, v in errors.items() if v}
     return ctx
@@ -1286,6 +1331,10 @@ def handle_autonomy(event) -> Dict:
         "health": ctx["health"],
         "regime": ctx["regime"],
         "last_cycle": ctx["last_cycle"],
+        "last_cycle_session_date": ctx["last_cycle_session_date"],
+        "last_cycle_at": ctx["last_cycle_at"],
+        "last_cycle_is_current_session":
+            ctx["last_cycle_is_current_session"],
         "tally": ctx["tally"],
         "report": ctx["report"],
         "positions": ctx["positions"],
