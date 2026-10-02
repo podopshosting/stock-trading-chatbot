@@ -1105,21 +1105,29 @@ def handle_readiness(event) -> Dict:
     behavioural cohort is never pooled in.
     """
     cfg, journal_table = _autonomy_tables()
-    tallies, _ = _safe(lambda: DynamoDBSessionStore(
+    # The errors are NOT discarded. An unreadable session store used to
+    # produce zero tallies, which reads as "no sessions recorded" - a
+    # statement about the agent - when the truth is "we could not look".
+    tallies, tallies_error = _safe(lambda: DynamoDBSessionStore(
         table_name=journal_table).list(), [])
     snapshot, _ = _safe(lambda: DynamoDBSnapshotStore(
         table_name=_autonomy_tables()[1]).get())
     cohort = _current_cohort(snapshot, tallies)
     evidence = (aggregate_evidence(tallies, cohort) if cohort else None)
 
-    # Trades from the CURRENT cohort's sessions only.
-    trades = []
+    # Trades from the CURRENT cohort's sessions only. A failed read here
+    # would quietly understate a cohort's trade count, and the
+    # sample-adequacy gate counts trades - so an incomplete read must be
+    # known to be incomplete rather than summed as if complete.
+    trades, trade_read_errors = [], []
     if cohort:
         for tally in tallies:
             if tally.cohort != cohort:
                 continue
-            got, _ = _safe(lambda d=tally.session_date: _journal()
+            got, e = _safe(lambda d=tally.session_date: _journal()
                            .list_trades(session_date=d), [])
+            if e:
+                trade_read_errors.append(f"{tally.session_date}: {e}")
             trades.extend(got)
 
     # Described rather than assessed, because this Lambda imports no
@@ -1132,6 +1140,16 @@ def handle_readiness(event) -> Dict:
         "is_paper": True,
         "ready_for_real_money": False,
         "unmet_count": None,
+    }
+
+    # Carried into the report so a verdict can never rest on evidence
+    # that was silently incomplete.
+    read_integrity = {
+        "session_store_readable": tallies_error is None,
+        "session_store_error": tallies_error,
+        "trade_reads_failed": trade_read_errors,
+        "evidence_complete": (tallies_error is None
+                              and not trade_read_errors),
     }
 
     report = readiness.assess(
@@ -1165,6 +1183,7 @@ def handle_readiness(event) -> Dict:
     body = report.as_dict()
     body["evidence"] = evidence
     body["current_cohort"] = cohort
+    body["read_integrity"] = read_integrity
     return _response(200, body)
 
 
@@ -1245,14 +1264,22 @@ def _autonomy_context(session_date):
     errors["decisions"] = e
     trades, e = _safe(lambda: _journal().list_trades(
         session_date=session_date), [])
-    ctx["trades"] = [t.as_dict() for t in trades]
+    # Evidence: degrade, but say so. A partial or failed read must not
+    # be summed as though it were complete.
+    ctx["trades"] = [t.as_dict() for t in trades] if e is None else None
+    ctx["trades_known"] = e is None
     errors["trades"] = e
 
     positions, e = _safe(lambda: DynamoDBPositionStore(
         table_name=os.environ.get("AGENT_POSITIONS_TABLE",
                                   "stock-agent-dev-positions"))
         .load_open(session_date), [])
-    ctx["positions"] = [p.as_dict() for p in positions]
+    # Exposure-critical: an unreadable position store must never render
+    # as "no positions". The list is None when the read failed, so a
+    # consumer cannot iterate it and conclude the book is flat.
+    ctx["positions"] = ([p.as_dict() for p in positions] if e is None
+                        else None)
+    ctx["positions_known"] = e is None
     errors["positions"] = e
 
     alerts, e = _safe(lambda: DynamoDBAlertSink(
@@ -1275,11 +1302,11 @@ def _autonomy_context(session_date):
     # never taken from the snapshot. A zero here means a successful read
     # proved zero; None means it was not established. Those are
     # different claims and must not share a representation.
-    trades_known = errors.get("trades") is None
-    positions_known = errors.get("positions") is None
+    trades_known = ctx.get("trades_known") is True
+    positions_known = ctx.get("positions_known") is True
     if trades_known and positions_known:
-        closed = ctx["trades"]
-        open_rows = ctx["positions"]
+        closed = ctx["trades"] or []
+        open_rows = ctx["positions"] or []
         ctx["daily"] = {
             "positions_opened_today": len(closed) + len(open_rows),
             "trades_closed_today": len(closed),
@@ -1338,6 +1365,8 @@ def handle_autonomy(event) -> Dict:
         "tally": ctx["tally"],
         "report": ctx["report"],
         "positions": ctx["positions"],
+        "positions_known": ctx["positions_known"],
+        "trades_known": ctx["trades_known"],
         "daily": ctx["daily"],
         "limits": ctx["limits"],
         "alerts": ctx["alerts"],

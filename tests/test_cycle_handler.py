@@ -1231,3 +1231,71 @@ class TestEveryInvocationLeavesATerminalRecord(unittest.TestCase):
         out = world.invoke()
         self.assertEqual(out["terminal_state"], "COMPLETED")
         self.assertNotEqual(out["reconciliation"], "NOT_APPLICABLE")
+
+
+class TestUnreadablePositionsAreRecordedAndRefuseExposure(unittest.TestCase):
+    """
+    The most dangerous state the agent can be in was also the least
+    visible. When the position store could not be read, _run returned
+    early with new_exposure_permitted False - correctly refusing to
+    trade - but wrote no terminal record at all, so it looked exactly
+    like a cycle that never ran.
+
+    Exposure is UNKNOWN here, not zero, which is why this records
+    ABORTED rather than SKIPPED.
+    """
+
+    def unreadable(self):
+        from agent.positions.store import PositionStoreError
+        world = World()
+        world.health = RecordingHealthStore()
+
+        def boom(*_a, **_k):
+            raise PositionStoreError("table unavailable")
+        world.position_store.load_open = boom
+        return world, world.invoke()
+
+    def test_new_exposure_is_refused(self):
+        _world, out = self.unreadable()
+        self.assertFalse(out["new_exposure_permitted"])
+
+    def test_it_did_not_trade(self):
+        _world, out = self.unreadable()
+        self.assertFalse(out["ran"])
+
+    def test_a_terminal_record_is_written(self):
+        world, _out = self.unreadable()
+        snap = world.snapshot.get()
+        self.assertIsNotNone(
+            snap, "unreadable positions left no terminal record, so the "
+                  "state is indistinguishable from a cycle that never ran")
+
+    def test_it_is_aborted_not_skipped(self):
+        """Exposure is unknown. A skip would claim nothing was due."""
+        _world, out = self.unreadable()
+        self.assertEqual(out["terminal_state"], "ABORTED")
+        self.assertNotEqual(out["terminal_state"], "SKIPPED_MARKET_CLOSED")
+
+    def test_exposure_is_marked_unknown_not_zero(self):
+        _world, out = self.unreadable()
+        self.assertIs(out["exposure_known"], False)
+
+    def test_health_records_a_failure(self):
+        _world, out = self.unreadable()
+        world = _world
+        self.assertEqual(world.health.record_cycle_calls, [False])
+
+    def test_the_reason_names_the_cause(self):
+        _world, out = self.unreadable()
+        self.assertIn("positions unreadable", out["reason"])
+
+    def test_a_readable_store_still_trades(self):
+        """The control: without it these would pass for an agent that
+        never trades at all."""
+        world = World()
+        out = world.invoke()
+        self.assertEqual(out["terminal_state"], "COMPLETED")
+        # The completed payload comes from cycle.as_dict() and carries no
+        # "ran" key; phase is what distinguishes it from a skip.
+        self.assertEqual(out["phase"], "INTRADAY")
+        self.assertIs(out.get("exposure_known", True), True)

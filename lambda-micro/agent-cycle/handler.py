@@ -342,12 +342,27 @@ def _run(session_date: str) -> Dict:
     except PositionStoreError as exc:
         # The agent cannot know what it holds. Halting is the only
         # honest response, and a human is told.
+        #
+        # This path previously left NO terminal record, which made the
+        # most dangerous state the agent can be in also the least
+        # visible: unreadable positions looked identical to a cycle that
+        # never ran. It is recorded as ABORTED - not SKIPPED - because
+        # exposure is unknown, and health records a failure so the streak
+        # sees it.
         log_event("state_restore_failed", detail=str(exc)[:300])
         health.raise_condition(Condition.STATE_PERSISTENCE_FAILURE,
                                str(exc)[:160])
-        return {"session_date": session_date, "ran": False,
-                "error": "positions unreadable", "detail": str(exc)[:300],
-                "new_exposure_permitted": False}
+        try:
+            health.record_cycle(False)
+        except Exception:                                 # noqa: BLE001
+            pass
+        return _write_terminal(_terminal({
+            "session_date": session_date, "ran": False,
+            "error": "positions unreadable", "detail": str(exc)[:300],
+            "new_exposure_permitted": False,
+            "exposure_known": False,
+            "broker": _broker_record(broker, external),
+        }, ABORTED, reason=f"positions unreadable: {str(exc)[:140]}"))
 
     decisions = DynamoDBDecisionLog(table_name=os.environ.get(
         "AGENT_JOURNAL_TABLE", "stock-agent-dev-journal"))

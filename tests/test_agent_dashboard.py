@@ -798,3 +798,141 @@ class TestTodayIsNeverYesterday(unittest.TestCase):
         self.assertIsNone(body["last_cycle"])
         self.assertIsNone(body["last_cycle_session_date"])
         self.assertEqual(body["daily"]["positions_opened_today"], 0)
+
+
+class TestUnreadableIsNotEmpty(unittest.TestCase):
+    """
+    `_safe(fn, [])` turns a failed read into a successful-looking empty
+    list. For alerts that cost visibility; for positions it would mean
+    reporting a flat book while holding something, and every risk figure
+    downstream inherits that.
+
+    Empty means a successful read proved zero. Unreadable means UNKNOWN.
+    """
+
+    def read(self, positions_fail=False, trades_fail=False):
+        from agent.autonomy.snapshot import DynamoDBSnapshotStore
+        from agent.autonomy.alerts import DynamoDBAlertSink
+        from agent.autonomy.health import DynamoDBHealthStore
+        from agent.autonomy.sessions import DynamoDBSessionStore
+        from agent.autonomy import DynamoDBDecisionLog
+        from agent.positions import DynamoDBPositionStore
+        from agent.journal import DynamoDBJournal
+
+        def pos(*_a, **_k):
+            if positions_fail:
+                raise RuntimeError("positions table unavailable")
+            return []
+
+        def tr(_self, **_kw):
+            if trades_fail:
+                raise RuntimeError("journal unavailable")
+            return []
+
+        with mock.patch.object(DynamoDBSnapshotStore, "get",
+                               lambda *_a, **_k: None), \
+             mock.patch.object(DynamoDBPositionStore, "load_open", pos), \
+             mock.patch.object(DynamoDBJournal, "list_trades", tr), \
+             mock.patch.object(DynamoDBHealthStore, "snapshot",
+                               lambda *_a, **_k: _HealthSnap()), \
+             mock.patch.object(DynamoDBSessionStore, "get",
+                               lambda *_a, **_k: None), \
+             mock.patch.object(DynamoDBSessionStore, "get_report",
+                               lambda *_a, **_k: None), \
+             mock.patch.object(DynamoDBDecisionLog, "for_session",
+                               lambda *_a, **_k: []), \
+             mock.patch.object(DynamoDBAlertSink, "recent",
+                               lambda *_a, **_k: []):
+            _c, body = call("/agent/autonomy", date="2026-10-02")
+        return body
+
+    def test_a_readable_empty_book_is_proven_empty(self):
+        """The control. Both cases show no positions and they must not
+        look the same."""
+        body = self.read()
+        self.assertEqual(body["positions"], [])
+        self.assertIs(body["positions_known"], True)
+
+    def test_an_unreadable_book_is_not_an_empty_one(self):
+        body = self.read(positions_fail=True)
+        self.assertIsNone(body["positions"],
+                          "an unreadable position store rendered as []")
+        self.assertIs(body["positions_known"], False)
+
+    def test_an_unreadable_book_is_reported_as_an_error(self):
+        body = self.read(positions_fail=True)
+        self.assertIn("positions", body["read_errors"])
+
+    def test_unreadable_trades_are_not_an_empty_history(self):
+        body = self.read(trades_fail=True)
+        self.assertIsNone(body["trades"])
+        self.assertIs(body["trades_known"], False)
+
+    def test_unreadable_exposure_makes_todays_figures_unknown(self):
+        body = self.read(positions_fail=True)
+        self.assertIsNone(body["daily"]["positions_opened_today"])
+        self.assertIn("not a report of zero", body["daily"]["basis"])
+
+    def test_a_proven_quiet_day_still_reads_zero(self):
+        """The other side of the control: UNKNOWN must not swallow a
+        legitimate zero."""
+        body = self.read()
+        self.assertEqual(body["daily"]["positions_opened_today"], 0)
+        self.assertIs(body["trades_known"], True)
+
+
+class TestEvidenceReadsAreNotSilentlyIncomplete(unittest.TestCase):
+    """
+    /agent/readiness discarded the error from its session-store read and
+    from each per-session trade read. An unreadable session store
+    therefore produced zero tallies, which the evidence classifier
+    reports as "no sessions recorded" - a claim about the agent - when
+    the truth was that nothing had been looked at. A failed trade read
+    silently contributed zero trades to a cohort, and the
+    sample-adequacy gate counts trades.
+    """
+
+    def readiness(self, sessions_fail=False, trades_fail=False):
+        from agent.autonomy.sessions import DynamoDBSessionStore
+        from agent.autonomy.snapshot import DynamoDBSnapshotStore
+        from agent.journal import DynamoDBJournal
+
+        def listed(*_a, **_k):
+            if sessions_fail:
+                raise RuntimeError("session store unavailable")
+            return []
+
+        def trades(_self, **_kw):
+            if trades_fail:
+                raise RuntimeError("journal unavailable")
+            return []
+
+        with mock.patch.object(DynamoDBSessionStore, "list", listed), \
+             mock.patch.object(DynamoDBSnapshotStore, "get",
+                               lambda *_a, **_k: None), \
+             mock.patch.object(DynamoDBJournal, "list_trades", trades):
+            _c, body = call("/agent/readiness")
+        return body
+
+    def test_a_readable_store_is_reported_complete(self):
+        """The control: without it, 'incomplete' could be constant."""
+        body = self.readiness()
+        self.assertIs(body["read_integrity"]["session_store_readable"], True)
+        self.assertIs(body["read_integrity"]["evidence_complete"], True)
+
+    def test_an_unreadable_session_store_is_not_an_absence_of_sessions(self):
+        body = self.readiness(sessions_fail=True)
+        ri = body["read_integrity"]
+        self.assertIs(ri["session_store_readable"], False)
+        self.assertIsNotNone(ri["session_store_error"])
+        self.assertIs(ri["evidence_complete"], False)
+
+    def test_the_verdict_still_fails_closed(self):
+        """An unreadable store must never read as readiness."""
+        body = self.readiness(sessions_fail=True)
+        self.assertFalse(body["ready_for_real_money"])
+
+    def test_read_integrity_is_always_present(self):
+        for kw in ({}, {"sessions_fail": True}):
+            with self.subTest(**kw):
+                self.assertIn("read_integrity", self.readiness(**kw))
