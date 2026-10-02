@@ -33,10 +33,11 @@ from agent.broker import (                                        # noqa: E402
 from agent.broker.order_ledger import (                           # noqa: E402
     ExternalOrderRecord, InMemoryOrderLedger, OrderLedgerError,
 )
+from agent.broker.provenance import client_order_id_for  # noqa: E402
 from agent.hypothesis import generate                             # noqa: E402
 from agent.journal import InMemoryJournal                         # noqa: E402
 from agent.orchestration import (                                 # noqa: E402
-    CycleOutcome, CyclePhase, HaltReason, InMemoryCycleLock,
+    CycleOutcome, CyclePhase, CycleResult, HaltReason, InMemoryCycleLock,
     MarketDayOrchestrator, phase_from_session,
 )
 from agent.positions import ExitPlan, PositionManager             # noqa: E402
@@ -1002,3 +1003,144 @@ class TestAnAcceptedOrderIsExposureBeforeItFills(unittest.TestCase):
                     if s.name == "poll_external_orders")
         self.assertIn("integrity=COMPLETE", step.detail)
         self.assertIn("exposure_known=True", step.detail)
+
+
+# ===========================================================================
+# ADOPTION THROUGH A REAL CYCLE
+# ===========================================================================
+
+class TestAPositionHeldOnlyAtTheVenue(unittest.TestCase):
+    """The 2026-10-02 shape, driven through run_cycle.
+
+    The agent bought, the fill arrived asynchronously, and the position
+    existed at the venue and nowhere else. Reconciliation saw a position
+    "the agent did not open", latched an emergency stop, and then could
+    not close it - because flatten_all iterates the internal store.
+    """
+
+    DECISION = "risk_cycletest01"
+
+    def _venue_only_position(self, rig, decision_id=None, cli=None):
+        """Put a position in the broker that the manager knows nothing
+        about, exactly as an async fill would."""
+        decision_id = decision_id or self.DECISION
+        cli = cli or client_order_id_for(decision_id, "ENTRY")
+        rig.broker.submit_order("XYZ", "BUY", 0.2, client_order_id=cli)
+        # The manager is deliberately NOT told.
+        self.assertEqual(list(rig.manager.open_positions()), [])
+        return cli
+
+    def _store_decision(self, rig, decision_id=None):
+        rig.decisions.record({
+            "session_date": SESSION, "symbol": "XYZ", "outcome": "ENTERED",
+            "risk": {"decision_id": decision_id or self.DECISION,
+                     "approved": True, "stop_distance_pct": 2.0}})
+
+    def test_a_provable_position_is_adopted_by_the_cycle(self):
+        rig = Rig()
+        self._venue_only_position(rig)
+        self._store_decision(rig)
+        result = rig.cycle()
+        self.assertEqual(result.adopted_positions, 1)
+        self.assertIn("XYZ", [p.symbol for p in rig.manager.open_positions()])
+        self.assertEqual(result.unknown_origin_positions, [])
+
+    def test_adoption_lets_reconciliation_agree(self):
+        """Not by weakening reconciliation - by removing the cause of
+        the disagreement."""
+        rig = Rig()
+        self._venue_only_position(rig)
+        self._store_decision(rig)
+        result = rig.cycle()
+        self.assertTrue(result.positions_reconciled)
+        self.assertFalse(result.emergency_stop_engaged)
+
+    def test_without_the_proof_the_same_position_is_not_adopted(self):
+        """The control. No stored decision reproduces this id, so the
+        position is unattributable and must be left alone."""
+        rig = Rig()
+        self._venue_only_position(rig, cli="cli_unprovable0000000")
+        result = rig.cycle()
+        self.assertEqual(result.adopted_positions, 0)
+        self.assertEqual(result.unknown_origin_positions, ["XYZ"])
+        self.assertEqual(list(rig.manager.open_positions()), [])
+
+    def test_an_unattributable_position_is_not_closed(self):
+        rig = Rig()
+        self._venue_only_position(rig, cli="cli_unprovable0000000")
+        rig.cycle()
+        held = {p["symbol"] for p in rig.broker.get_positions()}
+        self.assertIn("XYZ", held,
+                      "a position whose origin is unknown must not be "
+                      "closed automatically")
+
+    def test_an_unattributable_position_stops_new_exposure(self):
+        """Two independent reasons stop it, and both are correct.
+
+        Adoption sets exposure_blocked_by_adoption, and reconcile - which
+        runs afterwards and still sees the position as broker-only,
+        because it was deliberately NOT adopted - latches the emergency
+        stop. The halt is reached first, so the skip reason names the
+        halt. The property under test is that nothing is opened, not
+        which of the two guards reported it.
+        """
+        rig = Rig()
+        self._venue_only_position(rig, cli="cli_unprovable0000000")
+        result = rig.cycle()
+        self.assertEqual(result.entries_submitted, 0)
+        self.assertTrue(result.exposure_blocked_by_adoption)
+        step = next(s for s in result.steps if s.name == "consider_entries")
+        self.assertTrue(step.skipped)
+
+    def test_the_adoption_guard_alone_stops_entries(self):
+        """The guard in isolation, so it is not covered only by the
+        halt that happens to arrive first."""
+        rig = Rig()
+        result = CycleResult(cycle_id="c", session_date=SESSION,
+                             phase=CyclePhase.INTRADAY,
+                             outcome=CycleOutcome.COMPLETED)
+        result.exposure_blocked_by_adoption = True
+        rig.orchestrator._consider_entries(
+            result, ["XYZ"], quote_for, hypothesis_for, SESSION,
+            0.0, 0.0, 0, 200)
+        self.assertEqual(result.entries_submitted, 0)
+        step = next(s for s in result.steps if s.name == "consider_entries")
+        self.assertTrue(step.skipped)
+        self.assertIn("cannot be attributed", step.skip_reason)
+
+    def test_adoption_is_idempotent_across_cycles(self):
+        rig = Rig()
+        self._venue_only_position(rig)
+        self._store_decision(rig)
+        first = rig.cycle()
+        second = rig.cycle()
+        self.assertEqual(first.adopted_positions, 1)
+        self.assertEqual(second.adopted_positions, 0)
+        self.assertEqual(
+            len([p for p in rig.manager.open_positions()
+                 if p.symbol == "XYZ"]), 1)
+
+    def test_an_adopted_position_can_be_exited_while_entries_are_halted(self):
+        """The property the whole chain exists for.
+
+        exits_permitted is always True, so a halted agent must still be
+        able to close what it holds. Before adoption it could not, not
+        because exits were forbidden but because the position was not in
+        the store the exit path iterates.
+        """
+        rig = Rig()
+        self._venue_only_position(rig)
+        self._store_decision(rig)
+        rig.cycle()
+        self.assertIn("XYZ", [p.symbol for p in rig.manager.open_positions()])
+
+        # Halt entries, the way a latched condition would.
+        rig.halt_store.engage("manual test halt", engaged_by="test")
+        result = rig.cycle(phase=CyclePhase.PRE_CLOSE, minutes_to_close=2)
+
+        self.assertTrue(result.halted, "entries must still be halted")
+        self.assertEqual(result.entries_submitted, 0)
+        # The exit path reached it, which is the thing that was
+        # impossible before adoption.
+        self.assertGreaterEqual(result.exits_evaluated + result.exits_submitted,
+                                1)

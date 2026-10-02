@@ -31,6 +31,7 @@ from ..autonomy.policy import Action, AutonomyPolicy, PolicyViolation
 from ..broker.alpaca_paper import UncertainSubmission
 from ..broker.execution import ExecutionRefused, submit_approved
 from ..broker.order_poller import poll_outstanding
+from ..positions.adoption import adopt_external_positions
 from ..journal import record_closed_position
 from ..observability import log_event
 from ..positions import ExitContext, ExitPlan, ExitReason, StopMechanism
@@ -215,7 +216,14 @@ class MarketDayOrchestrator:
             # fresh prices so unrealised losses count too.
             self._check_daily_loss(result, realized_pnl_today, 0.0)
 
-            # --- 1. reconcile --------------------------------------------
+            # --- 1. learn what is actually held, THEN reconcile ----------
+            #
+            # Adoption first: a position the agent can PROVE it opened is
+            # an unrecorded one, not a foreign one, and reconciling
+            # before recording it latches a stop over the agent's own
+            # trade. A genuinely foreign position is still unadopted
+            # when reconcile runs, and still trips it.
+            self._adopt_external_positions(result, session_date)
             self._reconcile(result)
             # Before exits and before entries: an accepted order
             # is exposure, and the entry path must see it.
@@ -355,6 +363,12 @@ class MarketDayOrchestrator:
                     "reasons": list(decision.reasons),
                     "capital_required": decision.capital_required,
                     "max_loss": decision.max_loss,
+                    # Stored so that a position adopted later can be
+                    # managed under the stop it was actually opened
+                    # under, rather than one reconstructed from a
+                    # limit. Its absence is why the DRAM adoption has
+                    # to reconstruct.
+                    "stop_distance_pct": decision.stop_distance_pct,
                 }
             if order is not None:
                 row["order"] = {
@@ -668,6 +682,63 @@ class MarketDayOrchestrator:
         result.add_step("reconcile", ok=reconciliation.matched,
                         detail=reconciliation.detail)
 
+    def _adopt_external_positions(self, result: CycleResult,
+                                  session_date: str) -> None:
+        """Take back positions the agent provably created.
+
+        Runs BEFORE reconcile, deliberately. `broker_only` means "not in
+        the internal store", which conflates "not ours" with "ours but
+        unrecorded" - and the second is a record gap, not a foreign
+        position. Reconciling first would latch an emergency stop over a
+        position the agent can prove it opened, which is what happened
+        on 2026-10-02 and is why that position could not be closed.
+
+        This does not weaken reconciliation: adoption removes the CAUSE
+        of the disagreement by recording what the agent owns, and a
+        genuinely foreign position still reaches reconcile unadopted and
+        still trips it.
+        """
+        if self.broker is None:
+            return
+        adoption = adopt_external_positions(
+            self.broker, self.positions, session_date=session_date,
+            ledger=self.order_ledger, decisions=self.decisions,
+            max_trade_risk=self.limits.max_trade_risk,
+            config_version=self.versions.get("exits", ""))
+
+        result.adoption = adoption
+        result.adopted_positions = adoption["adopted"]
+        result.unknown_origin_positions = list(adoption["unknown_origin"])
+        result.preexisting_positions = list(adoption["preexisting"])
+        result.exposure_blocked_by_adoption = bool(
+            adoption["blocks_new_exposure"])
+
+        for symbol in adoption["adopted_symbols"]:
+            self._alert(result, AlertKind.UNEXPECTED_BROKER_POSITION,
+                        f"{symbol} was held at the venue and not in the "
+                        f"agent's own store; provenance proved it was the "
+                        f"agent's own order, so it is now managed",
+                        symbol=symbol)
+        if adoption["unknown_origin"]:
+            # Surfaced prominently and NOT closed. New exposure stops.
+            self._raise(result, Condition.UNEXPECTED_BROKER_POSITION,
+                        "unattributable position(s): "
+                        + ", ".join(adoption["unknown_origin"]))
+            self._alert(result, AlertKind.UNEXPECTED_BROKER_POSITION,
+                        "position(s) at the venue cannot be attributed to "
+                        "this agent and will not be closed automatically: "
+                        + ", ".join(adoption["unknown_origin"]),
+                        symbols=adoption["unknown_origin"])
+        result.add_step(
+            "adopt_positions",
+            ok=adoption["integrity"] == "COMPLETE" and not adoption["refused"],
+            detail=(f"integrity={adoption['integrity']} "
+                    f"discovered={adoption['discovered']} "
+                    f"adopted={adoption['adopted']} "
+                    f"already={adoption['already_managed']} "
+                    f"unknown={len(adoption['unknown_origin'])} "
+                    f"preexisting={len(adoption['preexisting'])}"))
+
     def _poll_external_orders(self, result: CycleResult,
                               session_date: str) -> None:
         """Follow up every order the venue has not finished with.
@@ -900,6 +971,13 @@ class MarketDayOrchestrator:
         # And if the reservation could not be established, no entry is
         # made at all. Treating unknown exposure as zero is the one
         # arithmetic error that silently permits everything.
+        if result.exposure_blocked_by_adoption:
+            result.add_step(
+                "consider_entries", ok=False, skipped=True,
+                skip_reason="a position at the venue cannot be attributed "
+                            "to this agent; no new exposure is opened "
+                            "while exposure cannot be explained")
+            return
         if self.order_ledger is not None and not result.committed_exposure_known:
             result.add_step(
                 "consider_entries", ok=False, skipped=True,

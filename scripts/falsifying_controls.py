@@ -61,6 +61,7 @@ BRK_EXEC = REPO / "agent" / "broker" / "execution.py"
 BRK_MODELS = REPO / "agent" / "broker" / "models.py"
 
 POS_MODELS = REPO / "agent" / "positions" / "models.py"
+POS_ADOPT = REPO / "agent" / "positions" / "adoption.py"
 
 CO_EARNINGS = REPO / "agent" / "company" / "earnings.py"
 CO_FUND = REPO / "agent" / "company" / "fundamentals.py"
@@ -1117,6 +1118,105 @@ MUTATIONS = [
         old='            "positions": [], "open_count": None, "total_open_risk": None,',
         new='            "positions": [], "open_count": None, "total_open_risk": 0.0,  # MUTATION',
         expect=["unreadable", "open_risk", "zero"],
+    ),
+    # --- adoption: taking back a position the agent provably created.
+    # --- The DRAM position on 2026-10-02 was the agent's own and could
+    # --- not be closed, because it was not in the store the exit path
+    # --- iterates.
+    Mutation(
+        name="adopt-on-a-prefix-match",
+        description="adopt a position on the strength of a client-id "
+                    "prefix, which any other client could also choose",
+        path=POS_ADOPT,
+        old='if verdict["origin"] == ORIGIN_UNKNOWN or not verdict.get("proven"):',
+        new='if verdict["origin"] == ORIGIN_UNKNOWN and not '
+            'verdict.get("adoptable"):  # MUTATION',
+        expect=["prefix", "proven", "layer"],
+    ),
+    Mutation(
+        name="drop-the-second-evidence-check",
+        description="rely on the proven flag alone, which is defined in "
+                    "another module and could change meaning",
+        path=POS_ADOPT,
+        old='        if verdict["evidence"] not in (EVIDENCE_LEDGER,\n'
+            '                                       EVIDENCE_RECONSTRUCTED_ID):',
+        new='        if False:  # MUTATION',
+        expect=["evidence", "weak", "layer"],
+    ),
+    Mutation(
+        name="adopt-the-same-position-twice",
+        description="let repeated discovery create a second managed "
+                    "record for one position",
+        path=POS_ADOPT,
+        old="        if symbol in managed:",
+        new="        if False:  # MUTATION",
+        expect=["idempotent", "twice", "already"],
+    ),
+    Mutation(
+        name="let-an-unknown-origin-position-permit-entries",
+        description="open new exposure beside a position the agent "
+                    "cannot explain",
+        path=POS_ADOPT,
+        old='            out["blocks_new_exposure"] = True\n'
+            '            log_event("position_unknown_origin"',
+        new='            log_event("position_unknown_origin"  # MUTATION',
+        expect=["unknown", "exposure", "block"],
+    ),
+    Mutation(
+        name="treat-unreadable-broker-positions-as-none-held",
+        description="an unreadable position list reads as an empty one",
+        path=POS_ADOPT,
+        old='        out["integrity"] = INTEGRITY_UNKNOWN\n'
+            '        out["blocks_new_exposure"] = True\n'
+            '        out["errors"].append(f"broker positions unreadable: {exc}")',
+        new='        out["errors"].append(  # MUTATION\n'
+            '            f"broker positions unreadable: {exc}")',
+        expect=["unreadable", "positions", "block"],
+    ),
+    Mutation(
+        name="adopt-a-position-with-no-viable-stop",
+        description="adopt under a stop that does not bound the loss to "
+                    "the configured per-trade risk limit",
+        path=POS_ADOPT,
+        old="    if stop <= 0:",
+        new="    if False:  # MUTATION",
+        expect=["stop", "refused", "viable"],
+    ),
+    Mutation(
+        name="close-a-preexisting-external-position",
+        description="treat somebody else's position as ours to flatten",
+        path=POS_ADOPT,
+        old='        if verdict["origin"] == ORIGIN_PREEXISTING_EXTERNAL:',
+        new='        if False:  # MUTATION',
+        expect=["preexisting", "closed", "adopted"],
+    ),
+    Mutation(
+        name="reconcile-before-adopting",
+        description="latch an emergency stop over a position the agent "
+                    "can prove it opened, before recording it",
+        path=ORC_DAY,
+        old="            self._adopt_external_positions(result, session_date)\n"
+            "            self._reconcile(result)",
+        new="            self._reconcile(result)  # MUTATION\n"
+            "            self._adopt_external_positions(result, session_date)",
+        expect=["reconcil", "adopt", "agree"],
+    ),
+    Mutation(
+        name="let-an-unattributable-position-permit-entries",
+        description="ignore the adoption block in the entry path",
+        path=ORC_DAY,
+        old="        if result.exposure_blocked_by_adoption:",
+        new="        if False:  # MUTATION",
+        expect=["attributed", "adoption", "entries"],
+    ),
+    Mutation(
+        name="prefer-a-reconstructed-stop-over-the-recorded-one",
+        description="ignore the stop distance the position was actually "
+                    "opened under",
+        path=POS_ADOPT,
+        old="    if stop_distance_pct:",
+        new="    if False:  # MUTATION",
+        expect=["recovered", "stored", "preferred", "original"],
     ),
     # --- following up orders whose outcome is not yet known, and
     # --- counting them as exposure before they fill.

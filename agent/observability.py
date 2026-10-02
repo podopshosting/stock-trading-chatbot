@@ -98,6 +98,12 @@ EVENTS = frozenset({
     "order_poll_failed",
     "order_poll_ledger_unreadable",
     "entries_blocked_unknown_exposure",
+    # taking back a position the agent created and did not record
+    "position_adopted",
+    "position_adoption_refused",
+    "position_preexisting_external",
+    "position_unknown_origin",
+    "adoption_positions_unreadable",
     "position_opened",
     "position_reduced",
     "position_closed",

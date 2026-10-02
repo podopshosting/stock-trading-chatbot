@@ -170,6 +170,13 @@ class CycleResult:
     committed_exposure_known: bool = False
     oldest_pending_order_age_seconds: Optional[float] = None
     order_poll: Optional[Dict] = None
+
+    # Positions discovered at the venue and what was decided about each.
+    adoption: Optional[Dict] = None
+    adopted_positions: int = 0
+    unknown_origin_positions: List[str] = field(default_factory=list)
+    preexisting_positions: List[str] = field(default_factory=list)
+    exposure_blocked_by_adoption: bool = False
     versions: Dict = field(default_factory=dict)
 
     @staticmethod
@@ -260,5 +267,11 @@ class CycleResult:
             "oldest_pending_order_age_seconds":
                 self.oldest_pending_order_age_seconds,
             "order_poll": self.order_poll,
+            "adoption": self.adoption,
+            "adopted_positions": self.adopted_positions,
+            "unknown_origin_positions": list(self.unknown_origin_positions),
+            "preexisting_positions": list(self.preexisting_positions),
+            "exposure_blocked_by_adoption":
+                self.exposure_blocked_by_adoption,
             "versions": self.versions,
         }
