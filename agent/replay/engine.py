@@ -14,6 +14,7 @@ not the strategy, and the two diverge in exactly the places that matter.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence
 
 from ..broker.paper import PaperBrokerConfig
@@ -53,6 +54,15 @@ class ReplayConfig:
     trailing_stop_pct: Optional[float] = 3.0
     max_hold_bars: Optional[int] = None
     evaluation_interval_seconds: int = 60
+    # The bar interval, used as the fallback data age when a gap cannot
+    # be measured. Not inferred from the bars, because a series with a
+    # halt in it would infer the wrong interval from the hole.
+    bar_interval_seconds: float = 60.0
+    # Minutes to the close, as reported to the risk gate. A replay has
+    # no session calendar, so this is declared rather than derived -
+    # and it is a CONFIG field rather than a literal so that a scenario
+    # can make TOO_LATE_IN_SESSION fire, which it previously could not.
+    minutes_to_close: float = 120.0
 
     def as_dict(self) -> Dict:
         return {
@@ -67,6 +77,8 @@ class ReplayConfig:
             "target_distance_pct": self.target_distance_pct,
             "trailing_stop_pct": self.trailing_stop_pct,
             "max_hold_bars": self.max_hold_bars,
+            "bar_interval_seconds": self.bar_interval_seconds,
+            "minutes_to_close": self.minutes_to_close,
             "risk_limits_version": self.risk_limits.version,
         }
 
@@ -175,12 +187,46 @@ def run(bars: Dict[str, Sequence[Bar]],
     rejections: Dict[str, int] = {}
     entry_bar: Dict[str, int] = {}
     entry_orders: Dict[str, Dict] = {}
+    # Per-DAY counters, reset when the calendar date changes.
+    #
+    # These used to accumulate across the whole run while the risk
+    # context derived session_date from each bar - so the governor saw
+    # the day change and the counters never did. A 250-bar daily replay
+    # was therefore one session with one $50 ceiling spread over a year,
+    # which is why 250 days of AAPL produced two trades. That read as
+    # strategy selectivity and was arithmetic.
     daily_capital_used = 0.0
+    positions_opened = 0
+    realized_pnl = 0.0
+    realized_at_day_start = 0.0
+    current_day: Optional[str] = None
+    days_seen = 0
+    previous_timestamp: Optional[str] = None
 
     try:
         for index, timestamp in enumerate(timeline):
             clock.advance(index, timestamp)
             broker.sync_quotes()
+
+            # A new calendar day resets the day's budget, exactly as the
+            # live agent's counters reset at the session boundary.
+            bar_day = str(timestamp)[:10]
+            if bar_day != current_day:
+                current_day = bar_day
+                days_seen += 1
+                daily_capital_used = 0.0
+                positions_opened = 0
+                realized_at_day_start = sum(
+                    (t.net_pnl or 0.0) for t in journal.list_trades()
+                    if t.net_pnl is not None)
+
+            # Realised P&L comes from the JOURNAL rather than a running
+            # tally, so it cannot drift from the record the metrics are
+            # computed from. Measured from the start of THIS day, since
+            # the daily loss limit is a daily limit.
+            realized_pnl = sum(
+                (t.net_pnl or 0.0) for t in journal.list_trades()
+                if t.net_pnl is not None) - realized_at_day_start
 
             # --- manage what is already open, before opening more ---
             _manage_open_positions(manager, series, clock, config,
@@ -203,7 +249,12 @@ def run(bars: Dict[str, Sequence[Bar]],
                 decision, hypothesis = _decide(
                     symbol, sym_series, clock, config, feed,
                     catalyst_for, regime_for, manager, daily_capital_used,
-                    spread_pct)
+                    spread_pct,
+                    data_age_seconds=_bar_gap_seconds(
+                        previous_timestamp, timestamp,
+                        config.bar_interval_seconds),
+                    positions_opened_today=positions_opened,
+                    realized_pnl_today=realized_pnl)
 
                 if decision is None:
                     continue
@@ -223,6 +274,7 @@ def run(bars: Dict[str, Sequence[Bar]],
                     continue
 
                 stats["entries_filled"] += 1
+                positions_opened += 1
                 daily_capital_used += decision.capital_required
                 fill = order["average_fill_price"]
                 plan = ExitPlan(
@@ -239,6 +291,11 @@ def run(bars: Dict[str, Sequence[Bar]],
                     config_version=CONFIG_VERSION)
                 entry_bar[symbol] = index
                 entry_orders[symbol] = order
+
+            # The age of the data at the NEXT bar is measured from this
+            # one. Set at the end of the iteration so a halt - a hole in
+            # the timeline - is seen as the gap it is.
+            previous_timestamp = timestamp
 
         # --- end of data: close what is still open -------------------
         _flatten_at_end(manager, series, journal, entry_orders, config, stats)
@@ -292,6 +349,43 @@ def run(bars: Dict[str, Sequence[Bar]],
         warnings=warnings)
 
 
+def _bar_gap_seconds(previous: Optional[str], current: Optional[str],
+                     expected: float) -> float:
+    """How old the prevailing data is at `current`.
+
+    A halt is an ABSENCE of prints, and the honest measure of that is
+    the distance to the previous bar. This used to be the literal 0.0,
+    which meant replay data was permanently and perfectly fresh - so
+    STALE_MARKET_DATA could never fire and a scenario claiming to test
+    the freshness gate was testing nothing.
+
+    Falls back to the expected bar interval when either timestamp is
+    unparseable, because an unknown gap must not read as a zero one.
+    """
+    if not previous or not current:
+        return expected
+    try:
+        a = datetime.fromisoformat(str(previous).replace("Z", "+00:00"))
+        b = datetime.fromisoformat(str(current).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return expected
+    gap = (b - a).total_seconds()
+    if gap <= 0:
+        return expected
+    # The EXCESS over the expected interval, not the raw gap.
+    #
+    # At a bar's close its own price is current, so a bar arriving on
+    # schedule is not stale however long the interval is. Staleness is
+    # data MISSING: a 45-minute hole in a one-minute series is 44
+    # minutes of absence, while a daily bar arriving a day later is
+    # perfectly fresh.
+    #
+    # Returning the raw gap made every DAILY replay refuse everything
+    # with STALE_MARKET_DATA - 86,400 seconds against a 120-second
+    # limit - which silently turned a year of AAPL into zero trades.
+    return max(0.0, gap - expected)
+
+
 def _unified_timeline(series: Dict[str, PointInTimeSeries]) -> List[str]:
     """One ordered list of timestamps across every symbol.
 
@@ -305,7 +399,9 @@ def _unified_timeline(series: Dict[str, PointInTimeSeries]) -> List[str]:
 
 
 def _decide(symbol, sym_series, clock, config, feed, catalyst_for,
-            regime_for, manager, daily_capital_used, spread_pct=0.05):
+            regime_for, manager, daily_capital_used, spread_pct=0.05,
+            data_age_seconds=0.0, positions_opened_today=0,
+            realized_pnl_today=0.0):
     """Run the live decision pipeline at the current bar."""
     closes = sym_series.closes_through_now()
     if len(closes) < 2:
@@ -347,7 +443,8 @@ def _decide(symbol, sym_series, clock, config, feed, catalyst_for,
 
     context = RiskContext(
         session_date=config.session_date or bar.timestamp[:10],
-        market_session="OPEN", minutes_to_close=120.0,
+        market_session="OPEN",
+        minutes_to_close=config.minutes_to_close,
         trading_enabled=True, execution_available=True,
         price=bar.close,
         # The spread the broker is actually quoting. This used to be the
@@ -356,14 +453,24 @@ def _decide(symbol, sym_series, clock, config, feed, catalyst_for,
         # context would still report five basis points. A gate that the
         # harness can never make fire is not a tested gate.
         spread_pct=spread_pct,
-        dollar_volume=max(bar.volume * bar.close,
-                          config.risk_limits.min_dollar_volume),
-        quote_age_seconds=0.0,
-        source_age_seconds=0.0,
+        # The bar's ACTUAL dollar volume. This used to be floored at
+        # min_dollar_volume, which meant the liquidity gate could never
+        # refuse anything in a replay - the floor guaranteed the gate
+        # passed. Synthetic bars must therefore carry realistic volume,
+        # which is the scenario's job, not the engine's.
+        dollar_volume=bar.volume * bar.close,
+        # Derived from the gap to the previous bar, not a literal. A
+        # halt is a hole in the timeline and must read as stale data.
+        quote_age_seconds=data_age_seconds,
+        source_age_seconds=data_age_seconds,
         open_positions=manager.open_count,
         capital_deployed_today=daily_capital_used,
-        positions_opened_today=0,
-        realized_pnl_today=0.0,
+        # Both of these were literals, so MAX_NEW_POSITIONS_REACHED and
+        # DAILY_RISK_LOCK could never fire in a replay - the daily loss
+        # limit, the single most important risk control in the system,
+        # was silently absent from every backtest.
+        positions_opened_today=positions_opened_today,
+        realized_pnl_today=realized_pnl_today,
         held_symbols=[p.symbol for p in manager.open_positions()])
     decision = evaluate_risk(hypothesis, context, limits=config.risk_limits)
     return decision, hypothesis

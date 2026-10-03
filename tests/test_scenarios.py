@@ -26,6 +26,9 @@ def execute(name, **kw):
     scenario = scenarios.build(name)
     config = ReplayConfig(warmup_bars=scenarios.WARMUP,
                           risk_limits=RiskLimits(), starting_cash=100.0)
+    for key, value in (scenario.config_overrides or {}).items():
+        assert hasattr(config, key), f"unknown config {key}"
+        setattr(config, key, value)
     if scenario.spread_pct is not None:
         kw.setdefault("spread_pct", scenario.spread_pct)
     return scenario, run(scenario.bars, config,
@@ -252,3 +255,63 @@ class TestTheSpreadIsPaidAsWellAsChecked(unittest.TestCase):
         from agent.replay import engine
         source = inspect.getsource(engine.run)
         self.assertIn("spread_pct=spread_pct", source)
+
+
+class TestDeclarationsMatchBehaviour(unittest.TestCase):
+    """A scenario states up front whether a trade should happen and
+    whether a loss may legitimately exceed 1R.
+
+    When a declaration disagrees with what the run actually does, one of
+    the two is wrong and somebody should look. `chop` declared
+    may_exceed_1r=False and then breached at -1.30R; the declaration was
+    wrong, because a polled stop is evaluated at a bar close and filled
+    at the next open, so it can never do better than the next print.
+    Catching that disagreement is the point of declaring it at all.
+    """
+
+    def test_trade_expectations_hold(self):
+        for name in scenarios.ALL:
+            scenario, result = execute(name)
+            with self.subTest(name=name, declared=scenario.trade):
+                if scenario.trade == scenarios.TRADE_EXPECTED:
+                    self.assertGreater(
+                        result.entries_filled, 0,
+                        f"{name} declares TRADE_EXPECTED and produced "
+                        f"none, so it proves nothing about trade "
+                        f"management")
+                elif scenario.trade == scenarios.NO_TRADE_EXPECTED:
+                    self.assertEqual(
+                        result.entries_filled, 0,
+                        f"{name} declares NO_TRADE_EXPECTED and traded")
+
+    def test_a_breach_only_happens_where_it_is_declared_possible(self):
+        for name in scenarios.ALL:
+            scenario, result = execute(name)
+            stops = (result.as_dict().get("performance") or {}).get(
+                "stop_integrity") or {}
+            breaches = stops.get("stop_breaches") or 0
+            with self.subTest(name=name, may_exceed=scenario.may_exceed_1r):
+                if not scenario.may_exceed_1r:
+                    self.assertEqual(
+                        breaches, 0,
+                        f"{name} declares that a loss may NOT exceed 1R "
+                        f"and recorded {breaches} breach(es) with "
+                        f"worst_r={stops.get('worst_r')}. Either the "
+                        f"declaration is wrong or the risk model is")
+
+    def test_every_scenario_declares_its_failure_mode(self):
+        """Losing money is not a failure mode. Behaving incorrectly is."""
+        for name in scenarios.ALL:
+            with self.subTest(name=name):
+                self.assertTrue(scenarios.build(name).expected_failure,
+                                f"{name} does not say what going wrong "
+                                f"would look like")
+
+    def test_at_least_one_scenario_expects_no_trade(self):
+        """Not every scenario may be 'the system should win'."""
+        declared = {scenarios.build(n).trade for n in scenarios.ALL}
+        self.assertIn(scenarios.NO_TRADE_EXPECTED, declared)
+
+    def test_at_least_one_scenario_expects_a_legitimate_breach(self):
+        self.assertTrue(any(scenarios.build(n).may_exceed_1r
+                            for n in scenarios.ALL))

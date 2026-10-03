@@ -54,30 +54,50 @@ def _load_history(symbol: str, days: int, timeframe: str):
     that looks like a code fault.
     """
     try:
+        import boto3
         from agent.providers import AlpacaProvider
     except Exception as exc:                              # noqa: BLE001
         return None, f"provider unavailable: {exc}"
     try:
-        provider = AlpacaProvider()
+        # Credentials from Secrets Manager, the same way the agent reads
+        # them. Never from environment variables, never logged, and
+        # never passed on a command line.
+        secret_id = os.environ.get("AGENT_ALPACA_SECRET",
+                                   "stock-agent/alpaca-paper")
+        region = os.environ.get("AWS_REGION", "us-east-2")
+        client = boto3.Session(region_name=region).client("secretsmanager")
+        creds = json.loads(
+            client.get_secret_value(SecretId=secret_id)["SecretString"])
+        provider = AlpacaProvider(
+            api_key_id=creds["api_key_id"],
+            api_secret_key=creds["api_secret_key"],
+            quote_feed=os.environ.get("ALPACA_QUOTE_FEED", "sip"))
         raw = provider.get_bars(symbol, timeframe=timeframe, limit=days)
     except Exception as exc:                              # noqa: BLE001
         return None, f"{type(exc).__name__}: {exc}"
 
+    # get_bars returns a BarSet, whose own Bar type is NOT the replay
+    # Bar - same five fields, different class, and the provider's
+    # carries provenance the replay engine has no use for. Converted
+    # explicitly rather than duck-typed, so a change to either shape
+    # fails here rather than somewhere downstream.
+    source = getattr(raw, "bars", None)
+    if source is None:
+        return None, (f"the provider returned {type(raw).__name__}, which "
+                      f"has no .bars")
     bars = []
-    for row in raw or []:
+    for row in source:
         try:
-            bars.append(Bar(
-                timestamp=str(row.get("timestamp") or row.get("t")),
-                open=float(row.get("open", row.get("o"))),
-                high=float(row.get("high", row.get("h"))),
-                low=float(row.get("low", row.get("l"))),
-                close=float(row.get("close", row.get("c"))),
-                volume=float(row.get("volume", row.get("v")) or 0.0)))
-        except (TypeError, ValueError, KeyError) as exc:
-            return None, f"a bar could not be parsed: {exc}"
+            bars.append(Bar(timestamp=str(row.timestamp),
+                            open=float(row.open), high=float(row.high),
+                            low=float(row.low), close=float(row.close),
+                            volume=float(row.volume or 0.0)))
+        except (AttributeError, TypeError, ValueError) as exc:
+            return None, f"a bar could not be converted: {exc}"
     if not bars:
         return None, "the provider returned no bars"
-    return bars, ""
+    provenance = getattr(raw, "provenance", None)
+    return bars, (f"provenance={provenance}" if provenance else "")
 
 
 def _report(label: str, result, extra=None) -> None:
@@ -120,7 +140,14 @@ def _report(label: str, result, extra=None) -> None:
         print("  --- stop integrity ---")
         print(f"  trades assessed     : {stops.get('trades_assessed')}")
         print(f"  stop breaches       : {breaches}")
-        print(f"  worst loss (R)      : {worst}")
+        # "worst loss" is wrong when every trade won: worst_r is then
+        # the SMALLEST GAIN, and printing it as a loss misreads the run.
+        label = ("worst trade (R)" if worst is None or worst >= 0
+                 else "worst loss (R)")
+        print(f"  {label:19} : {worst}")
+        if worst is not None and worst >= 0:
+            print("  >>> no losing trade in this run, so this scenario "
+                  "says nothing about stop behaviour")
         if worst is not None:
             if worst < -1.0:
                 print(f"  >>> the worst trade lost {abs(worst):.2f}x its "
@@ -150,6 +177,14 @@ def _run_scenario(name: str, limits: RiskLimits, verbose: bool) -> int:
                           risk_limits=limits,
                           starting_cash=max(limits.daily_capital_limit * 2,
                                             100.0))
+    # A scenario that needs a different session or fill model gets it.
+    # Without this, late_in_session and partial_fills would be named
+    # after conditions they never created.
+    for key, value in (scenario.config_overrides or {}).items():
+        if not hasattr(config, key):
+            raise KeyError(
+                f"{scenario.name} overrides unknown config {key!r}")
+        setattr(config, key, value)
     kwargs = {}
     if scenario.spread_pct is not None:
         kwargs["spread_pct"] = scenario.spread_pct
@@ -212,8 +247,14 @@ def main() -> int:
                   "are different problems and the output should not "
                   "blur them.")
             return 1
+        # The bar interval has to match the timeframe, or a bar
+        # arriving on schedule is mistaken for missing data.
+        interval = {"1min": 60.0, "5min": 300.0, "15min": 900.0,
+                    "1hour": 3600.0, "1day": 86400.0}.get(
+                        args.timeframe.lower(), 86400.0)
         config = ReplayConfig(warmup_bars=min(200, max(20, len(bars) // 3)),
-                              risk_limits=limits)
+                              risk_limits=limits,
+                              bar_interval_seconds=interval)
         result = run({args.symbol: bars}, config,
                      regime_for=_permissive_regime)
         _report(f"HISTORY: {args.symbol} ({len(bars)} {args.timeframe} bars)",

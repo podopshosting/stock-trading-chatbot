@@ -785,6 +785,66 @@ MUTATIONS = [
         new="        return False  # MUTATION",
         expect=["breach", "stop", "planned risk", "1R"],
     ),
+    # --- scenario variables that were constants in disguise. Each one
+    # --- silently disabled a risk control, so a backtest reported that
+    # --- the control held when it had never been consulted.
+    #
+    # NOT covered here: the run() -> _decide handoff of
+    # positions_opened_today. Mutating it to a literal 0 cannot be
+    # caught, because the three-per-day cap is dominated by the $50
+    # capital ceiling and no replay can reach it. A mutation nobody can
+    # catch would fail this gate forever, so the gap is recorded in
+    # tests/test_replay_inputs.py instead, with a test that fails if the
+    # cap ever BECOMES reachable.
+    Mutation(
+        name="replay-data-is-always-fresh",
+        description="report every replay bar as perfectly current, so "
+                    "the staleness gate can never refuse",
+        path=RPL_ENGINE,
+        old="        quote_age_seconds=data_age_seconds,\n"
+            "        source_age_seconds=data_age_seconds,",
+        new="        quote_age_seconds=0.0,  # MUTATION\n"
+            "        source_age_seconds=0.0,",
+        expect=["stale", "hole", "fresh"],
+    ),
+    Mutation(
+        name="staleness-is-the-raw-gap",
+        description="treat a bar arriving on schedule as stale, which "
+                    "refuses every entry in a daily replay",
+        path=RPL_ENGINE,
+        old="    return max(0.0, gap - expected)",
+        new="    return gap  # MUTATION",
+        expect=["schedule", "fresh", "excess", "hole"],
+    ),
+    Mutation(
+        name="hardcode-the-replay-session-clock",
+        description="fix minutes_to_close, so the session cut-off can "
+                    "never refuse a late entry",
+        path=RPL_ENGINE,
+        old="        minutes_to_close=config.minutes_to_close,",
+        new="        minutes_to_close=120.0,  # MUTATION",
+        expect=["close", "session", "late"],
+    ),
+    Mutation(
+        name="floor-the-replay-liquidity-gate",
+        description="raise thin volume to the minimum, which guarantees "
+                    "the liquidity gate passes",
+        path=RPL_ENGINE,
+        old="        dollar_volume=bar.volume * bar.close,",
+        new="        dollar_volume=max(bar.volume * bar.close,\n"
+            "                          config.risk_limits.min_dollar_volume"
+            "),  # MUTATION",
+        expect=["thin", "liquidity", "volume"],
+    ),
+    Mutation(
+        name="never-reset-the-daily-replay-budget",
+        description="accumulate one session's capital across the whole "
+                    "run, so a year of bars gets one day's budget",
+        path=RPL_ENGINE,
+        old="            if bar_day != current_day:",
+        new="            if False:  # MUTATION",
+        expect=["session", "daily", "budget", "reset"],
+    ),
     # --- scenarios: named market conditions, built on purpose. The
     # --- first version produced 119 decisions and zero entries, so
     # --- every scenario looked safe and none tested anything.

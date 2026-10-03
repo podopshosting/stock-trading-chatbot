@@ -83,6 +83,15 @@ def _calm(count: int, start: float = 100.0, drift: float = 0.0012,
     return out
 
 
+# Whether a scenario is supposed to produce a trade. NOT a judgement
+# about the strategy - "no trade" is the correct answer to several of
+# these, and stating it up front is what stops a silent harness being
+# mistaken for a safe one.
+TRADE_EXPECTED = "TRADE_EXPECTED"
+NO_TRADE_EXPECTED = "NO_TRADE_EXPECTED"
+TRADE_OPTIONAL = "TRADE_OPTIONAL"
+
+
 @dataclass
 class Scenario:
     """One named condition, and what a correct system should do in it."""
@@ -93,6 +102,19 @@ class Scenario:
     spread_pct: Optional[float] = None
     regime: str = "BULLISH"
     note: str = ""
+    # Should a trade happen? Declared, so a scenario that produces
+    # nothing cannot be read as proof that trade management is safe.
+    trade: str = TRADE_OPTIONAL
+    # May a loss legitimately exceed the planned 1R here? True for
+    # gaps and halts, where a stop is an instruction the market is free
+    # to ignore. False means a breach IS a finding.
+    may_exceed_1r: bool = False
+    # What going wrong would look like, as distinct from losing money.
+    expected_failure: str = ""
+    # Config the scenario needs in order to be the condition it claims
+    # to be - a late-session scenario cannot test the session cut-off
+    # without moving minutes_to_close.
+    config_overrides: Dict = field(default_factory=dict)
 
     def as_dict(self) -> Dict:
         series = next(iter(self.bars.values()), [])
@@ -100,10 +122,14 @@ class Scenario:
             "name": self.name,
             "question": self.question,
             "expectation": self.expectation,
+            "trade": self.trade,
+            "may_exceed_1r": self.may_exceed_1r,
+            "expected_failure": self.expected_failure,
             "symbols": sorted(self.bars),
             "bars": len(series),
             "spread_pct": self.spread_pct,
             "regime": self.regime,
+            "config_overrides": dict(self.config_overrides),
             "note": self.note,
             "disclaimer": SCENARIO_NOT_EVIDENCE,
         }
@@ -140,6 +166,9 @@ def grind_up(symbol: str = "XYZ") -> Scenario:
     for the right reasons."""
     return Scenario(
         name="grind_up",
+        trade=TRADE_EXPECTED,
+        may_exceed_1r=False,
+        expected_failure="no entry at all, which would mean every other scenario here is measuring silence rather than behaviour",
         question="does the agent trade at all under ordinary conditions?",
         expectation="an entry is taken and managed; this is the control "
                     "that proves the harness can produce a trade",
@@ -150,6 +179,15 @@ def grind_up(symbol: str = "XYZ") -> Scenario:
 def chop(symbol: str = "XYZ") -> Scenario:
     return Scenario(
         name="chop",
+        trade=TRADE_OPTIONAL,
+        # True, and the reason is not a gap. The stop is ENGINE_POLLED:
+        # it is evaluated at a bar CLOSE and filled at the next bar's
+        # OPEN, so a polled stop can never do better than the next
+        # print. With 1.2% bars that is routinely worse than 1R. This
+        # was initially declared False and the scenario breached at
+        # -1.30R, which is how the distinction got noticed.
+        may_exceed_1r=True,
+        expected_failure="heavy trading in a directionless market, which is churn paying the spread twice",
         question="does a directionless market produce entries anyway?",
         expectation="few or no entries; a signal engine that trades "
                     "noise will show up here as activity",
@@ -177,6 +215,9 @@ def gap_through_stop(symbol: str = "XYZ", gap_pct: float = 12.0) -> Scenario:
              floor * 0.996, floor * 0.999) for i in range(30))
     return Scenario(
         name="gap_through_stop",
+        trade=TRADE_EXPECTED,
+        may_exceed_1r=True,
+        expected_failure="the loss being REPORTED as if the stop held",
         question=f"when price gaps {gap_pct}% through the stop, is the "
                  f"realised loss still bounded by the per-trade limit?",
         expectation="the position exits, and the loss is EXPECTED to "
@@ -204,6 +245,9 @@ def flash_crash(symbol: str = "XYZ", depth_pct: float = 20.0) -> Scenario:
                        last * 0.998, last) for i in range(30))
     return Scenario(
         name="flash_crash",
+        trade=TRADE_EXPECTED,
+        may_exceed_1r=True,
+        expected_failure="selling the bottom of a wick that recovered within the bar",
         question="does a deep wick that recovers immediately trigger an "
                  "exit, and at what price?",
         expectation="the polled stop evaluates on bar closes, so a wick "
@@ -232,6 +276,9 @@ def trading_halt(symbol: str = "XYZ", gap_minutes: int = 45,
                        reopen * 0.997, reopen) for i in range(30))
     return Scenario(
         name="trading_halt",
+        trade=TRADE_OPTIONAL,
+        may_exceed_1r=True,
+        expected_failure="a NEW entry taken on data that is 45 minutes old",
         question="what happens to an open position across a halt, and "
                  "does the staleness check notice the data gap?",
         expectation="quote age should exceed the freshness limit during "
@@ -246,6 +293,9 @@ def spread_blowout(symbol: str = "XYZ", spread_pct: float = 2.5) -> Scenario:
     """A spread far wider than the entry gate permits."""
     return Scenario(
         name="spread_blowout",
+        trade=NO_TRADE_EXPECTED,
+        may_exceed_1r=False,
+        expected_failure="any entry at all; the spread gate exists to refuse these",
         question=f"does a {spread_pct}% spread refuse new entries?",
         expectation="every entry refused with SPREAD_TOO_WIDE; the gate "
                     "exists so an entry does not pay away the expected "
@@ -258,6 +308,9 @@ def spread_blowout(symbol: str = "XYZ", spread_pct: float = 2.5) -> Scenario:
 def bear_regime(symbol: str = "XYZ") -> Scenario:
     return Scenario(
         name="bear_regime",
+        trade=NO_TRADE_EXPECTED,
+        may_exceed_1r=False,
+        expected_failure="long entries into a hostile regime",
         question="does a hostile regime suppress entries?",
         expectation="entries refused or sized down; a long-only agent in "
                     "a bear regime should mostly decline to act",
@@ -271,12 +324,231 @@ def slow_bleed(symbol: str = "XYZ") -> Scenario:
     which makes it the counterpart to gap_through_stop."""
     return Scenario(
         name="slow_bleed",
+        trade=TRADE_EXPECTED,
+        may_exceed_1r=False,
+        expected_failure="a loss materially beyond 1R with no gap to explain it - that would mean the risk model is wrong even on continuous prices",
         question="when price declines smoothly through the stop, is the "
                  "loss close to the planned amount?",
         expectation="the loss should be CLOSE to max_trade_risk, within "
                     "slippage. If it is not, the risk model is wrong "
                     "even without a gap to blame",
         bars={symbol: _bleed_series()},
+    )
+
+
+def downtrend(symbol: str = "XYZ") -> Scenario:
+    return Scenario(
+        name="downtrend",
+        question="does a long-only agent short, or refuse?",
+        expectation="no entries; a sustained decline offers a long-only "
+                    "strategy nothing, and NOT_LONG_ONLY should dominate "
+                    "the refusals",
+        trade=NO_TRADE_EXPECTED,
+        expected_failure="a long entry into a sustained decline",
+        bars={symbol: _calm(WARMUP + 120, drift=-0.0025)},
+    )
+
+
+def volatile_chop(symbol: str = "XYZ") -> Scenario:
+    return Scenario(
+        name="volatile_chop",
+        question="with 4% bars, how far past 1R can a POLLED stop be "
+                 "filled?",
+        expectation="breaches are expected and the magnitude is the "
+                    "answer: a stop evaluated at a bar close and filled "
+                    "at the next open cannot do better than the next "
+                    "print, and a wide bar makes that gap large",
+        trade=TRADE_OPTIONAL,
+        may_exceed_1r=True,
+        expected_failure="reporting these losses as if the stop had held",
+        bars={symbol: _calm(WARMUP + 120, drift=0.0, vol=0.040)},
+    )
+
+
+def gap_through_target(symbol: str = "XYZ", gap_pct: float = 14.0) -> Scenario:
+    """The favourable mirror of gap_through_stop.
+
+    Included because a harness that only models adverse gaps overstates
+    how bad gapping is: the same mechanism that overshoots a stop also
+    overshoots a target.
+    """
+    series = _calm(WARMUP + 40)
+    last = series[-1].close
+    top = last * (1 + gap_pct / 100.0)
+    series.append(_bar(len(series), top, top * 1.005, top * 0.999,
+                       top * 1.002))
+    series.extend(_bar(len(series) + i, top * 1.002, top * 1.004,
+                       top * 0.998, top * 1.001) for i in range(30))
+    return Scenario(
+        name="gap_through_target",
+        question="when price gaps past the target, is the gain recorded "
+                 "at the fill rather than at the target?",
+        expectation="the exit fills ABOVE the target and the recorded "
+                    "gain exceeds the planned one; a backtest that "
+                    "clipped it to the target would understate the "
+                    "mechanism it overstates on the downside",
+        trade=TRADE_EXPECTED,
+        may_exceed_1r=True,
+        expected_failure="recording the exit at the target price it "
+                         "never traded at",
+        bars={symbol: series},
+    )
+
+
+def low_liquidity(symbol: str = "XYZ") -> Scenario:
+    """Volume far below the dollar-volume floor."""
+    series = [
+        Bar(timestamp=b.timestamp, open=b.open, high=b.high, low=b.low,
+            close=b.close, volume=200.0)
+        for b in _calm(WARMUP + 120)]
+    return Scenario(
+        name="low_liquidity",
+        question="does thin volume refuse entries?",
+        expectation="every entry refused with INSUFFICIENT_LIQUIDITY; "
+                    "about $20k of dollar volume against a $20m floor",
+        trade=NO_TRADE_EXPECTED,
+        expected_failure="entering a name that cannot be exited without "
+                         "moving it",
+        bars={symbol: series},
+    )
+
+
+def late_in_session(symbol: str = "XYZ") -> Scenario:
+    return Scenario(
+        name="late_in_session",
+        question="does the session cut-off refuse a new entry near the "
+                 "close?",
+        expectation="every entry refused with TOO_LATE_IN_SESSION; "
+                    "positions are flattened before the bell, so an "
+                    "entry minutes beforehand buys a round trip and no "
+                    "time to work",
+        trade=NO_TRADE_EXPECTED,
+        expected_failure="opening exposure that must be closed minutes "
+                         "later regardless of outcome",
+        bars={symbol: _calm(WARMUP + 120)},
+        config_overrides={"minutes_to_close": 2.0},
+    )
+
+
+def partial_fills(symbol: str = "XYZ") -> Scenario:
+    return Scenario(
+        name="partial_fills",
+        question="what happens when entries and exits fill only partly?",
+        expectation="the managed quantity is what actually FILLED, never "
+                    "what was requested; a remainder left working is "
+                    "cancelled rather than assumed away",
+        trade=TRADE_EXPECTED,
+        may_exceed_1r=True,
+        expected_failure="managing a position size that was never filled",
+        bars={symbol: _calm(WARMUP + 120)},
+        config_overrides={"partial_fill_probability": 0.6},
+    )
+
+
+def false_breakout(symbol: str = "XYZ") -> Scenario:
+    """Pushes to a new high, then fails straight back through the range.
+
+    The textbook trap for a momentum strategy, and the loss here is
+    CORRECT behaviour: the setup was real and it did not work.
+    """
+    series = _calm(WARMUP + 30)
+    last = series[-1].close
+    # The thrust must stay BELOW the 6% target, or the trade takes
+    # profit before the failure arrives and the scenario becomes a
+    # winner named after a trap. It produced +2.51R before this bound.
+    for i in range(4):                       # the thrust
+        price = last * (1 + 0.006 * (i + 1))
+        series.append(_bar(len(series), price * 0.998, price * 1.004,
+                           price * 0.996, price))
+    peak = series[-1].close
+    for i in range(40):                      # and the failure
+        price = peak * (1 - 0.006 * (i + 1))
+        series.append(_bar(len(series), price * 1.002, price * 1.003,
+                           price * 0.995, price))
+    return Scenario(
+        name="false_breakout",
+        question="does the agent lose CORRECTLY on a failed breakout?",
+        expectation="an entry is taken on the thrust and stopped out on "
+                    "the failure. A loss is the right outcome - the "
+                    "setup existed and did not work, which is what a "
+                    "stop is for",
+        trade=TRADE_EXPECTED,
+        expected_failure="holding past the stop, or not entering at all "
+                         "- the second would mean the strategy cannot "
+                         "see a breakout rather than that it avoided a "
+                         "bad one",
+        bars={symbol: series},
+    )
+
+
+def momentum_reversal(symbol: str = "XYZ") -> Scenario:
+    series = _calm(WARMUP + 60, drift=0.0030)
+    peak = series[-1].close
+    for i in range(50):
+        price = peak * (1 - 0.0045 * (i + 1))
+        series.append(_bar(len(series), price * 1.001, price * 1.002,
+                           price * 0.997, price))
+    return Scenario(
+        name="momentum_reversal",
+        question="how quickly does a position opened in a strong trend "
+                 "get out when the trend inverts?",
+        expectation="the stop or the trailing stop closes it; the "
+                    "interesting number is how far past the entry the "
+                    "exit lands",
+        trade=TRADE_EXPECTED,
+        expected_failure="riding the reversal down because the trailing "
+                         "stop only ever loosened",
+        bars={symbol: series},
+    )
+
+
+def consecutive_losses(symbol: str = "XYZ") -> Scenario:
+    """Repeated losing entries, to reach the daily loss lock.
+
+    This is the scenario the harness could not express at all until
+    realized_pnl_today stopped being a literal zero: the daily loss
+    limit is the single most important risk control in the system and
+    no backtest had ever exercised it.
+    """
+    # Spread over SEPARATE SESSIONS, because the daily budget resets.
+    #
+    # Within one session the capital ceiling binds long before the loss
+    # limit does: $50 a day at roughly $25 a position is about two
+    # trades, risking about $2 each, so a single session cannot lose the
+    # $5 the daily limit allows. A run of losses is therefore a run of
+    # DAYS, and that is what this builds.
+    series = _calm(WARMUP + 20, day="2026-01-02")
+    price = series[-1].close
+    for day_index in range(6):
+        day = f"2026-01-{5 + day_index:02d}"
+        index = 0
+        for i in range(3):                   # a rise that never targets
+            price *= 1.008
+            series.append(_bar(index, price * 0.998, price * 1.004,
+                               price * 0.996, price, day=day))
+            index += 1
+        for i in range(5):                   # and a fall through the stop
+            price *= 0.988
+            series.append(_bar(index, price * 1.002, price * 1.003,
+                               price * 0.992, price, day=day))
+            index += 1
+    return Scenario(
+        name="consecutive_losses",
+        question="does a run of losses reach the daily loss lock, and "
+                 "does the lock then stop new entries?",
+        expectation="losses accumulate across sessions and the daily "
+                    "budget resets each day. The finding is which limit "
+                    "actually binds: the $50 capital ceiling allows "
+                    "about two trades a day risking about $2 each, so a "
+                    "single session cannot reach the $5 daily loss "
+                    "limit. That limit only binds when a stop BREACH "
+                    "makes one trade lose more than planned - which the "
+                    "gap scenarios show can be four times over",
+        trade=TRADE_EXPECTED,
+        may_exceed_1r=True,
+        expected_failure="trading on past the daily loss limit, which "
+                         "would mean the limit is decorative",
+        bars={symbol: series},
     )
 
 
@@ -289,6 +561,15 @@ ALL: Dict[str, Callable[[], Scenario]] = {
     "trading_halt": trading_halt,
     "spread_blowout": spread_blowout,
     "bear_regime": bear_regime,
+    "downtrend": downtrend,
+    "volatile_chop": volatile_chop,
+    "gap_through_target": gap_through_target,
+    "low_liquidity": low_liquidity,
+    "late_in_session": late_in_session,
+    "partial_fills": partial_fills,
+    "false_breakout": false_breakout,
+    "momentum_reversal": momentum_reversal,
+    "consecutive_losses": consecutive_losses,
 }
 
 
