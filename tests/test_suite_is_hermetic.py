@@ -32,6 +32,46 @@ class TestCredentialsAreNeutralised(unittest.TestCase):
         self.assertIsNone(os.environ.get("AWS_PROFILE"))
         self.assertIsNone(os.environ.get("AWS_DEFAULT_PROFILE"))
 
+    def test_the_guard_CLEARS_a_profile_rather_than_finding_none(self):
+        """Not vacuous: set one, then prove the guard removes it.
+
+        The assertion above passes trivially in any shell that never
+        exported AWS_PROFILE - which is most shells, and is exactly the
+        shell the mutation harness runs in. A mutation that stopped
+        clearing the variable SURVIVED, because there was nothing to
+        clear. So this test supplies the variable itself and re-executes
+        the module, which is the only form that can fail.
+        """
+        import importlib
+        saved = os.environ.get("AWS_PROFILE")
+        try:
+            os.environ["AWS_PROFILE"] = "would-be-administrator"
+            importlib.reload(suite_init)
+            self.assertIsNone(
+                os.environ.get("AWS_PROFILE"),
+                "tests/__init__.py did not clear AWS_PROFILE, so a named "
+                "profile would govern the suite")
+        finally:
+            if saved is None:
+                os.environ.pop("AWS_PROFILE", None)
+            else:
+                os.environ["AWS_PROFILE"] = saved
+            importlib.reload(suite_init)
+
+    def test_the_guard_CLEARS_a_default_profile_too(self):
+        import importlib
+        saved = os.environ.get("AWS_DEFAULT_PROFILE")
+        try:
+            os.environ["AWS_DEFAULT_PROFILE"] = "would-be-administrator"
+            importlib.reload(suite_init)
+            self.assertIsNone(os.environ.get("AWS_DEFAULT_PROFILE"))
+        finally:
+            if saved is None:
+                os.environ.pop("AWS_DEFAULT_PROFILE", None)
+            else:
+                os.environ["AWS_DEFAULT_PROFILE"] = saved
+            importlib.reload(suite_init)
+
     def test_the_shared_credentials_file_is_not_readable(self):
         self.assertEqual(os.environ.get("AWS_SHARED_CREDENTIALS_FILE"),
                          os.devnull)
