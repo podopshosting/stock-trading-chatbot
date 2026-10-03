@@ -1291,15 +1291,72 @@ MUTATIONS = [
         new='        if True:  # MUTATION',
         expect=["exit", "intent", "recorded", "submit"],
     ),
+    # --- which exit attempt a submission belongs to. Advancing
+    # --- unconditionally meant a retry was never a retry: every resend
+    # --- derived a new id, the venue accepted it as a second order, and
+    # --- the mechanism built to prevent a double sell caused one.
     Mutation(
         name="advance-the-exit-attempt-on-a-suppressed-retry",
-        description="advance the exit attempt on a suppressed retry, so "
-                    "the next try mints a new id and defeats the "
-                    "venue's duplicate suppression",
+        description="count a venue-suppressed duplicate as another "
+                    "attempt, so the next retry mints a new id",
         path=POS_MANAGER,
-        old='        if cli and cli not in position.exit_client_order_ids:',
-        new='        if cli:  # MUTATION',
-        expect=["attempt", "retry", "suppress"],
+        old="        if cli and cli not in position.exit_client_order_ids:",
+        new="        if cli:  # MUTATION",
+        expect=["suppressed", "attempt", "retry"],
+    ),
+    Mutation(
+        name="advance-the-exit-attempt-unconditionally",
+        description="derive a new client order id on every resend",
+        path=POS_MANAGER,
+        old="            cohort=self.cohort, attempt=self._exit_attempt_for(position),",
+        new="            cohort=self.cohort, attempt=position.exit_attempts "
+            "+ 1,  # MUTATION",
+        expect=["suppressed", "attempt", "retry", "venue"],
+    ),
+    Mutation(
+        name="advance-the-attempt-when-the-row-is-missing",
+        description="treat an attempt with no ledger row as finished",
+        path=POS_MANAGER,
+        old="        if row is None:\n            return attempts",
+        new="        if row is None:\n            return attempts + 1  # MUTATION",
+        expect=["missing", "ledger", "advance"],
+    ),
+    Mutation(
+        name="advance-the-attempt-when-the-ledger-is-unreadable",
+        description="put a second live order out on an unverifiable "
+                    "remainder",
+        path=POS_MANAGER,
+        old="        except Exception:                                 # noqa: BLE001\n"
+            "            return attempts          # cannot establish it; do not advance",
+        new="        except Exception:                                 # noqa: BLE001\n"
+            "            return attempts + 1  # MUTATION",
+        expect=["unreadable", "advance", "attempt"],
+    ),
+    Mutation(
+        name="advance-the-attempt-with-no-remainder",
+        description="open a second exit order for a position that is "
+                    "already fully sold",
+        path=POS_MANAGER,
+        old="        if remaining <= 0:\n            return attempts",
+        new="        if False:  # MUTATION\n            return attempts",
+        expect=["remainder", "filled", "advance"],
+    ),
+    Mutation(
+        name="advance-the-attempt-past-its-bound",
+        description="retry an exit without limit",
+        path=POS_MANAGER,
+        old="        return min(attempts + 1, MAX_EXIT_ATTEMPTS)",
+        new="        return attempts + 1  # MUTATION",
+        expect=["bound", "exceeds"],
+    ),
+    Mutation(
+        name="drift-the-mirrored-exit-attempt-bound",
+        description="let the manager's copy of MAX_EXIT_ATTEMPTS "
+                    "disagree with the submission path's",
+        path=POS_MANAGER,
+        old="MAX_EXIT_ATTEMPTS = 3",
+        new="MAX_EXIT_ATTEMPTS = 9  # MUTATION",
+        expect=["bound", "both sides", "mirror"],
     ),
     # --- adoption: taking back a position the agent provably created.
     # --- The DRAM position on 2026-10-02 was the agent's own and could

@@ -289,3 +289,191 @@ class TestRestartRecoveryForExits(unittest.TestCase):
         exposure = committed_exposure(ledger.non_terminal(SESSION))
         self.assertTrue(exposure["known"])
         self.assertGreater(exposure["reserved"], 0.0)
+
+
+class TestASuppressedRetryDoesNotAdvanceTheAttempt(unittest.TestCase):
+    """The venue suppressing a duplicate must not mint a new id.
+
+    A retry returns the SAME client order id, because that is what
+    suppression means. If the manager counted that as another attempt,
+    the NEXT exit would derive attempt+1, produce a different id, and
+    the venue would accept it as a new order - so the mechanism built
+    to prevent a double sell would be what caused one.
+
+    This survived the 218-mutation gate on 904e53c: `if cli and cli not
+    in position.exit_client_order_ids` could be weakened to `if cli`
+    and nothing failed, because nothing exercised a repeated exit.
+    """
+
+    def _position_and_manager(self, venue):
+        from agent.positions import ExitPlan, PositionManager
+        from agent.positions.models import ExitIntent, ExitReason
+        manager = PositionManager(
+            broker=venue, execution_available=True,
+            order_ledger=InMemoryOrderLedger(), session_date=SESSION,
+            exit_submitter=submit_exit)
+        position = manager.open_from_order(
+            {"symbol": "XYZ", "filled_quantity": 1.0,
+             "average_fill_price": 100.0, "remaining_quantity": 0.0},
+            ExitPlan(stop_price=95.0), risk_decision_id=DECISION)
+        intent = ExitIntent(
+            intent_id=ExitIntent.make_id(), position_id=position.position_id,
+            symbol="XYZ", quantity=1.0,
+            primary_reason=ExitReason.MANUAL, reference_price=100.0)
+        return manager, position, intent
+
+    def test_a_suppressed_retry_keeps_the_attempt_at_one(self):
+        """The venue returns the same order for the same id."""
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+        self.assertEqual(position.exit_attempts, 1)
+        first_id = position.exit_client_order_ids[0]
+
+        # The retry: the ledger already holds the intent, so the venue
+        # is asked and returns the SAME order.
+        venue._existing = {"order_id": "brk_1",
+                           "client_order_id": first_id,
+                           "status": "SUBMITTED", "raw_status": "accepted",
+                           "filled_quantity": 0.0,
+                           "average_fill_price": None}
+        manager.submit_exit(intent)
+        self.assertEqual(position.exit_attempts, 1,
+                         "a suppressed retry is not another attempt")
+        self.assertEqual(position.exit_client_order_ids, [first_id])
+
+    def test_the_next_exit_id_is_unchanged_after_a_suppressed_retry(self):
+        """The consequence, stated directly: the id the NEXT attempt
+        would use must not have moved."""
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+        first_id = position.exit_client_order_ids[0]
+        venue._existing = {"order_id": "brk_1",
+                           "client_order_id": first_id,
+                           "status": "SUBMITTED", "raw_status": "accepted",
+                           "filled_quantity": 0.0,
+                           "average_fill_price": None}
+        manager.submit_exit(intent)
+        self.assertEqual(
+            exit_client_order_id(DECISION, position.exit_attempts),
+            first_id,
+            "the next attempt would mint a different id, which the venue "
+            "would accept as a second order")
+
+    def test_only_one_order_ever_reached_the_venue(self):
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+        venue._existing = {"order_id": "brk_1",
+                           "client_order_id":
+                               position.exit_client_order_ids[0],
+                           "status": "SUBMITTED", "raw_status": "accepted",
+                           "filled_quantity": 0.0,
+                           "average_fill_price": None}
+        manager.submit_exit(intent)
+        self.assertEqual(len(venue.submits), 1)
+
+    def test_a_proven_remainder_does_advance_the_attempt(self):
+        """The control, driven by evidence rather than by hand.
+
+        Attempt 1 is CANCELLED with only part of the position filled,
+        so a remainder genuinely exists that the suppressed id can
+        never close. Only then is a second attempt correct.
+        """
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+        first_id = position.exit_client_order_ids[0]
+        self.assertEqual(position.exit_attempts, 1)
+
+        manager.order_ledger.record_observation(
+            first_id, {"order_id": "brk_1", "status": "CANCELLED",
+                       "raw_status": "canceled", "filled_quantity": 0.3,
+                       "remaining_quantity": 0.7,
+                       "average_fill_price": 99.0},
+            "2026-10-02T19:10:00+00:00", session_date=SESSION)
+
+        venue._existing = None
+        manager.submit_exit(intent)
+        self.assertEqual(position.exit_attempts, 2)
+        self.assertEqual(position.exit_client_order_ids[1],
+                         exit_client_order_id(DECISION, 2))
+        self.assertEqual(len(venue.submits), 2)
+
+    def test_a_fully_filled_attempt_does_not_advance(self):
+        """Nothing is left to close, so a second order would sell what
+        the agent no longer holds."""
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+        first_id = position.exit_client_order_ids[0]
+        manager.order_ledger.record_observation(
+            first_id, {"order_id": "brk_1", "status": "FILLED",
+                       "raw_status": "filled", "filled_quantity": 1.0,
+                       "remaining_quantity": 0.0,
+                       "average_fill_price": 99.0},
+            "2026-10-02T19:10:00+00:00", session_date=SESSION)
+        self.assertEqual(manager._exit_attempt_for(position), 1)
+
+    def test_an_unreadable_ledger_does_not_advance_the_attempt(self):
+        """An unverifiable remainder is not a reason to put a second
+        live order into the market."""
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+
+        class Broken(InMemoryOrderLedger):
+            def get(self, cli, session_date=None):
+                raise OrderLedgerError("unreadable")
+
+        broken = Broken()
+        manager.order_ledger = broken
+        self.assertEqual(manager._exit_attempt_for(position), 1)
+
+    def test_a_missing_ledger_row_does_not_advance_the_attempt(self):
+        """An attempt whose order is not in the ledger has not been
+        shown to be finished. Advancing on that would put a second
+        live order out on the strength of a record that is simply
+        not there."""
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+        self.assertEqual(position.exit_attempts, 1)
+        # Established absence: a readable ledger with no such row.
+        manager.order_ledger = InMemoryOrderLedger()
+        self.assertEqual(manager._exit_attempt_for(position), 1)
+
+    def test_a_non_terminal_row_does_not_advance_the_attempt(self):
+        """The order is still working. A second one would double the
+        sell if the first then fills."""
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+        manager.order_ledger.record_observation(
+            position.exit_client_order_ids[0],
+            {"order_id": "brk_1", "status": "SUBMITTED",
+             "raw_status": "accepted", "filled_quantity": 0.0},
+            "2026-10-02T19:10:00+00:00", session_date=SESSION)
+        self.assertEqual(manager._exit_attempt_for(position), 1)
+
+    def test_the_attempt_never_exceeds_the_bound(self):
+        venue = Venue(fill=0.0)
+        manager, position, intent = self._position_and_manager(venue)
+        manager.submit_exit(intent)
+        position.exit_attempts = MAX_EXIT_ATTEMPTS
+        manager.order_ledger.record_observation(
+            position.exit_client_order_ids[0],
+            {"order_id": "brk_1", "status": "CANCELLED",
+             "raw_status": "canceled", "filled_quantity": 0.1,
+             "average_fill_price": 99.0},
+            "2026-10-02T19:10:00+00:00", session_date=SESSION)
+        self.assertEqual(manager._exit_attempt_for(position),
+                         MAX_EXIT_ATTEMPTS)
+
+    def test_the_attempt_bound_is_the_same_on_both_sides(self):
+        """manager.py mirrors the bound rather than importing it, so
+        that it cannot reach the submission path. Mirrors drift."""
+        from agent.positions import manager as manager_module
+        self.assertEqual(manager_module.MAX_EXIT_ATTEMPTS,
+                         MAX_EXIT_ATTEMPTS)

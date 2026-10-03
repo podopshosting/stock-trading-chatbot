@@ -16,6 +16,11 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 from ..observability import log_event
+
+# Mirrors agent/broker/execution.MAX_EXIT_ATTEMPTS. Duplicated
+# rather than imported because this module may not reach the
+# submission path - see exit_submitter. Pinned by a test.
+MAX_EXIT_ATTEMPTS = 3
 from . import exits
 from .models import (
     ExitIntent, ExitPlan, ExitReason, ManagedPosition, PositionState,
@@ -315,6 +320,44 @@ class PositionManager:
                   primary_reason=str(intent.primary_reason))
         return order
 
+    def _exit_attempt_for(self, position: ManagedPosition) -> int:
+        """Which exit attempt this submission belongs to.
+
+        Reuses the CURRENT attempt by default, because a resend is a
+        retry and a retry must carry the same deterministic id or the
+        venue cannot suppress it. Advancing unconditionally - which is
+        what this did first - meant a retry was never a retry: every
+        resend derived a new id, the venue accepted it as a second
+        order, and the mechanism built to prevent a double sell would
+        have been what caused one. The 218-mutation gate found it.
+
+        It advances only on evidence: the previous attempt's ledger row
+        is terminal with a known outcome AND the position still holds
+        quantity, so there is a genuine remainder that the suppressed
+        id can never close. Without a readable ledger it does NOT
+        advance, because an unverifiable remainder is not a reason to
+        put a second live order into the market.
+        """
+        attempts = position.exit_attempts or 0
+        if attempts < 1:
+            return 1
+        if self.order_ledger is None or not position.exit_client_order_ids:
+            return attempts
+        try:
+            row = self.order_ledger.get(position.exit_client_order_ids[-1],
+                                        session_date=self.session_date)
+        except Exception:                                 # noqa: BLE001
+            return attempts          # cannot establish it; do not advance
+        if row is None:
+            return attempts
+        if not (getattr(row, "is_terminal", False)
+                and getattr(row, "submission_outcome_known", False)):
+            return attempts
+        remaining = (position.quantity or 0.0) - (row.filled_quantity or 0.0)
+        if remaining <= 0:
+            return attempts
+        return min(attempts + 1, MAX_EXIT_ATTEMPTS)
+
     def _submit_exit_order(self, position: ManagedPosition,
                            intent: ExitIntent) -> Dict:
         """Send the exit, durably where the venue is external.
@@ -343,7 +386,7 @@ class PositionManager:
             reference_price=reference,
             risk_decision_id=position.risk_decision_id,
             ledger=self.order_ledger, session_date=self.session_date,
-            cohort=self.cohort, attempt=position.exit_attempts + 1,
+            cohort=self.cohort, attempt=self._exit_attempt_for(position),
             hypothesis_id=position.hypothesis_id)
 
     def _close(self, position: ManagedPosition,
