@@ -177,7 +177,39 @@
     <h1>Trading Agent — Operations</h1>
     <p class="sub">Development dashboard. Every stage is shown separately;
       there is no combined score.</p>
+    <!-- Session selector.
+         This exists because every dated card used to read TODAY with no
+         way to ask for another day. On a weekend that renders a system
+         with history as a system with nothing in it - "no session on
+         this date" and "no activity ever" looked identical.
+         The default is the latest session that actually HAS data, taken
+         from /agent/cohorts, not the calendar date. -->
+    <p class="sub" id="sessionBar" style="margin-top:8px">
+      <label for="sessionDate"><b>Session date</b></label>
+      <input type="date" id="sessionDate" style="margin:0 6px">
+      <button type="button" id="sessionGo">Load</button>
+      <span id="sessionNote" class="empty"></span>
+    </p>
   </header>
+
+  <!-- Orders, journal and decisions for the SELECTED session.
+       Previously unwired: the endpoints existed and returned data, and
+       nothing on this page ever called them. -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Orders <span class="empty" id="ordersDate"></span></h2>
+    <dl class="kv" id="ordersSummary"><dd class="empty">Loading…</dd></dl>
+    <div id="ordersBody"><p class="empty">Loading…</p></div>
+  </section>
+
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Journal — completed trades <span class="empty" id="journalDate"></span></h2>
+    <div id="journalBody"><p class="empty">Loading…</p></div>
+  </section>
+
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Decisions <span class="empty" id="decisionsDate"></span></h2>
+    <div id="decisionsBody"><p class="empty">Loading…</p></div>
+  </section>
 
   <!-- Autonomous paper operation -->
   <section class="card" style="margin-bottom:var(--gap)">
@@ -669,7 +701,7 @@
 
   function loadPositionsLegacy() {
     var box = document.getElementById("positions");
-    get("/agent/positions").then(function (d) {
+    get(dated("/agent/positions")).then(function (d) {
       box.innerHTML = "";
       var rows = d.positions || [];
       if (!rows.length) {
@@ -1435,7 +1467,7 @@
   ];
   function loadSessionReport() {
     var box = document.getElementById("sessionReport");
-    get("/agent/session-report").then(function (d) {
+    get(dated("/agent/session-report")).then(function (d) {
       box.innerHTML = "";
       var r = d.report;
       if (!d.written || !r) {
@@ -1598,17 +1630,217 @@
     document.getElementById("paperDetail").textContent =
       "AGENT_API_BASE is not configured; no data will load.";
   }
+
+  // ---- session date ----------------------------------------------------
+  //
+  // One variable, read by every dated loader. Null until resolved, and
+  // the loaders refuse to run rather than silently falling back to
+  // today: falling back is what made a weekend look like an empty
+  // system.
+  var SESSION_DATE = null;
+
+  function dated(path) {
+    if (!SESSION_DATE) { throw new Error("no session date resolved"); }
+    return path + (path.indexOf("?") === -1 ? "?" : "&") +
+           "date=" + encodeURIComponent(SESSION_DATE);
+  }
+
+  // "Nothing on this date" and "nothing ever" are different facts, so
+  // they get different words. An empty render that says "0" invites the
+  // wrong conclusion.
+  function emptyForDate(node, what) {
+    node.innerHTML = "";
+    node.appendChild(el("p", "empty",
+      "No " + what + " recorded for " + SESSION_DATE +
+      ". That is this date's record, not a total."));
+  }
+
+  function setSessionNote(text, cls) {
+    var n = document.getElementById("sessionNote");
+    if (!n) { return; }
+    n.className = cls || "empty";
+    n.textContent = text;
+  }
+
+  // ---- orders ----------------------------------------------------------
+  function loadOrders() {
+    var sum = document.getElementById("ordersSummary");
+    var body = document.getElementById("ordersBody");
+    document.getElementById("ordersDate").textContent = "— " + SESSION_DATE;
+    get(dated("/agent/orders")).then(function (d) {
+      // kv() takes an array and clears its parent on each call, so this
+      // is one call rather than three - three would leave only the last.
+      // read_integrity is included because it says whether the list can
+      // be trusted as complete: a PARTIAL read is indistinguishable from
+      // a quiet day if it is not shown.
+      kv(sum, [["recorded", d.total_recorded],
+               ["outstanding", d.outstanding],
+               ["read integrity", d.read_integrity || "UNKNOWN"]]);
+      var orders = d.orders || [];
+      if (!orders.length) { emptyForDate(body, "orders"); return; }
+      body.innerHTML = "";
+      var tbl = el("table");
+      var hd = el("tr");
+      ["client order id", "symbol", "intent", "status", "outcome known",
+       "filled qty", "price"]
+        .forEach(function (h) { hd.appendChild(el("th", null, h)); });
+      tbl.appendChild(hd);
+      orders.forEach(function (o) {
+        var tr = el("tr");
+        // "outcome known" is the fail-closed field: false means the
+        // agent cannot prove whether this order reached the venue, and
+        // that is the state a human has to resolve. It is shown as its
+        // own column because a blank status and an unknowable outcome
+        // are different problems.
+        var known = (o.submission_outcome_known === true) ? "yes"
+                  : (o.submission_outcome_known === false) ? "NO" : "UNKNOWN";
+        [o.client_order_id, o.symbol, o.intent,
+         o.status || o.raw_status || "UNKNOWN",
+         known,
+         // An absent quantity is UNKNOWN, not zero.
+         (o.filled_quantity === null || o.filled_quantity === undefined)
+           ? "UNKNOWN" : o.filled_quantity,
+         (o.average_fill_price === null || o.average_fill_price === undefined)
+           ? "UNKNOWN" : o.average_fill_price
+        ].forEach(function (c) { tr.appendChild(el("td", null, String(c))); });
+        tbl.appendChild(tr);
+      });
+      body.appendChild(tbl);
+      if (d.note) { body.appendChild(el("p", "empty", d.note)); }
+    }).catch(function (e) { showError(body, e); });
+  }
+
+  // ---- journal ---------------------------------------------------------
+  function loadJournal() {
+    var body = document.getElementById("journalBody");
+    document.getElementById("journalDate").textContent = "— " + SESSION_DATE;
+    get(dated("/agent/journal")).then(function (d) {
+      var trades = d.trades || [];
+      if (!trades.length) { emptyForDate(body, "completed trades"); return; }
+      body.innerHTML = "";
+      var tbl = el("table");
+      var hd = el("tr");
+      ["symbol", "opened", "closed", "exit reason", "net P&L", "R",
+       "stop held"]
+        .forEach(function (h) { hd.appendChild(el("th", null, h)); });
+      tbl.appendChild(hd);
+      trades.forEach(function (x) {
+        var tr = el("tr");
+        // exceeded_planned_risk is the stop-breach flag: a loss worse
+        // than the plan allowed. Surfaced per trade because an average
+        // R hides it, and it is the number that says whether the risk
+        // model held.
+        var held = (x.exceeded_planned_risk === true) ? "BREACHED"
+                 : (x.exceeded_planned_risk === false) ? "held" : "UNKNOWN";
+        [x.symbol, x.opened_at || "—", x.closed_at || "—",
+         x.exit_reason || "UNKNOWN",
+         (x.net_pnl === null || x.net_pnl === undefined) ? "UNKNOWN" : x.net_pnl,
+         (x.r_multiple === null || x.r_multiple === undefined)
+           ? "UNKNOWN" : x.r_multiple,
+         held
+        ].forEach(function (c) { tr.appendChild(el("td", null, String(c))); });
+        tbl.appendChild(tr);
+      });
+      body.appendChild(tbl);
+    }).catch(function (e) { showError(body, e); });
+  }
+
+  // ---- decisions -------------------------------------------------------
+  function loadDecisions() {
+    var body = document.getElementById("decisionsBody");
+    document.getElementById("decisionsDate").textContent = "— " + SESSION_DATE;
+    get(dated("/agent/decisions")).then(function (d) {
+      var rows = d.decisions || [];
+      if (!rows.length) { emptyForDate(body, "decisions"); return; }
+      body.innerHTML = "";
+      body.appendChild(el("p", "empty", rows.length + " decision(s) on " +
+                                        SESSION_DATE));
+      var tbl = el("table");
+      var hd = el("tr");
+      ["symbol", "approved", "reasons", "capital", "max loss"]
+        .forEach(function (h) { hd.appendChild(el("th", null, h)); });
+      tbl.appendChild(hd);
+      rows.slice(0, 200).forEach(function (r) {
+        var tr = el("tr");
+        var reasons = (r.reason_codes || []).join(", ") || "—";
+        [r.symbol,
+         r.approved === true ? "YES" : (r.approved === false ? "no" : "UNKNOWN"),
+         reasons,
+         (r.capital_required === null || r.capital_required === undefined)
+           ? "UNKNOWN" : r.capital_required,
+         (r.max_loss === null || r.max_loss === undefined)
+           ? "UNKNOWN" : r.max_loss
+        ].forEach(function (c) { tr.appendChild(el("td", null, String(c))); });
+        tbl.appendChild(tr);
+      });
+      body.appendChild(tbl);
+    }).catch(function (e) { showError(body, e); });
+  }
+
+  function loadDatedCards() {
+    loadOrders(); loadJournal(); loadDecisions();
+    loadPositions(); loadSessionReport();
+  }
+
+  // Resolve the default from the cohort's last recorded session rather
+  // than from the clock. If that cannot be read we say so and leave the
+  // field for the operator instead of guessing a date.
+  function resolveSessionDate() {
+    return get("/agent/cohorts").then(function (d) {
+      var cs = d.cohorts || [];
+      var last = null;
+      cs.forEach(function (c) {
+        if (c.last_session && (!last || c.last_session > last)) {
+          last = c.last_session;
+        }
+      });
+      return last;
+    }).catch(function () { return null; });
+  }
+
+  function initSessionDate() {
+    var input = document.getElementById("sessionDate");
+    var go = document.getElementById("sessionGo");
+    go.addEventListener("click", function () {
+      if (!input.value) { setSessionNote("pick a date first", "err"); return; }
+      SESSION_DATE = input.value;
+      setSessionNote("showing " + SESSION_DATE);
+      loadDatedCards();
+    });
+    var fromUrl = (new URLSearchParams(location.search)).get("date");
+    resolveSessionDate().then(function (last) {
+      var today = new Date().toISOString().slice(0, 10);
+      SESSION_DATE = fromUrl || last || today;
+      input.value = SESSION_DATE;
+      if (fromUrl) {
+        setSessionNote("from the URL");
+      } else if (last) {
+        setSessionNote(SESSION_DATE === today
+          ? "latest recorded session (today)"
+          : "latest recorded session — today (" + today +
+            ") has no session recorded");
+      } else {
+        setSessionNote("could not read the cohort, defaulted to today", "err");
+      }
+      loadDatedCards();
+    });
+  }
+
   loadReadiness();
   loadWhyNoTrade();
-  loadSessionReport();
   loadShadow();
   loadCohorts();
   loadAutonomy();
   setInterval(loadAutonomy, 60000);
   loadSwitches();
   loadLimits();
-  loadPositions();
   loadPerformance();
+  // Dated cards are driven by initSessionDate, which calls
+  // loadDatedCards once a date is resolved. They are deliberately NOT
+  // called here: a loader that ran before the date was known would read
+  // today and then be overwritten, which is the flicker that hid the
+  // problem.
+  initSessionDate();
 })();
 </script>
 </body>

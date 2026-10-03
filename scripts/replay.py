@@ -41,7 +41,29 @@ from agent.replay import scenarios                             # noqa: E402
 from agent.risk import RiskLimits                              # noqa: E402
 
 
+# The label this injection travels under. Every result produced with
+# _permissive_regime carries it, so a number lifted out of a report
+# cannot lose the condition it was measured under.
+PERMISSIVE_REGIME_SOURCE = "SYNTHETIC_PERMISSIVE"
+PERMISSIVE_REGIME_DETAIL = (
+    "regime forced to BULLISH/0.8 confidence, posture NORMAL, session "
+    "OPEN on EVERY bar - the long-only regime gate is disabled, so "
+    "these results describe the strategy WITHOUT its market filter")
+
+
 def _permissive_regime(symbol, clock):                         # noqa: ARG001
+    """A regime that always permits a long.
+
+    Not a model of the market: a deliberate removal of the regime gate
+    so the rest of the pipeline can be exercised on historical bars. On
+    real daily bars with no regime supplied the strategy refuses 100%
+    of candidates, which is the gate working correctly and also means
+    nothing downstream gets tested.
+
+    So this exists to reach the code under test, and every result built
+    with it is labelled SYNTHETIC_PERMISSIVE. A breach rate measured
+    here is a statement about the strategy with its market filter off.
+    """
     return {"regime": "BULLISH", "regime_confidence": 0.8,
             "risk_posture": "NORMAL", "market_session": "OPEN"}
 
@@ -100,6 +122,19 @@ def _load_history(symbol: str, days: int, timeframe: str):
     return bars, (f"provenance={provenance}" if provenance else "")
 
 
+def _wrap(text: str, width: int):
+    """Minimal wrapper so a long condition stays readable in a column."""
+    words, line, out = text.split(), "", []
+    for w in words:
+        if line and len(line) + 1 + len(w) > width:
+            out.append(line); line = w
+        else:
+            line = f"{line} {w}".strip()
+    if line:
+        out.append(line)
+    return out
+
+
 def _report(label: str, result, extra=None) -> None:
     d = result.as_dict()
     print("=" * 72)
@@ -111,6 +146,25 @@ def _report(label: str, result, extra=None) -> None:
     print(f"  valid               : {d['valid']}")
     if not d["valid"]:
         print(f"  VOID                : {d['lookahead_detail']}")
+    # Printed BEFORE any performance figure, not after. A condition
+    # that appears below the number it qualifies gets read second or
+    # not at all, and this one changes what the number means.
+    src = d.get("regime_source", "NONE")
+    if src == "NONE":
+        print("  regime              : NONE - no regime supplied, so the "
+              "long-only gate refuses everything")
+        print("                        This is a CONTROL, not a result.")
+    elif d.get("regime_is_synthetic", True):
+        print(f"  REGIME IS SYNTHETIC : {src}")
+        detail = d.get("regime_detail")
+        if detail:
+            for line in _wrap(detail, 52):
+                print(f"                        {line}")
+        print("                        Figures below describe the strategy "
+              "under a")
+        print("                        regime it did not observe.")
+    else:
+        print(f"  regime              : {src} (observed)")
     print(f"  bars processed      : {d.get('bars_processed')}")
     print(f"  decisions evaluated : {d.get('decisions_evaluated')}")
     print(f"  entries attempted   : {d.get('entries_attempted')}")
@@ -256,7 +310,9 @@ def main() -> int:
                               risk_limits=limits,
                               bar_interval_seconds=interval)
         result = run({args.symbol: bars}, config,
-                     regime_for=_permissive_regime)
+                     regime_for=_permissive_regime,
+                     regime_source=PERMISSIVE_REGIME_SOURCE,
+                     regime_detail=PERMISSIVE_REGIME_DETAIL)
         _report(f"HISTORY: {args.symbol} ({len(bars)} {args.timeframe} bars)",
                 result, extra={"source": "AlpacaProvider.get_bars"})
         print("\n  NOT EVIDENCE OF EDGE: one symbol is a sketch. The "

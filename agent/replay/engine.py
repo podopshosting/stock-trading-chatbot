@@ -49,9 +49,40 @@ class ReplayConfig:
     partial_fill_probability: float = 0.0
     seed: Optional[int] = 42
     risk_limits: RiskLimits = field(default_factory=RiskLimits)
+    # Where the exit distances come from.
+    #
+    # "DECISION" is the FAITHFUL mode: the live cycle reads
+    # `decision.stop_distance_pct` - derived from realised volatility,
+    # 1% to 8% - and sets target = 2x stop and trailing = stop from it.
+    # A replay that hardcodes 3/6/3 is simulating a DIFFERENT STRATEGY,
+    # and every R-multiple it produces describes that other strategy.
+    #
+    # "FIXED" is nonetheless the DEFAULT, and deliberately so.
+    #
+    # Making DECISION the default was tried and reverted. It changed
+    # which bars hit which level, which changed trade outcomes, which
+    # broke three scenarios calibrated against the 3% stop -
+    # DAILY_LOSS_LOCK_TEST, GAP_RISK_TEST, and the gap-through-the-stop
+    # case. Those scenarios are not wrong; they encode expectations
+    # about a known configuration. Changing the default would have
+    # silently reinterpreted every committed expectation and every
+    # previously reported figure, which is precisely what freezing the
+    # strategy for external validation is meant to prevent.
+    #
+    # So the faithful mode must be ASKED FOR, the two are comparable on
+    # identical data, and the divergence is a measurement rather than a
+    # migration. A future switch of the default belongs with a
+    # recalibration of the scenarios and a new cohort, not here.
+    stop_source: str = "FIXED"
+    # Used when stop_source is FIXED, and as the fallback when DECISION
+    # is asked for and the decision carries no distance. The fallback is
+    # counted, never silent: a run that fell back for most of its trades
+    # is a FIXED run wearing a DECISION label.
     stop_distance_pct: float = 3.0
     target_distance_pct: float = 6.0
     trailing_stop_pct: Optional[float] = 3.0
+    # Live couples the target to the stop at this multiple.
+    target_stop_multiple: float = 2.0
     max_hold_bars: Optional[int] = None
     evaluation_interval_seconds: int = 60
     # The bar interval, used as the fallback data age when a gap cannot
@@ -87,7 +118,9 @@ class ReplayConfig:
             "slippage_bps": self.slippage_bps,
             "partial_fill_probability": self.partial_fill_probability,
             "seed": self.seed,
+            "stop_source": self.stop_source,
             "stop_distance_pct": self.stop_distance_pct,
+            "target_stop_multiple": self.target_stop_multiple,
             "target_distance_pct": self.target_distance_pct,
             "trailing_stop_pct": self.trailing_stop_pct,
             "max_hold_bars": self.max_hold_bars,
@@ -125,6 +158,39 @@ class ReplayResult:
     # each was told. "Why A and not B" is otherwise unanswerable from
     # aggregate refusal counts.
     allocations: List[Dict] = field(default_factory=list)
+    # WHERE THE MARKET REGIME CAME FROM.
+    #
+    # The strategy is long-only and regime-gated, so the regime decides
+    # whether a candidate is ever considered at all. A replay that
+    # injects a permanently BULLISH, permanently OPEN regime has
+    # REMOVED that gate, and its numbers describe the strategy with its
+    # market filter disabled - a different and far more permissive
+    # system than the deployed one.
+    #
+    # This field exists because it did not. Historical replays were run
+    # with an injected permissive regime and the result carried no
+    # trace of it, so a breach rate could be quoted as measured "on
+    # real market data" while being conditioned on permission that was
+    # manufactured. The bars were real; the licence to trade them was
+    # not.
+    #
+    # NONE means no regime callable was supplied. Under NONE the
+    # strategy refuses every candidate, so such a run is a control -
+    # evidence that the gate works - and never a performance result.
+    regime_source: str = "NONE"
+    regime_detail: Optional[str] = None
+
+    @property
+    def regime_is_synthetic(self) -> bool:
+        """True unless the regime was genuinely observed.
+
+        Derived rather than stored, and derived to be TRUE by default:
+        anything that is not explicitly OBSERVED is synthetic. A new
+        regime source added later is therefore treated as synthetic
+        until someone states otherwise, which is the direction of error
+        that cannot overstate a result.
+        """
+        return self.regime_source != "OBSERVED"
 
     @property
     def valid(self) -> bool:
@@ -143,6 +209,9 @@ class ReplayResult:
             "dataset_id": self.dataset_id,
             "dataset_checksum": self.dataset_checksum,
             "config_name": self.config_name,
+            "regime_source": self.regime_source,
+            "regime_detail": self.regime_detail,
+            "regime_is_synthetic": self.regime_is_synthetic,
             "config_deployable": self.config_deployable,
             "contested_bars": len(self.allocations),
             "allocations": self.allocations[:50],
@@ -169,7 +238,9 @@ def run(bars: Dict[str, Sequence[Bar]],
         dataset_id: Optional[str] = None,
         dataset_checksum: Optional[str] = None,
         config_name: str = "ad-hoc",
-        config_deployable: bool = True) -> ReplayResult:
+        config_deployable: bool = True,
+        regime_source: Optional[str] = None,
+        regime_detail: Optional[str] = None) -> ReplayResult:
     """Replay the pipeline over `bars`.
 
     `bars` maps symbol to a chronological bar series. `catalyst_for` and
@@ -178,6 +249,13 @@ def run(bars: Dict[str, Sequence[Bar]],
     module reaching for a live service.
     """
     config = config or ReplayConfig()
+    # A caller that supplies a regime but does not say where it came
+    # from gets SYNTHETIC_UNDECLARED, not OBSERVED. An unnamed regime is
+    # precisely the case most likely to be quoted as if it had been
+    # measured, so the default names the doubt.
+    if regime_source is None:
+        regime_source = ("SYNTHETIC_UNDECLARED" if regime_for is not None
+                         else "NONE")
     clock = ReplayClock()
     series = {symbol: PointInTimeSeries(symbol, list(sym_bars), clock)
               for symbol, sym_bars in bars.items()}
@@ -322,11 +400,27 @@ def run(bars: Dict[str, Sequence[Bar]],
                 positions_opened += 1
                 daily_capital_used += decision.capital_required
                 fill = order["average_fill_price"]
+                # Mirror the live cycle exactly: one distance drives
+                # the stop, the target and the trail. See stop_source.
+                stop_pct = config.stop_distance_pct
+                target_pct = config.target_distance_pct
+                trail_pct = config.trailing_stop_pct
+                if config.stop_source == "DECISION":
+                    from_decision = getattr(
+                        decision, "stop_distance_pct", None)
+                    if from_decision is None:
+                        stats["stop_fallbacks"] = (
+                            stats.get("stop_fallbacks", 0) + 1)
+                    else:
+                        stop_pct = float(from_decision)
+                        target_pct = stop_pct * config.target_stop_multiple
+                        trail_pct = stop_pct
+                        stats["stops_from_decision"] = (
+                            stats.get("stops_from_decision", 0) + 1)
                 plan = ExitPlan(
-                    stop_price=fill * (1 - config.stop_distance_pct / 100.0),
-                    target_price=fill * (
-                        1 + config.target_distance_pct / 100.0),
-                    trailing_stop_pct=config.trailing_stop_pct,
+                    stop_price=fill * (1 - stop_pct / 100.0),
+                    target_price=fill * (1 + target_pct / 100.0),
+                    trailing_stop_pct=trail_pct,
                     stop_mechanism=StopMechanism.ENGINE_POLLED,
                     evaluation_interval_seconds=(
                         config.evaluation_interval_seconds))
@@ -375,6 +469,8 @@ def run(bars: Dict[str, Sequence[Bar]],
             dataset_checksum=dataset_checksum,
             config_name=config_name,
             config_deployable=config_deployable,
+        regime_source=regime_source,
+        regime_detail=regime_detail,
             lookahead_detected=True, lookahead_detail=str(exc),
             warnings=warnings + [
                 "this run reached for data it should not have seen; the "
@@ -412,6 +508,8 @@ def run(bars: Dict[str, Sequence[Bar]],
         allocations=allocations,
         dataset_id=dataset_id, dataset_checksum=dataset_checksum,
         config_name=config_name, config_deployable=config_deployable,
+        regime_source=regime_source,
+        regime_detail=regime_detail,
         warnings=warnings)
 
 
