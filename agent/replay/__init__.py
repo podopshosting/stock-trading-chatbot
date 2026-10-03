@@ -26,13 +26,13 @@ from .data import (Bar, PointInTimeEvidence, PointInTimeFundamentals,
                    SURVIVORSHIP_BIASED, SURVIVORSHIP_POINT_IN_TIME,
                    SURVIVORSHIP_UNKNOWN, Universe,
                    adjust_bars_for_splits, find_discontinuities)
-from . import scenarios
+from . import configs, datasets, scenarios
 from .engine import (
     CONFIG_VERSION, DEFAULT_WARMUP_BARS, ReplayConfig, ReplayResult, run,
 )
 
 __all__ = [
-    "scenarios",
+    "configs", "datasets", "scenarios",
     "CONFIG_VERSION", "DEFAULT_WARMUP_BARS", "Bar", "LookaheadError",
     "PointInTimeEvidence", "PointInTimeFundamentals",
     "PointInTimeSeries", "ReplayBroker",

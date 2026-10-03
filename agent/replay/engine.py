@@ -99,6 +99,13 @@ class ReplayResult:
     lookahead_detected: bool = False
     lookahead_detail: str = ""
     warnings: List[str] = field(default_factory=list)
+    # What this ran against. A result that cannot name its dataset is
+    # not an experiment, because "the last 250 days" means something
+    # different every day.
+    dataset_id: Optional[str] = None
+    dataset_checksum: Optional[str] = None
+    config_name: str = "ad-hoc"
+    config_deployable: bool = True
 
     @property
     def valid(self) -> bool:
@@ -114,6 +121,10 @@ class ReplayResult:
             "valid": self.valid,
             "lookahead_detected": self.lookahead_detected,
             "lookahead_detail": self.lookahead_detail,
+            "dataset_id": self.dataset_id,
+            "dataset_checksum": self.dataset_checksum,
+            "config_name": self.config_name,
+            "config_deployable": self.config_deployable,
             "config": self.config,
             "bars_processed": self.bars_processed,
             "decisions_evaluated": self.decisions_evaluated,
@@ -133,7 +144,11 @@ def run(bars: Dict[str, Sequence[Bar]],
         evidence: Optional[Sequence[Dict]] = None,
         catalyst_for=None,
         regime_for=None,
-        spread_pct: float = 0.05) -> ReplayResult:
+        spread_pct: float = 0.05,
+        dataset_id: Optional[str] = None,
+        dataset_checksum: Optional[str] = None,
+        config_name: str = "ad-hoc",
+        config_deployable: bool = True) -> ReplayResult:
     """Replay the pipeline over `bars`.
 
     `bars` maps symbol to a chronological bar series. `catalyst_for` and
@@ -312,6 +327,10 @@ def run(bars: Dict[str, Sequence[Bar]],
             positions_open_at_end=manager.open_count,
             rejections=rejections,
             performance={"verdict": "VOID_LOOKAHEAD"},
+            dataset_id=dataset_id,
+            dataset_checksum=dataset_checksum,
+            config_name=config_name,
+            config_deployable=config_deployable,
             lookahead_detected=True, lookahead_detail=str(exc),
             warnings=warnings + [
                 "this run reached for data it should not have seen; the "
@@ -346,6 +365,8 @@ def run(bars: Dict[str, Sequence[Bar]],
         unfillable_orders=broker.unfillable_orders,
         positions_open_at_end=manager.open_count,
         rejections=rejections, performance=performance,
+        dataset_id=dataset_id, dataset_checksum=dataset_checksum,
+        config_name=config_name, config_deployable=config_deployable,
         warnings=warnings)
 
 

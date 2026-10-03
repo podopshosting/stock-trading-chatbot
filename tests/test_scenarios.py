@@ -315,3 +315,132 @@ class TestDeclarationsMatchBehaviour(unittest.TestCase):
     def test_at_least_one_scenario_expects_a_legitimate_breach(self):
         self.assertTrue(any(scenarios.build(n).may_exceed_1r
                             for n in scenarios.ALL))
+
+
+class TestEveryScenarioNameIsVerifiedAgainstItsData(unittest.TestCase):
+    """A scenario's identity must be a property of its BARS.
+
+    Two scenarios were named after conditions they did not create -
+    false_breakout returned +2.51R and consecutive_losses +1.66R,
+    because each thrust reached the profit target before the failure
+    arrived. Both were noticed only by reading the P&L, which is the
+    wrong instrument: a profitable trap is still a trap that never
+    happened, and an unprofitable one proves nothing either.
+
+    These checks run before anything is replayed.
+    """
+
+    def test_every_scenario_declares_what_its_data_guarantees(self):
+        """An unverifiable name is the problem this exists to prevent,
+        so a scenario with no declared properties FAILS."""
+        for name in sorted(scenarios.ALL):
+            with self.subTest(name=name):
+                rows = scenarios.verify_guarantees(scenarios.build(name))
+                self.assertTrue(rows)
+                self.assertNotIn(
+                    "has no entry in GUARANTEES",
+                    " ".join(r["detail"] for r in rows))
+
+    def test_every_declared_property_holds(self):
+        for name in sorted(scenarios.ALL):
+            for row in scenarios.verify_guarantees(scenarios.build(name)):
+                with self.subTest(name=name, prop=row["property"]):
+                    self.assertTrue(
+                        row["ok"],
+                        f"{name} does not generate what its name claims: "
+                        f"{row['property']} {row['detail']}")
+
+    def test_the_gap_scenario_really_gaps_through_the_stop(self):
+        bars = scenarios.build("gap_through_stop").bars["XYZ"]
+        self.assertGreater(scenarios._largest_adverse_gap_pct(bars), 3.0)
+
+    def test_the_smooth_scenario_contains_no_such_gap(self):
+        """The counterpart. If both gapped, the gap finding would be
+        about the generator rather than about gaps."""
+        bars = scenarios.build("slow_bleed").bars["XYZ"]
+        self.assertLess(scenarios._largest_adverse_gap_pct(bars), 3.0)
+
+    def test_the_halt_scenario_really_has_a_hole(self):
+        bars = scenarios.build("trading_halt").bars["XYZ"]
+        self.assertGreaterEqual(scenarios._timeline_holes(bars), 10)
+
+    def test_the_control_has_no_hole(self):
+        bars = scenarios.build("grind_up").bars["XYZ"]
+        self.assertEqual(scenarios._timeline_holes(bars), 0)
+
+    def test_the_loss_run_really_contains_repeated_losing_cycles(self):
+        bars = scenarios.build("consecutive_losses").bars["XYZ"]
+        self.assertGreaterEqual(scenarios._down_cycles(bars), 3)
+        self.assertGreater(len({str(b.timestamp)[:10] for b in bars}), 1,
+                           "a run of losses needs more than one session, "
+                           "because the daily budget resets")
+
+    def test_the_thin_scenario_really_is_below_the_liquidity_floor(self):
+        from agent.risk import RiskLimits
+        floor = RiskLimits().min_dollar_volume
+        for bar in scenarios.build("low_liquidity").bars["XYZ"]:
+            self.assertLess(bar.volume * bar.close, floor)
+
+    def test_the_control_is_above_the_liquidity_floor(self):
+        from agent.risk import RiskLimits
+        floor = RiskLimits().min_dollar_volume
+        for bar in scenarios.build("grind_up").bars["XYZ"]:
+            self.assertGreater(bar.volume * bar.close, floor)
+
+
+class TestTheGuaranteeCheckerCanActuallyFail(unittest.TestCase):
+    """The falsifying control for the checker itself.
+
+    Every scenario currently satisfies its declared properties, so a
+    mutation making `verify_guarantees` always return ok=True survived -
+    and so did one treating an UNDECLARED scenario as satisfied. A
+    checker that cannot report a failure is not checking anything, so
+    these feed it data it must reject.
+    """
+
+    def _scenario_with(self, name, bars):
+        from agent.replay.scenarios import Scenario
+        return Scenario(name=name, question="q", expectation="e",
+                        bars={"XYZ": bars})
+
+    def test_a_flat_series_fails_the_uptrend_guarantee(self):
+        flat = scenarios._calm(300, drift=0.0, vol=0.0001)
+        rows = scenarios.verify_guarantees(
+            self._scenario_with("grind_up", flat))
+        self.assertTrue(rows)
+        self.assertFalse(all(r["ok"] for r in rows),
+                         "a flat series satisfied 'ends materially "
+                         "higher', so the checker is not checking")
+
+    def test_a_gapless_series_fails_the_gap_guarantee(self):
+        calm = scenarios._calm(300)
+        rows = scenarios.verify_guarantees(
+            self._scenario_with("gap_through_stop", calm))
+        self.assertFalse(all(r["ok"] for r in rows))
+
+    def test_a_continuous_series_fails_the_halt_guarantee(self):
+        rows = scenarios.verify_guarantees(
+            self._scenario_with("trading_halt", scenarios._calm(300)))
+        self.assertFalse(all(r["ok"] for r in rows))
+
+    def test_a_liquid_series_fails_the_thin_guarantee(self):
+        rows = scenarios.verify_guarantees(
+            self._scenario_with("low_liquidity", scenarios._calm(300)))
+        self.assertFalse(all(r["ok"] for r in rows))
+
+    def test_an_undeclared_scenario_fails_rather_than_passing(self):
+        """An unverifiable name is the problem, so silence must not read
+        as success."""
+        rows = scenarios.verify_guarantees(
+            self._scenario_with("a_name_nobody_declared",
+                                scenarios._calm(300)))
+        self.assertTrue(rows)
+        self.assertFalse(any(r["ok"] for r in rows))
+        self.assertIn("GUARANTEES", " ".join(r["detail"] for r in rows))
+
+    def test_a_predicate_that_raises_is_a_failure_not_a_pass(self):
+        """An exception inside a property check must not be mistaken for
+        the property holding."""
+        rows = scenarios.verify_guarantees(
+            self._scenario_with("grind_up", []))
+        self.assertFalse(all(r["ok"] for r in rows))

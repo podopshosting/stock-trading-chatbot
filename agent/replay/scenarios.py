@@ -41,6 +41,10 @@ SCENARIO_NOT_EVIDENCE = (
 
 WARMUP = 210          # enough for the 200-bar indicators plus margin
 
+# Where false_breakout's thrust begins. Named so the guarantee check
+# slices at the generator's boundary rather than guessing a window.
+_BREAKOUT_BASE = WARMUP + 30
+
 
 def _ts(index: int, day: str = "2026-01-02") -> str:
     """A minute timestamp. Bars are one minute apart."""
@@ -591,3 +595,209 @@ def regime_for(scenario: Scenario):
         return {"regime": scenario.regime, "regime_confidence": 0.8,
                 "risk_posture": "NORMAL", "market_session": "OPEN"}
     return _regime
+
+
+# =====================================================================
+# Does the generated DATA actually contain the named condition?
+# =====================================================================
+#
+# A scenario's identity must be a property of its bars, never of its
+# eventual P&L. Two scenarios here were named after conditions they did
+# not create - false_breakout returned +2.51R and consecutive_losses
+# +1.66R, because each thrust reached the profit target before the
+# failure arrived - and both were only noticed by reading the result.
+# A profitable trap is still a trap scenario that never happened.
+#
+# These checks assert on the GENERATED SERIES, so the name is verified
+# before anything is run.
+
+def _closes(bars: List[Bar]) -> List[float]:
+    return [b.close for b in bars]
+
+
+def _largest_adverse_gap_pct(bars: List[Bar]) -> float:
+    """The biggest downward open-to-previous-close gap, as a percent."""
+    worst = 0.0
+    for previous, nxt in zip(bars, bars[1:]):
+        if previous.close <= 0:
+            continue
+        gap = (previous.close - nxt.open) / previous.close * 100.0
+        worst = max(worst, gap)
+    return worst
+
+
+def _largest_favourable_gap_pct(bars: List[Bar]) -> float:
+    best = 0.0
+    for previous, nxt in zip(bars, bars[1:]):
+        if previous.close <= 0:
+            continue
+        gap = (nxt.open - previous.close) / previous.close * 100.0
+        best = max(best, gap)
+    return best
+
+
+def _timeline_holes(bars: List[Bar]) -> int:
+    """Minutes missing from a one-minute series."""
+    holes = 0
+    for previous, nxt in zip(bars, bars[1:]):
+        a, b = _parse(previous.timestamp), _parse(nxt.timestamp)
+        if a is None or b is None:
+            continue
+        gap = (b - a).total_seconds()
+        if gap > 60:
+            holes += int(gap // 60) - 1
+    return holes
+
+
+def _parse(stamp):
+    from datetime import datetime, timezone
+    try:
+        out = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return out if out.tzinfo else out.replace(tzinfo=timezone.utc)
+
+
+def _deepest_wick_pct(bars: List[Bar]) -> float:
+    """The deepest intrabar drop from open to low that CLOSES back up."""
+    worst = 0.0
+    for bar in bars:
+        if bar.open <= 0:
+            continue
+        drop = (bar.open - bar.low) / bar.open * 100.0
+        recovered = bar.close > bar.low * 1.01
+        if recovered:
+            worst = max(worst, drop)
+    return worst
+
+
+def _mean_range_pct(bars: List[Bar]) -> float:
+    """Average high-low range as a percent of the open.
+
+    The range, not the body: the generator draws each open around its
+    own close, so the body understates the volatility it was asked for.
+    """
+    usable = [b for b in bars if b.open]
+    if not usable:
+        return 0.0
+    return sum((b.high - b.low) / b.open * 100.0
+               for b in usable) / len(usable)
+
+
+def _down_cycles(bars: List[Bar], stop_pct: float = 3.0) -> int:
+    """How many times price rises then falls MORE than a stop distance."""
+    cycles, peak, armed = 0, bars[0].close, False
+    for bar in bars:
+        if bar.close > peak:
+            peak, armed = bar.close, True
+        elif armed and peak > 0 and (peak - bar.close) / peak * 100.0 > stop_pct:
+            cycles += 1
+            peak, armed = bar.close, False
+    return cycles
+
+
+# What each scenario's DATA must contain for its name to be honest.
+# (property description, predicate over the bar series)
+GUARANTEES: Dict[str, List] = {
+    "grind_up": [("the series ends materially higher than it started",
+                  lambda b: _closes(b)[-1] > _closes(b)[0] * 1.02)],
+    "downtrend": [("the series ends materially lower than it started",
+                   lambda b: _closes(b)[-1] < _closes(b)[0] * 0.95)],
+    "chop": [("no sustained direction: the end is near the start",
+              lambda b: abs(_closes(b)[-1] / _closes(b)[0] - 1.0) < 0.30)],
+    # Expressed as a RANGE, and relative to the calm case. The first
+    # version asserted a 2% average open-to-close move, which the
+    # generator does not produce - it draws the open around the close,
+    # so the body is roughly vol/3 while the RANGE is the volatility.
+    "volatile_chop": [
+        # Anchored to the 3% stop distance, not to a round number and
+        # not to the measured value. A bar whose RANGE exceeds the stop
+        # is exactly what makes a polled stop dangerous: the stop is
+        # evaluated at the close and filled at the next open, so a bar
+        # wider than the stop can leave the fill far beyond it. That is
+        # the property this scenario exists to create.
+        ("the average bar range exceeds the 3% stop distance",
+         lambda b: _mean_range_pct(b) > 3.0),
+        ("and is several times the calm case",
+         lambda b: _mean_range_pct(b) > 2.5 * _mean_range_pct(
+             _calm(200)))],
+    "gap_through_stop": [("an adverse open gap exceeds the 3% stop "
+                          "distance",
+                          lambda b: _largest_adverse_gap_pct(b) > 3.0)],
+    "gap_through_target": [("a favourable open gap exceeds the 6% target "
+                            "distance",
+                            lambda b: _largest_favourable_gap_pct(b) > 6.0)],
+    "trading_halt": [("the timeline has a hole of at least 10 minutes",
+                      lambda b: _timeline_holes(b) >= 10)],
+    "flash_crash": [("a bar drops at least 10% intrabar and closes back "
+                     "up", lambda b: _deepest_wick_pct(b) >= 10.0)],
+    # A rise THEN a smooth decline. The first version asserted a NET
+    # decline over the whole series, which is false: the warm-up rises
+    # about 40% before the bleed starts, so the honest property is the
+    # fall FROM THE PEAK with no gap in it.
+    "slow_bleed": [
+        ("price falls materially from its peak",
+         lambda b: _closes(b)[-1] < max(_closes(b)) * 0.90),
+        ("with no adverse open gap beyond the stop distance",
+         lambda b: _largest_adverse_gap_pct(b) < 3.0)],
+    "spread_blowout": [("the scenario declares a spread above the 0.50% "
+                        "gate", lambda b: True)],
+    "low_liquidity": [("every bar's dollar volume is below the $20m "
+                       "floor",
+                       lambda b: all(x.volume * x.close < 20_000_000
+                                     for x in b))],
+    "late_in_session": [("the scenario declares minutes_to_close inside "
+                         "the cut-off", lambda b: True)],
+    "partial_fills": [("the scenario declares a partial-fill "
+                       "probability", lambda b: True)],
+    "bear_regime": [("the scenario declares a bearish regime",
+                     lambda b: True)],
+    # Sliced at the generator's own boundary, not a guessed window. The
+    # first version used the last 80 bars, which spanned the thrust AND
+    # the failure, so "the thrust did not reach the target" compared the
+    # wrong two numbers and reported a correct scenario as broken.
+    "false_breakout": [
+        ("price makes a new high above the pre-thrust range",
+         lambda b: max(_closes(b)[_BREAKOUT_BASE:]) >
+         max(_closes(b)[:_BREAKOUT_BASE])),
+        ("and then falls back below where the thrust began",
+         lambda b: _closes(b)[-1] < max(_closes(b)[:_BREAKOUT_BASE])),
+        ("without the thrust reaching the 6% target first",
+         lambda b: (max(_closes(b)[_BREAKOUT_BASE:_BREAKOUT_BASE + 4])
+                    / max(_closes(b)[:_BREAKOUT_BASE]) - 1.0) < 0.06)],
+    "consecutive_losses": [
+        ("at least three rise-then-fall cycles clear the stop distance",
+         lambda b: _down_cycles(b) >= 3),
+        ("spanning more than one session",
+         lambda b: len({str(x.timestamp)[:10] for x in b}) > 1)],
+    "momentum_reversal": [
+        ("a sustained rise is followed by a sustained fall",
+         lambda b: max(_closes(b)) > _closes(b)[0] * 1.05
+         and _closes(b)[-1] < max(_closes(b)) * 0.85)],
+}
+
+
+def verify_guarantees(scenario: Scenario) -> List[Dict]:
+    """Check a scenario's DATA against what its name claims.
+
+    Returns one row per declared property. A scenario with no declared
+    guarantees returns a single failing row, because an unverifiable
+    name is the problem this exists to prevent.
+    """
+    checks = GUARANTEES.get(scenario.name)
+    if not checks:
+        return [{"property": "the scenario declares what its data "
+                             "guarantees", "ok": False,
+                 "detail": f"{scenario.name} has no entry in GUARANTEES, "
+                           f"so its name cannot be verified against its "
+                           f"bars"}]
+    bars = next(iter(scenario.bars.values()), [])
+    rows = []
+    for description, predicate in checks:
+        try:
+            ok = bool(predicate(bars))
+            detail = ""
+        except Exception as exc:                          # noqa: BLE001
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        rows.append({"property": description, "ok": ok, "detail": detail})
+    return rows

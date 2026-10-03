@@ -87,6 +87,8 @@ RPL_DATA = REPO / "agent" / "replay" / "data.py"
 RPL_BROKER = REPO / "agent" / "replay" / "broker.py"
 RPL_ENGINE = REPO / "agent" / "replay" / "engine.py"
 RPL_SCENARIOS = REPO / "agent" / "replay" / "scenarios.py"
+RPL_DATASETS = REPO / "agent" / "replay" / "datasets.py"
+RPL_CONFIGS = REPO / "agent" / "replay" / "configs.py"
 
 ORC_MODELS = REPO / "agent" / "orchestration" / "models.py"
 ORC_DAY = REPO / "agent" / "orchestration" / "day.py"
@@ -784,6 +786,123 @@ MUTATIONS = [
         old="        return r < -1.0",
         new="        return False  # MUTATION",
         expect=["breach", "stop", "planned risk", "1R"],
+    ),
+    # --- canonical datasets. "AAPL, last 250 days" means something
+    # --- different every day, so a dataset is addressed by its content
+    # --- and the address is verified on every read.
+    Mutation(
+        name="load-a-dataset-without-verifying-its-checksum",
+        description="trust the manifest's id without checking the bars "
+                    "still match it",
+        path=RPL_DATASETS,
+        old='    if actual != manifest_raw.get("checksum"):',
+        new="    if False:  # MUTATION",
+        expect=["checksum", "tampered", "address"],
+    ),
+    Mutation(
+        name="stop-counting-missing-intervals",
+        description="report a series with holes as complete",
+        path=RPL_DATASETS,
+        old='            report["missing_intervals"] += missed',
+        new="            pass  # MUTATION",
+        expect=["missing", "hole", "complete"],
+    ),
+    Mutation(
+        name="stop-counting-dropped-duplicates",
+        description="drop a duplicate bar silently, so a provider "
+                    "artefact leaves no trace in the manifest",
+        path=RPL_DATASETS,
+        old='            report["duplicates_dropped"] += 1',
+        new="            pass  # MUTATION",
+        expect=["duplicate", "counted"],
+    ),
+    Mutation(
+        name="leave-the-symbol-out-of-the-dataset-address",
+        description="two symbols with identical bars collide, so a "
+                    "replay of one is reported under the other's id",
+        path=RPL_DATASETS,
+        old="        digest.update(symbol.encode())",
+        new="        pass  # MUTATION",
+        expect=["symbol", "address", "collide"],
+    ),
+    Mutation(
+        name="count-weekends-as-missing-daily-bars",
+        description="report 111 holes in 250 trading days, which made "
+                    "is_complete false for every daily dataset",
+        path=RPL_DATASETS,
+        old="    missing, cursor = 0, a.date() + timedelta(days=1)",
+        new="    return int((b - a).total_seconds() // 86400) - 1"
+            "  # MUTATION\n"
+            "    missing, cursor = 0, a.date() + timedelta(days=1)",
+        expect=["weekend", "missing", "daily"],
+    ),
+    Mutation(
+        name="reject-naive-timestamps-instead-of-reading-them-as-utc",
+        description="drop every bar whose timestamp carries no offset",
+        path=RPL_DATASETS,
+        old="        parsed = parsed.replace(tzinfo=timezone.utc)",
+        new="        return None  # MUTATION",
+        expect=["naive", "utc"],
+    ),
+    # --- replay configurations. Exactly one is deployable, and it is
+    # --- the one that changes nothing.
+    Mutation(
+        name="make-every-replay-config-deployable",
+        description="let a test configuration's results be quoted as "
+                    "current-strategy performance",
+        path=RPL_CONFIGS,
+        old="    deployable: bool = False",
+        new="    deployable: bool = True  # MUTATION",
+        expect=["deployable", "default"],
+    ),
+    Mutation(
+        name="drop-the-test-only-label",
+        description="publish an altered-risk result with no mark saying "
+                    "the risk limits were not the live ones",
+        path=RPL_CONFIGS,
+        old='            "label": None if self.deployable else TEST_ONLY_LABEL,',
+        new='            "label": None,  # MUTATION',
+        expect=["label", "test"],
+    ),
+    Mutation(
+        name="silently-ignore-an-unknown-risk-override",
+        description="a typo in an override leaves the limit at its live "
+                    "value, so the configuration proves nothing",
+        path=RPL_CONFIGS,
+        old="        if unknown:\n            raise KeyError(",
+        new="        if False:  # MUTATION\n            raise KeyError(",
+        expect=["unknown", "override", "refused"],
+    ),
+    Mutation(
+        name="pair-every-config-with-the-wrong-scenario",
+        description="run each guard's configuration against the benign "
+                    "control, where the guard cannot fire",
+        path=RPL_CONFIGS,
+        old='    scenario: str = "grind_up"',
+        new='    scenario: str = "chop"  # MUTATION',
+        expect=["exposes", "scenario", "guard"],
+    ),
+    # --- a scenario's identity is a property of its BARS, never of its
+    # --- eventual P&L. Two scenarios were named after conditions they
+    # --- did not create.
+    Mutation(
+        name="treat-an-undeclared-guarantee-as-satisfied",
+        description="let a scenario with no declared properties pass, "
+                    "so an unverifiable name reads as verified",
+        path=RPL_SCENARIOS,
+        old="    checks = GUARANTEES.get(scenario.name)",
+        new="    checks = GUARANTEES.get(scenario.name) or "
+            '[("skipped", lambda b: True)]  # MUTATION',
+        expect=["undeclared", "GUARANTEES", "silence"],
+    ),
+    Mutation(
+        name="never-run-the-guarantee-predicate",
+        description="report every property as holding without checking "
+                    "any of them",
+        path=RPL_SCENARIOS,
+        old="            ok = bool(predicate(bars))",
+        new="            ok = True  # MUTATION",
+        expect=["flat", "gapless", "checker"],
     ),
     # --- scenario variables that were constants in disguise. Each one
     # --- silently disabled a risk control, so a backtest reported that

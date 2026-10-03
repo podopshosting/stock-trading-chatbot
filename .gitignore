@@ -65,3 +65,13 @@ lambda-packages/
 *key*.txt
 *secret*.json
 *credentials*.json
+
+# Replay datasets are reproducible ARTEFACTS, not source.
+#
+# They are also vendor market data: committing Alpaca bars to a
+# repository is redistribution, which their terms govern and which this
+# project has no need to do. The pipeline and the manifest schema are
+# the code; a dataset is rebuilt from its manifest by whoever has
+# credentials. The checksum is what makes a result reproducible, not the
+# bytes being in git.
+datasets/
