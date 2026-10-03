@@ -192,6 +192,175 @@
     </p>
   </header>
 
+  <!-- ================= STOCK ANALYSIS WORKBENCH =================
+       The primary entry point. Before this existed the only way to ask
+       "what does the system think about AAPL?" was to read twelve
+       unrelated cards and assemble the answer by hand.
+       Everything here is analysis. Nothing on this page can submit an
+       order; the read API has no broker. -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Stock analysis</h2>
+    <p class="sub">Analyse current signals, catalysts, company data and the
+      risk decision for one symbol. No trade is placed and no order is
+      submitted — this API has no broker attached.</p>
+    <p>
+      <label for="symInput"><b>Symbol</b></label>
+      <input id="symInput" type="text" value="AAPL" maxlength="12"
+             style="margin:0 6px;text-transform:uppercase;width:9em"
+             autocapitalize="characters" spellcheck="false">
+      <button type="button" id="symGo">Analyze stock</button>
+      <button type="button" id="symRefresh">Refresh data</button>
+      <span id="symNote" class="empty"></span>
+    </p>
+
+    <!-- The verdict first, because it is the question being asked. -->
+    <h3>Would the agent trade this right now?</h3>
+    <div id="anVerdict"><p class="empty">Enter a symbol and press Analyze.</p></div>
+
+    <h3>Market</h3>
+    <dl class="kv" id="anMarket"><dd class="empty">—</dd></dl>
+    <h3>Regime</h3>
+    <dl class="kv" id="anRegime"><dd class="empty">—</dd></dl>
+    <h3>Signals</h3>
+    <dl class="kv" id="anSignals"><dd class="empty">—</dd></dl>
+    <h3>Evidence and catalysts</h3>
+    <dl class="kv" id="anEvidence"><dd class="empty">—</dd></dl>
+    <h3>Hypothesis</h3>
+    <dl class="kv" id="anHypothesis"><dd class="empty">—</dd></dl>
+    <div id="anHypReasons"></div>
+    <h3>Risk decision</h3>
+    <dl class="kv" id="anRisk"><dd class="empty">—</dd></dl>
+    <h3>Company context</h3>
+    <dl class="kv" id="anCompany"><dd class="empty">—</dd></dl>
+    <h3>Prediction</h3>
+    <div id="anPrediction"><p class="empty">—</p></div>
+  </section>
+
+  <!-- ================= SIMULATION WORKBENCH =================
+       Three modes over one symbol. Everything here is research: the
+       simulation API is a separate Lambda precisely so that the read
+       API can keep its no-broker guarantee, and neither can place an
+       order. -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Test / simulate this stock</h2>
+    <p class="sub">Run historical and synthetic tests through the same
+      strategy modules that run live. No broker order is submitted — the
+      simulation service has no live venue adapter.</p>
+    <p>
+      <label for="simMode"><b>Mode</b></label>
+      <select id="simMode" style="margin:0 6px">
+        <option value="HISTORICAL">Historical replay</option>
+        <option value="SCENARIO">Synthetic scenario</option>
+        <option value="HYPOTHETICAL">Hypothetical trade</option>
+      </select>
+      <span id="simSymbolNote" class="empty"></span>
+    </p>
+
+    <div id="simHistorical">
+      <p>
+        <label for="simDays"><b>Bars</b></label>
+        <input id="simDays" type="number" value="250" min="20" max="2000"
+               style="width:6em;margin:0 6px">
+        <label for="simTf"><b>Timeframe</b></label>
+        <select id="simTf" style="margin:0 6px">
+          <option value="1day">1 day</option>
+          <option value="1hour">1 hour</option>
+          <option value="15min">15 min</option>
+          <option value="5min">5 min</option>
+          <option value="1min">1 min</option>
+        </select>
+        <label for="simRegime"><b>Regime</b></label>
+        <select id="simRegime" style="margin:0 6px">
+          <option value="NONE">None (control — expect zero trades)</option>
+          <option value="SYNTHETIC_PERMISSIVE">Synthetic permissive (gate OFF)</option>
+        </select>
+      </p>
+      <p class="empty">With no regime the long-only gate refuses every
+        candidate, which is the gate working and produces a control run.
+        Synthetic permissive DISABLES the market filter, so any result is
+        a statement about the strategy without it.</p>
+    </div>
+
+    <div id="simScenario" style="display:none">
+      <p>
+        <label for="simScenarioPick"><b>Scenario</b></label>
+        <select id="simScenarioPick" style="margin:0 6px">
+          <option value="">loading…</option>
+        </select>
+      </p>
+      <div id="simScenarioDetail"><p class="empty">Pick a scenario.</p></div>
+    </div>
+
+    <div id="simHypothetical" style="display:none">
+      <p>
+        <label for="hypEntry"><b>Entry price</b></label>
+        <input id="hypEntry" type="number" step="0.01" style="width:7em;margin:0 6px">
+        <label for="hypNotional"><b>Notional $</b></label>
+        <input id="hypNotional" type="number" value="25" step="1" style="width:6em;margin:0 6px">
+        <label for="hypStop"><b>Stop %</b></label>
+        <input id="hypStop" type="number" value="3" step="0.1" style="width:5em;margin:0 6px">
+        <label for="hypTarget"><b>Target %</b></label>
+        <input id="hypTarget" type="number" placeholder="2× stop" step="0.1" style="width:6em;margin:0 6px">
+      </p>
+      <p>
+        <label for="hypShock"><b>Shock %</b></label>
+        <select id="hypShock" style="margin:0 6px">
+          <option value="0">Normal movement (0%)</option>
+          <option value="-2">Gap down 2%</option>
+          <option value="-5">Gap down 5%</option>
+          <option value="-12">Gap down 12%</option>
+          <option value="3">Gap up 3%</option>
+          <option value="8">Gap up 8%</option>
+        </select>
+        <label for="hypSlip"><b>Slippage bps</b></label>
+        <input id="hypSlip" type="number" value="5" step="1" style="width:5em;margin:0 6px">
+        <button type="button" id="hypUseQuote">Use analysed price</button>
+      </p>
+    </div>
+
+    <p>
+      <label for="simStop"><b>Stop model</b></label>
+      <select id="simStop" style="margin:0 6px">
+        <option value="FIXED">FIXED 3% / 6% (simulator default)</option>
+        <option value="DECISION">DECISION-derived (faithful to live)</option>
+      </select>
+      <label for="simConfig"><b>Config</b></label>
+      <select id="simConfig" style="margin:0 6px"><option value="">loading…</option></select>
+      <button type="button" id="simRun">Run simulation</button>
+      <span id="simNote" class="empty"></span>
+    </p>
+    <div id="simResult"><p class="empty">No simulation run yet.</p></div>
+  </section>
+
+  <!-- ================= SCENARIO LAB ================= -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Scenario lab</h2>
+    <p class="sub">The canonical scenario library, read from
+      <code>agent/replay/scenarios.py</code> rather than duplicated here —
+      a copied list drifts, and a scenario whose name no longer matches
+      its behaviour is worse than a missing one.</p>
+    <div id="scenarioLab"><p class="empty">Loading…</p></div>
+  </section>
+
+  <!-- ================= PERSISTED REPLAY RUNS ================= -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Replay runs</h2>
+    <p class="sub">Every persisted run, newest first. Assumptions are shown
+      before performance: a figure without its conditions is not a result.</p>
+    <div id="replayRuns"><p class="empty">Loading…</p></div>
+    <div id="replayDetail"></div>
+  </section>
+
+  <!-- ================= PREDICTIONS ================= -->
+  <section class="card" style="margin-bottom:var(--gap)">
+    <h2>Predictions <span class="pill warn">RESEARCH ONLY</span></h2>
+    <p class="sub">Research-only forecasts. Predictions have zero influence
+      on scanner selection, hypotheses, the Risk Governor, sizing, exits or
+      any order. The prediction package may not import the decision path and
+      a test asserts it.</p>
+    <div id="predictions"><p class="empty">—</p></div>
+  </section>
+
   <!-- Orders, journal and decisions for the SELECTED session.
        Previously unwired: the endpoints existed and returned data, and
        nothing on this page ever called them. -->
@@ -1631,6 +1800,792 @@
       "AGENT_API_BASE is not configured; no data will load.";
   }
 
+
+  // ==================== STOCK ANALYSIS ==============================
+  var ANALYZED_SYMBOL = null;
+
+  // A ticker, not a search box. 1-5 letters with an optional class
+  // suffix (BRK.B). Rejected rather than sent: an unsupported symbol
+  // returns a confusing partial analysis, and "I will not guess" is a
+  // better answer than a page of UNKNOWNs that looks like a verdict.
+  function normaliseSymbol(raw) {
+    var s = String(raw || "").trim().toUpperCase();
+    if (!s) { return { ok: false, why: "enter a symbol" }; }
+    if (!/^[A-Z]{1,5}(\.[A-Z]{1,2})?$/.test(s)) {
+      return { ok: false, why: "not a ticker: 1-5 letters, optional .A suffix" };
+    }
+    return { ok: true, symbol: s };
+  }
+
+  // UNKNOWN is a value. Rendering null as "0" or as blank is the bug
+  // this whole project keeps finding, so it is written once here and
+  // every analysis field goes through it.
+  function unk(v) {
+    if (v === null || v === undefined || v === "") { return "UNKNOWN"; }
+    if (typeof v === "boolean") { return v ? "yes" : "no"; }
+    return v;
+  }
+  function pct(v, d) {
+    if (v === null || v === undefined) { return "UNKNOWN"; }
+    return Number(v).toFixed(d === undefined ? 2 : d) + "%";
+  }
+  function money(v) {
+    if (v === null || v === undefined) { return "UNKNOWN"; }
+    return "$" + Number(v).toFixed(2);
+  }
+
+  // APPEND-ONLY, deliberately.
+  //
+  // This cleared its parent in the first version, which silently
+  // deleted the verdict pill and the disclaimer that renderVerdict had
+  // already appended above it - the same defect as kv() clearing its
+  // own parent, in a function written after that one was found.
+  // Callers clear their own container; a renderer that wipes a node it
+  // does not own cannot be composed with anything.
+  function reasonList(node, title, items, cls) {
+    if (!items || !items.length) {
+      node.appendChild(el("p", "empty", "No " + title.toLowerCase() + "."));
+      return;
+    }
+    node.appendChild(el("h4", null, title));
+    var ul = el("ul");
+    items.forEach(function (r) {
+      var text = (typeof r === "string") ? r
+        : ((r.code ? r.code + ": " : "") + (r.detail || r.severity || ""));
+      ul.appendChild(el("li", cls || null, text));
+    });
+    node.appendChild(ul);
+  }
+
+  // ---- the verdict -------------------------------------------------
+  //
+  // Derived from the risk decision and the context that produced it,
+  // never from a score. The states are distinct because the remedies
+  // are distinct: MARKET_CLOSED resolves itself, BLOCKED_BY_DATA needs
+  // a feed, BLOCKED_BY_RISK needs capital or a human.
+  function verdictFor(risk, hyp) {
+    var codes = (risk && risk.reason_codes) || [];
+    function has() {
+      for (var i = 0; i < arguments.length; i++) {
+        if (codes.indexOf(arguments[i]) !== -1) { return true; }
+      }
+      return false;
+    }
+    if (risk && risk.approved === true) { return ["APPROVED", "up"]; }
+    if (risk && risk.requires_halt === true) { return ["BLOCKED_BY_HEALTH", "down"]; }
+    if (has("MARKET_CLOSED")) { return ["MARKET_CLOSED", "warn"]; }
+    if (has("STALE_MARKET_DATA", "SPREAD_TOO_WIDE", "INSUFFICIENT_LIQUIDITY")) {
+      return ["BLOCKED_BY_DATA", "warn"];
+    }
+    if (has("HYPOTHESIS_NOT_ACTIONABLE", "HYPOTHESIS_TOO_WEAK",
+            "NOT_LONG_ONLY", "BLOCKING_CONTRADICTION")) {
+      return ["NO_ACTIONABLE_HYPOTHESIS", "warn"];
+    }
+    if (has("INSUFFICIENT_CAPITAL", "MAX_POSITIONS_REACHED",
+            "DAILY_LOSS_LIMIT_REACHED", "TRADING_DISABLED",
+            "EXECUTION_UNAVAILABLE")) {
+      return ["BLOCKED_BY_RISK", "warn"];
+    }
+    if (risk && risk.approved === false) { return ["REJECTED", "warn"]; }
+    return ["UNKNOWN", "down"];
+  }
+
+  function renderVerdict(node, risk, hyp) {
+    node.innerHTML = "";
+    var v = verdictFor(risk, hyp);
+    var head = el("p");
+    head.appendChild(pill(v[0], v[1]));
+    node.appendChild(head);
+    node.appendChild(el("p", "empty",
+      "This is an analysis of what the agent WOULD decide. It is not an " +
+      "instruction to trade and nothing here places an order."));
+    // The full reason list, verbatim from the Risk Governor. Not
+    // summarised: the wording carries the fail-closed distinction
+    // ("spread is unknown, which is not the same as tight").
+    reasonList(node, "Every reason the Risk Governor gave",
+               (risk && risk.reasons) || [], "err");
+  }
+
+  function renderAnalysis(d, company) {
+    var st = (d && d.stages) || {};
+    var q = st.quantitative || {}, ev = st.evidence || {},
+        rg = st.regime || {}, hy = st.hypothesis || {}, rk = st.risk || {};
+    var ctx = rk.context || {};
+
+    renderVerdict(document.getElementById("anVerdict"), rk, hy);
+
+    kv(document.getElementById("anMarket"), [
+      ["symbol", d.symbol],
+      ["reference price", money(ctx.price !== undefined ? ctx.price
+                                                        : hy.reference_price)],
+      ["market session", unk(ctx.market_session)],
+      ["minutes to close", unk(ctx.minutes_to_close)],
+      ["spread", pct(ctx.spread_pct)],
+      ["dollar volume", ctx.dollar_volume === null ? "UNKNOWN"
+                                                   : money(ctx.dollar_volume)],
+      ["quote age (s)", unk(ctx.quote_age_seconds)],
+      ["source age (s)", unk(ctx.source_age_seconds)],
+      ["feed quality", unk(ctx.feed_quality)],
+      ["security type", unk(ctx.security_type)],
+      ["exchange", unk(ctx.exchange)],
+      ["signal freshness", unk(q.freshness)]
+    ]);
+
+    kv(document.getElementById("anRegime"), [
+      ["regime", unk(rg.regime)],
+      ["confidence", rg.confidence === null ? "UNKNOWN" : unk(rg.confidence)],
+      ["risk posture", unk(rg.risk_posture)]
+    ]);
+
+    kv(document.getElementById("anSignals"), [
+      ["direction", unk(q.direction)],
+      ["agreement between groups", unk(q.signal_agreement)],
+      ["magnitude", unk(q.signal_magnitude)],
+      ["regime-adjusted magnitude", unk(q.regime_adjusted_magnitude)],
+      ["strength band", unk(q.strength_band)],
+      ["groups voting buy", unk(q.buy_groups)],
+      ["groups voting sell", unk(q.sell_groups)]
+    ]);
+
+    kv(document.getElementById("anEvidence"), [
+      ["collected", unk(ev.collected)],
+      ["active catalyst", unk(ev.has_active_catalyst)],
+      ["direction", unk(ev.direction)],
+      ["materiality", unk(ev.materiality)],
+      ["novelty", unk(ev.novelty)],
+      ["independent sources", unk(ev.independent_sources)],
+      ["primary sources", unk(ev.primary_sources)],
+      ["conflicting", unk(ev.conflicting)]
+    ]);
+
+    kv(document.getElementById("anHypothesis"), [
+      ["hypothesis id", unk(hy.hypothesis_id)],
+      ["status", unk(hy.status)],
+      ["strategy", unk(hy.strategy)],
+      ["direction", unk(hy.direction)],
+      ["strength", unk(hy.hypothesis_strength)],
+      ["actionable", unk(hy.is_actionable)],
+      ["suggested stop distance", pct(hy.suggested_stop_distance_pct)],
+      ["reference volatility", pct(hy.reference_volatility_pct)],
+      ["generated at", unk(hy.generated_at)],
+      ["config version", unk(hy.config_version)]
+    ]);
+    var hr = document.getElementById("anHypReasons");
+    hr.innerHTML = "";
+    var sup = el("div"); reasonList(sup, "Supporting reasons",
+                                    hy.supporting_reasons || []);
+    hr.appendChild(sup);
+    var con = el("div"); reasonList(con, "Contradictions",
+                                    hy.contradictions || [], "err");
+    hr.appendChild(con);
+
+    kv(document.getElementById("anRisk"), [
+      ["decision id", unk(rk.decision_id)],
+      ["approved", unk(rk.approved)],
+      ["requires halt", unk(rk.requires_halt)],
+      ["capital required", money(rk.capital_required)],
+      ["capital available today", money(rk.capital_available)],
+      ["planned max loss", money(rk.max_loss)],
+      ["position value", money(rk.position_value)],
+      ["stop distance", pct(rk.stop_distance_pct)],
+      ["open positions", unk(ctx.open_positions)],
+      ["opened today", unk(ctx.positions_opened_today)],
+      ["realised P&L today", money(ctx.realized_pnl_today)],
+      ["daily risk lock", unk(ctx.daily_risk_lock)],
+      ["emergency stop", unk(ctx.emergency_stop)],
+      ["limits version", unk(rk.limits_version)]
+    ]);
+
+    var cnode = document.getElementById("anCompany");
+    if (!company) {
+      kv(cnode, [["company intelligence", "UNAVAILABLE — could not be read"]]);
+    } else {
+      var pr = company.profile || {};
+      kv(cnode, [
+        ["name", unk(pr.name)],
+        ["CIK", unk(pr.cik)],
+        ["SIC", unk(pr.sic)],
+        ["industry", unk(pr.sic_description)],
+        ["dividend stock", unk(company.dividend_stock)],
+        ["dividend status", unk(company.dividend_status)],
+        ["last split", company.last_split
+            ? (company.last_split.ex_date + " ×" + company.last_split.ratio)
+            : "UNKNOWN"],
+        ["next earnings", unk(company.next_earnings_date)]
+      ]);
+    }
+  }
+
+  function analyze(symbol) {
+    var note = document.getElementById("symNote");
+    var chk = normaliseSymbol(symbol);
+    if (!chk.ok) {
+      note.className = "err"; note.textContent = chk.why; return;
+    }
+    ANALYZED_SYMBOL = chk.symbol;
+    document.getElementById("symInput").value = chk.symbol;
+    note.className = "empty";
+    note.textContent = "analysing " + chk.symbol + "…";
+    document.getElementById("anVerdict").innerHTML =
+      '<p class="empty">Running the full pipeline for ' + chk.symbol +
+      ' — signals, evidence, hypothesis and risk…</p>';
+
+    // Company intelligence is fetched alongside but must not be able to
+    // fail the analysis: it is context, not a trading input, and a
+    // provider outage should degrade one section rather than all of them.
+    var companyP = get("/agent/company/" + encodeURIComponent(chk.symbol))
+                     .catch(function () { return null; });
+    get("/agent/pipeline?symbol=" + encodeURIComponent(chk.symbol))
+      .then(function (d) {
+        return companyP.then(function (c) {
+          renderAnalysis(d, c);
+          note.className = "empty";
+          note.textContent = "analysed " + chk.symbol +
+            (c ? "" : " (company intelligence unavailable)");
+          if (typeof loadOrders === "function") { loadOrders(); }
+        });
+      })
+      .catch(function (e) {
+        note.className = "err";
+        note.textContent = "could not analyse " + chk.symbol + ": " + e.message;
+        showError(document.getElementById("anVerdict"), e);
+      });
+  }
+
+  function initAnalysis() {
+    var input = document.getElementById("symInput");
+    document.getElementById("symGo").addEventListener("click", function () {
+      analyze(input.value);
+    });
+    document.getElementById("symRefresh").addEventListener("click", function () {
+      analyze(ANALYZED_SYMBOL || input.value);
+    });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { analyze(input.value); }
+    });
+    var fromUrl = (new URLSearchParams(location.search)).get("symbol");
+    if (fromUrl) { analyze(fromUrl); }
+  }
+
+
+  // ==================== SIMULATION WORKBENCH ========================
+  //
+  // A SECOND service. The read API has no broker adapter and that is a
+  // guarantee by absence; agent.replay imports a paper broker, so
+  // simulation lives in its own Lambda rather than quietly breaking
+  // that property. Neither can reach a live venue.
+  var SIM = "https://wggumxk6ekwgpnbudtofkoo47q0yattv.lambda-url.us-east-2.on.aws";
+  var SCENARIOS = {};
+
+  function simGet(path) {
+    return fetch(SIM + path, { headers: { "Accept": "application/json" } })
+      .then(function (r) {
+        return r.json().then(function (b) {
+          if (!r.ok) { throw new Error(b.error || ("HTTP " + r.status)); }
+          return b;
+        });
+      });
+  }
+  function simPost(path, body) {
+    return fetch(SIM + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (b) {
+        if (!r.ok) { throw new Error(b.error || ("HTTP " + r.status)); }
+        return b;
+      });
+    });
+  }
+
+  // ---- assumptions table -------------------------------------------
+  //
+  // Rendered BEFORE any performance number, every time. A condition
+  // printed under the figure it qualifies is read second or not at all,
+  // and these conditions decide what the figure means.
+  function assumptionsTable(parent, a) {
+    parent.appendChild(el("h4", null, "Assumptions — read these first"));
+    var rows = [
+      ["run id", a.run_id], ["created", a.created_at],
+      ["mode", a.mode], ["symbol", a.symbol || "—"],
+      ["scenario", a.scenario || "—"],
+      ["dataset", a.dataset_id], ["dataset checksum", a.dataset_checksum],
+      ["code sha", a.code_sha],
+      ["regime source", a.regime_source],
+      ["regime synthetic", a.regime_is_synthetic === true ? "YES" :
+                           (a.regime_is_synthetic === false ? "no" : "UNKNOWN")],
+      ["stop model", a.stop_model],
+      ["config", a.config_name + (a.config_label ? " (" + a.config_label + ")" : "")],
+      ["config deployable", a.config_deployable === true ? "yes" : "NO"],
+      ["execution model", a.execution_model],
+      ["valid", a.valid === true ? "VALID" : "VOID"]
+    ];
+    var tbl = el("table");
+    rows.forEach(function (r) {
+      var tr = el("tr");
+      tr.appendChild(el("th", null, r[0]));
+      tr.appendChild(el("td", null, unk(r[1])));
+      tbl.appendChild(tr);
+    });
+    parent.appendChild(tbl);
+    if (a.valid !== true) {
+      parent.appendChild(el("p", "err", "VOID: " + unk(a.void_detail) +
+        " — a run that reached past 'now' is refused, not annotated."));
+    }
+    if (a.regime_is_synthetic === true && a.regime_detail) {
+      parent.appendChild(el("p", "err", "Regime was manufactured: " +
+        a.regime_detail));
+    }
+    if (a.config_deployable !== true) {
+      parent.appendChild(el("p", "err",
+        "This config is not deployable. It exists to make one guard " +
+        "reachable and must not be read as a result about the live strategy."));
+    }
+  }
+
+  function summaryTable(parent, s) {
+    parent.appendChild(el("h4", null, "Performance"));
+    var rows = [
+      ["trades counted", s.trades],
+      ["trades excluded as unknown", s.trades_excluded_unknown],
+      ["net P&L", s.net_pnl === null || s.net_pnl === undefined
+                    ? "UNKNOWN" : money(s.net_pnl)],
+      ["verdict", s.verdict],
+      ["entries filled", s.entries_filled],
+      ["exits filled", s.exits_filled],
+      ["stop breaches", s.stop_breaches],
+      ["breach rate", s.breach_rate === null || s.breach_rate === undefined
+                        ? "UNKNOWN (no trades assessed)"
+                        : s.breach_rate],
+      ["worst R", s.worst_r === null || s.worst_r === undefined
+                    ? "UNKNOWN" : s.worst_r],
+      ["breached symbols", (s.breached_symbols || []).join(", ") || "none"],
+      ["contested bars", s.contested_bars]
+    ];
+    var tbl = el("table");
+    rows.forEach(function (r) {
+      var tr = el("tr");
+      tr.appendChild(el("th", null, r[0]));
+      tr.appendChild(el("td", null, unk(r[1])));
+      tbl.appendChild(tr);
+    });
+    parent.appendChild(tbl);
+    // A breach is the number that says whether the risk model held, so
+    // it gets said in words rather than left as a ratio.
+    if (s.stop_breaches) {
+      parent.appendChild(el("p", "err",
+        s.stop_breaches + " trade(s) lost more than the plan allowed " +
+        "(worse than -1R). Planned risk was not realised risk."));
+    }
+    if (s.rejections && Object.keys(s.rejections).length) {
+      parent.appendChild(el("h4", null, "Why candidates were refused"));
+      var ul = el("ul");
+      Object.keys(s.rejections).sort().forEach(function (k) {
+        ul.appendChild(el("li", null, k + ": " + s.rejections[k]));
+      });
+      parent.appendChild(ul);
+    }
+  }
+
+  // ---- mode switching ---------------------------------------------
+  function simSyncMode() {
+    var m = document.getElementById("simMode").value;
+    document.getElementById("simHistorical").style.display =
+      (m === "HISTORICAL") ? "" : "none";
+    document.getElementById("simScenario").style.display =
+      (m === "SCENARIO") ? "" : "none";
+    document.getElementById("simHypothetical").style.display =
+      (m === "HYPOTHETICAL") ? "" : "none";
+    var note = document.getElementById("simSymbolNote");
+    if (m === "SCENARIO") {
+      note.textContent = "synthetic bars — the analysed symbol is not used";
+    } else {
+      note.textContent = ANALYZED_SYMBOL
+        ? "symbol: " + ANALYZED_SYMBOL
+        : "analyse a symbol first";
+    }
+  }
+
+  function renderScenarioDetail() {
+    var id = document.getElementById("simScenarioPick").value;
+    var node = document.getElementById("simScenarioDetail");
+    node.innerHTML = "";
+    var s = SCENARIOS[id];
+    if (!s) {
+      node.appendChild(el("p", "empty", "Pick a scenario."));
+      return;
+    }
+    kv(node, [
+      ["question", s.question],
+      ["expectation", s.expectation],
+      ["trade expectation", s.trade_expectation],
+      ["declared regime", s.regime || "—"],
+      ["spread", s.spread_pct === null ? "—" : s.spread_pct + "%"],
+      ["may exceed 1R", s.may_exceed_1r === true ? "YES — by design" : "no"],
+      ["bars", s.bar_count]
+    ]);
+    var g = el("div");
+    reasonList(g, "Guaranteed properties of the generated bars",
+               s.guaranteed_properties || []);
+    node.appendChild(g);
+    if (s.note) { node.appendChild(el("p", "empty", s.note)); }
+
+    // Some guards are only reachable under a specific test config. The
+    // match is offered rather than applied: changing the config changes
+    // what is being measured, and that has to be a deliberate act.
+    var match = null;
+    Object.keys(CONFIGS).forEach(function (k) {
+      if (CONFIGS[k].scenario === id && !CONFIGS[k].deployable) { match = CONFIGS[k]; }
+    });
+    if (match) {
+      var hint = el("p", "empty");
+      hint.appendChild(document.createTextNode(
+        "A test-only config exists for this scenario: " + match.id +
+        " (exposes " + (match.exposes || "a guard") + "). The run below " +
+        "uses the deployable config unless you select it. "));
+      var btn = el("button", null, "Use " + match.id);
+      btn.type = "button";
+      btn.addEventListener("click", function () {
+        document.getElementById("simConfig").value = match.id;
+        hint.appendChild(el("span", "err",
+          "  selected — results describe a TEST configuration, not the " +
+          "live strategy"));
+      });
+      hint.appendChild(btn);
+      node.appendChild(hint);
+    }
+  }
+
+  function loadScenarios() {
+    var lab = document.getElementById("scenarioLab");
+    var pick = document.getElementById("simScenarioPick");
+    simGet("/sim/scenarios").then(function (d) {
+      pick.innerHTML = "";
+      lab.innerHTML = "";
+      (d.scenarios || []).forEach(function (s) {
+        SCENARIOS[s.id] = s;
+        var o = el("option", null, s.id +
+          (s.trade_expectation ? "  (" + s.trade_expectation + ")" : ""));
+        o.value = s.id;
+        pick.appendChild(o);
+      });
+      lab.appendChild(el("p", "empty", d.count + " canonical scenarios from " +
+                                       d.source));
+      if (d.not_evidence) { lab.appendChild(el("p", "err", d.not_evidence)); }
+      lab.appendChild(el("p", "empty", d.guarantee_note));
+      var tbl = el("table");
+      var hd = el("tr");
+      ["scenario", "question", "trade expectation", "may exceed 1R",
+       "guaranteed property"].forEach(function (h) {
+        hd.appendChild(el("th", null, h));
+      });
+      tbl.appendChild(hd);
+      (d.scenarios || []).forEach(function (s) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, s.id));
+        tr.appendChild(el("td", null, unk(s.question)));
+        tr.appendChild(el("td", null, unk(s.trade_expectation)));
+        tr.appendChild(el("td", null, s.may_exceed_1r === true ? "YES" : "no"));
+        tr.appendChild(el("td", null,
+          (s.guaranteed_properties || []).join("; ") || "UNKNOWN"));
+        tbl.appendChild(tr);
+      });
+      lab.appendChild(tbl);
+      renderScenarioDetail();
+    }).catch(function (e) { showError(lab, e); showError(
+      document.getElementById("simScenarioDetail"), e); });
+  }
+
+  var CONFIGS = {};
+
+  // Deployable first, and the deployable one SELECTED.
+  //
+  // The first version listed them alphabetically, which put
+  // DAILY_LOSS_LOCK_TEST at the top and selected it by default. Every
+  // scenario then ran under a TEST_CONFIGURATION_ONLY config whose
+  // limits suppressed entries - gap_through_stop produced 0 trades and
+  // looked like a scenario that does not trade. A test config chosen
+  // by alphabetical accident silently invalidates every result, so the
+  // default is the only deployable config and the rest are clearly
+  // marked below it.
+  function loadSimConfigs() {
+    var sel = document.getElementById("simConfig");
+    simGet("/sim/configs").then(function (d) {
+      sel.innerHTML = "";
+      var list = (d.configs || []).slice().sort(function (a, b) {
+        if (a.deployable !== b.deployable) { return a.deployable ? -1 : 1; }
+        return a.id < b.id ? -1 : 1;
+      });
+      list.forEach(function (c) {
+        CONFIGS[c.id] = c;
+        var o = el("option", null, c.id + (c.deployable
+          ? "  (deployable)" : "  [" + c.label + " — exposes " +
+                               (c.exposes || "a guard") + "]"));
+        o.value = c.id;
+        sel.appendChild(o);
+      });
+      var dep = (d.deployable || [])[0];
+      if (dep) { sel.value = dep; }
+      renderScenarioDetail();
+    }).catch(function () {
+      sel.innerHTML = "";
+      var o = el("option", null, "configs unavailable");
+      o.value = ""; sel.appendChild(o);
+    });
+  }
+
+  // ---- run ---------------------------------------------------------
+  function runSimulation() {
+    var mode = document.getElementById("simMode").value;
+    var note = document.getElementById("simNote");
+    var out = document.getElementById("simResult");
+    note.className = "empty"; note.textContent = "running…";
+    out.innerHTML = ""; out.appendChild(el("p", "empty", "Running…"));
+
+    if (mode === "HYPOTHETICAL") {
+      var sym = ANALYZED_SYMBOL ||
+                normaliseSymbol(document.getElementById("symInput").value).symbol;
+      var entry = parseFloat(document.getElementById("hypEntry").value);
+      if (!(entry > 0)) {
+        note.className = "err";
+        note.textContent = "enter an entry price — a hypothetical with no " +
+                           "entry price has no answer";
+        out.innerHTML = ""; return;
+      }
+      var tgt = document.getElementById("hypTarget").value;
+      simPost("/sim/hypothetical", {
+        symbol: sym, entry_price: entry,
+        notional: parseFloat(document.getElementById("hypNotional").value),
+        stop_pct: parseFloat(document.getElementById("hypStop").value),
+        target_pct: tgt === "" ? null : parseFloat(tgt),
+        shock_pct: parseFloat(document.getElementById("hypShock").value),
+        slippage_bps: parseFloat(document.getElementById("hypSlip").value)
+      }).then(function (d) {
+        note.textContent = "simulated";
+        renderHypothetical(out, d);
+      }).catch(function (e) {
+        note.className = "err"; note.textContent = e.message;
+        showError(out, e);
+      });
+      return;
+    }
+
+    var payload = {
+      mode: mode,
+      stop_source: document.getElementById("simStop").value,
+      config: document.getElementById("simConfig").value || undefined
+    };
+    if (mode === "SCENARIO") {
+      payload.scenario = document.getElementById("simScenarioPick").value;
+      if (!payload.scenario) {
+        note.className = "err"; note.textContent = "pick a scenario";
+        out.innerHTML = ""; return;
+      }
+    } else {
+      if (!ANALYZED_SYMBOL) {
+        note.className = "err";
+        note.textContent = "analyse a symbol first";
+        out.innerHTML = ""; return;
+      }
+      payload.symbol = ANALYZED_SYMBOL;
+      payload.days = parseInt(document.getElementById("simDays").value, 10);
+      payload.timeframe = document.getElementById("simTf").value;
+      payload.regime_source = document.getElementById("simRegime").value;
+    }
+    simPost("/sim/replay", payload).then(function (d) {
+      note.textContent = "run " + d.run_id +
+                         (d.persisted ? " (persisted)" : " (NOT PERSISTED)");
+      out.innerHTML = "";
+      if (!d.persisted) {
+        out.appendChild(el("p", "err", d.persistence_warning ||
+          "not persisted"));
+      }
+      assumptionsTable(out, d.assumptions || {});
+      summaryTable(out, d.summary || {});
+      loadReplayRuns();
+    }).catch(function (e) {
+      note.className = "err"; note.textContent = e.message;
+      showError(out, e);
+    });
+  }
+
+  function renderHypothetical(out, d) {
+    out.innerHTML = "";
+    out.appendChild(el("p", "empty",
+      "Hypothetical only. The strategy was NOT consulted and no order " +
+      "exists. This is arithmetic plus the Risk Governor's view of the " +
+      "setup's size."));
+    var p = d.plan || {}, s = d.scenario || {}, r = d.result || {};
+    out.appendChild(el("h4", null, "Plan"));
+    var k1 = el("dl", "kv"); out.appendChild(k1);
+    kv(k1, [["entry", money(p.entry_price)], ["notional", money(p.notional)],
+            ["estimated quantity", p.estimated_quantity],
+            ["planned stop", money(p.stop_price)],
+            ["planned target", money(p.target_price) + " (" +
+                               p.target_source + ")"],
+            ["planned risk", money(p.planned_risk_dollars)],
+            ["planned R", p.planned_r]]);
+    out.appendChild(el("h4", null, "Scenario applied"));
+    var k2 = el("dl", "kv"); out.appendChild(k2);
+    kv(k2, [["shock", s.shock_pct + "%"],
+            ["gapped price", money(s.gapped_price)],
+            ["first executable price", money(s.first_executable_price)],
+            ["slippage", money(s.slippage_dollars)]]);
+    out.appendChild(el("h4", null, "Result"));
+    var k3 = el("dl", "kv"); out.appendChild(k3);
+    kv(k3, [["outcome", r.outcome],
+            ["exit price", r.exit_price === null ? "—" : money(r.exit_price)],
+            ["realised $", r.realised_dollars === null ? "—"
+                           : money(r.realised_dollars)],
+            ["realised R", r.realised_r === null ? "—" : r.realised_r],
+            ["stop held", r.stop_held === null ? "—"
+                          : (r.stop_held ? "held" : "BREACHED")],
+            ["target hit", r.target_hit ? "yes" : "no"],
+            ["position remaining", r.position_remaining ? "yes" : "no"],
+            ["capital consumed", money(r.capital_consumed)]]);
+    if (r.unresolved_note) {
+      out.appendChild(el("p", "empty", r.unresolved_note));
+    }
+    var g = d.risk_governor_analysis || {};
+    out.appendChild(el("h4", null, "Risk Governor analysis of this setup"));
+    var tbl = el("table");
+    var hd = el("tr");
+    ["check", "passed", "detail"].forEach(function (h) {
+      hd.appendChild(el("th", null, h));
+    });
+    tbl.appendChild(hd);
+    (g.checks || []).forEach(function (c) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, c.check));
+      tr.appendChild(el("td", null, c.passed ? "yes" : "NO"));
+      tr.appendChild(el("td", null, c.detail));
+      tbl.appendChild(tr);
+    });
+    out.appendChild(tbl);
+    out.appendChild(el("p", "err", g.caveat || ""));
+  }
+
+  // ---- persisted runs ---------------------------------------------
+  function loadReplayRuns() {
+    var node = document.getElementById("replayRuns");
+    simGet("/sim/runs?limit=25").then(function (d) {
+      node.innerHTML = "";
+      if (d.read_error) {
+        node.appendChild(el("p", "err", "Runs could not be read: " +
+          d.read_error + " — this is NOT evidence that none exist."));
+        return;
+      }
+      if (!(d.runs || []).length) {
+        node.appendChild(el("p", "empty",
+          "No persisted replay runs yet. Run a simulation above."));
+        return;
+      }
+      var tbl = el("table");
+      var hd = el("tr");
+      ["run id", "created", "mode", "subject", "regime", "stop", "config",
+       "valid", "trades", "worst R", "breaches", "net"].forEach(function (h) {
+        hd.appendChild(el("th", null, h));
+      });
+      tbl.appendChild(hd);
+      (d.runs || []).forEach(function (r) {
+        var a = r.assumptions || {}, s = r.summary || {};
+        var tr = el("tr");
+        var link = el("a", null, a.run_id);
+        link.href = "#"; link.style.color = "#7fd1ff";
+        link.addEventListener("click", function (e) {
+          e.preventDefault(); showRun(a.run_id);
+        });
+        var td = el("td"); td.appendChild(link); tr.appendChild(td);
+        [a.created_at, a.mode, a.scenario || a.symbol || "—",
+         a.regime_source + (a.regime_is_synthetic === true ? " (synthetic)" : ""),
+         a.stop_model,
+         a.config_name + (a.config_deployable === true ? "" : " [TEST]"),
+         a.valid === true ? "VALID" : "VOID",
+         unk(s.trades), unk(s.worst_r), unk(s.stop_breaches),
+         s.net_pnl === null || s.net_pnl === undefined ? "UNKNOWN"
+                                                       : money(s.net_pnl)
+        ].forEach(function (c) { tr.appendChild(el("td", null, String(c))); });
+        tbl.appendChild(tr);
+      });
+      node.appendChild(tbl);
+    }).catch(function (e) { showError(node, e); });
+  }
+
+  function showRun(runId) {
+    var node = document.getElementById("replayDetail");
+    node.innerHTML = "";
+    node.appendChild(el("p", "empty", "Loading " + runId + "…"));
+    simGet("/sim/run?run_id=" + encodeURIComponent(runId))
+      .then(function (d) {
+        node.innerHTML = "";
+        node.appendChild(el("h3", null, "Run " + runId));
+        assumptionsTable(node, d.assumptions || {});
+        summaryTable(node, d.summary || {});
+      }).catch(function (e) { showError(node, e); });
+  }
+
+  function initSim() {
+    document.getElementById("simMode").addEventListener("change", simSyncMode);
+    document.getElementById("simScenarioPick")
+      .addEventListener("change", renderScenarioDetail);
+    document.getElementById("simRun").addEventListener("click", runSimulation);
+    document.getElementById("hypUseQuote").addEventListener("click", function () {
+      // Only the price already fetched by the analysis. Nothing here
+      // fetches a fresh quote: a hypothetical must not look like a
+      // live order ticket.
+      var dds = document.getElementById("anMarket").querySelectorAll("dd");
+      if (dds.length > 1) {
+        var v = String(dds[1].textContent || "").replace(/[^0-9.]/g, "");
+        if (v) { document.getElementById("hypEntry").value = v; }
+      }
+    });
+    simSyncMode();
+    loadScenarios();
+    loadSimConfigs();
+    loadReplayRuns();
+    loadPredictions();
+  }
+
+  // ---- predictions -------------------------------------------------
+  function loadPredictions() {
+    var node = document.getElementById("predictions");
+    node.innerHTML = "";
+    node.appendChild(el("p", "empty",
+      "PREDICTION MODE: RESEARCH_ONLY"));
+    // Honest state. The target definitions and their leakage controls
+    // exist; no model has been built, so there is nothing to show and
+    // saying "NOT_GENERATED" is the only truthful render.
+    kv(el("dl", "kv"), []);
+    var tbl = el("table");
+    var hd = el("tr");
+    ["model", "15m", "30m", "60m", "status"].forEach(function (h) {
+      hd.appendChild(el("th", null, h));
+    });
+    tbl.appendChild(hd);
+    ["previous-return sign", "momentum", "mean reversion",
+     "signal-engine direction", "no-skill control"].forEach(function (m) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, m));
+      ["NOT_GENERATED", "NOT_GENERATED", "NOT_GENERATED",
+       "NOT_GENERATED"].forEach(function (c) {
+        tr.appendChild(el("td", null, c));
+      });
+      tbl.appendChild(tr);
+    });
+    node.appendChild(tbl);
+    node.appendChild(el("p", "empty",
+      "No research prediction has been generated for any symbol. The " +
+      "target definitions and their leakage controls are implemented " +
+      "(FORWARD_RETURN, DIRECTION, MFE, MAE, STOP_BEFORE_TARGET at 5/15/" +
+      "30/60 minutes); the baseline models and the generation endpoint " +
+      "are not built yet, so there is nothing to display and nothing is " +
+      "invented to fill the gap."));
+    node.appendChild(el("p", "err",
+      "A deterministic baseline will never be shown with a fabricated " +
+      "probability, and signal agreement is NOT a prediction probability."));
+  }
+
   // ---- session date ----------------------------------------------------
   //
   // One variable, read by every dated loader. Null until resolved, and
@@ -1841,6 +2796,8 @@
   // today and then be overwritten, which is the flicker that hid the
   // problem.
   initSessionDate();
+  initAnalysis();
+  initSim();
 })();
 </script>
 </body>
