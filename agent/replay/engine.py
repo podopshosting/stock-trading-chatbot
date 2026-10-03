@@ -58,6 +58,20 @@ class ReplayConfig:
     # be measured. Not inferred from the bars, because a series with a
     # halt in it would infer the wrong interval from the hole.
     bar_interval_seconds: float = 60.0
+    # How competing candidates are ordered when they contend for one
+    # day's capital.
+    #
+    # ALPHABETICAL is deterministic and declared. It is NOT clever: with
+    # three symbols and room for two, the first two alphabetically win.
+    # Ranking by signal strength would be better allocation and it would
+    # CHANGE WHICH TRADES HAPPEN, which is a strategy change - and the
+    # strategy is frozen for external paper validation. So ranking is a
+    # future experiment with its own cohort, not a quiet improvement
+    # smuggled in through the backtester.
+    #
+    # Before this, order came from the bars dict, so the same dataset
+    # passed in a different order was a different experiment.
+    candidate_order: str = "ALPHABETICAL"
     # Minutes to the close, as reported to the risk gate. A replay has
     # no session calendar, so this is declared rather than derived -
     # and it is a CONFIG field rather than a literal so that a scenario
@@ -79,6 +93,7 @@ class ReplayConfig:
             "max_hold_bars": self.max_hold_bars,
             "bar_interval_seconds": self.bar_interval_seconds,
             "minutes_to_close": self.minutes_to_close,
+            "candidate_order": self.candidate_order,
             "risk_limits_version": self.risk_limits.version,
         }
 
@@ -106,6 +121,10 @@ class ReplayResult:
     dataset_checksum: Optional[str] = None
     config_name: str = "ad-hoc"
     config_deployable: bool = True
+    # Bars where candidates COMPETED for one day's capital, and what
+    # each was told. "Why A and not B" is otherwise unanswerable from
+    # aggregate refusal counts.
+    allocations: List[Dict] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:
@@ -125,6 +144,8 @@ class ReplayResult:
             "dataset_checksum": self.dataset_checksum,
             "config_name": self.config_name,
             "config_deployable": self.config_deployable,
+            "contested_bars": len(self.allocations),
+            "allocations": self.allocations[:50],
             "config": self.config,
             "bars_processed": self.bars_processed,
             "decisions_evaluated": self.decisions_evaluated,
@@ -217,6 +238,7 @@ def run(bars: Dict[str, Sequence[Bar]],
     current_day: Optional[str] = None
     days_seen = 0
     previous_timestamp: Optional[str] = None
+    allocations: List[Dict] = []
 
     try:
         for index, timestamp in enumerate(timeline):
@@ -254,7 +276,11 @@ def run(bars: Dict[str, Sequence[Bar]],
             if index >= total_bars - 1:
                 continue
 
-            for symbol, sym_series in series.items():
+            # Deterministic order, so the same dataset is the same
+            # experiment however the caller built the dict.
+            contended = []
+            for symbol in _candidate_sequence(series, config):
+                sym_series = series[symbol]
                 if clock.index >= len(sym_series):
                     continue
                 if manager.get(symbol) is not None:
@@ -277,6 +303,10 @@ def run(bars: Dict[str, Sequence[Bar]],
                     for code in decision.reason_codes:
                         key = str(code)
                         rejections[key] = rejections.get(key, 0) + 1
+                    contended.append({
+                        "symbol": symbol, "outcome": "REFUSED",
+                        "reasons": [str(c) for c in decision.reason_codes],
+                        "capital_used_before": round(daily_capital_used, 2)})
                     continue
 
                 stats["entries_attempted"] += 1
@@ -306,6 +336,20 @@ def run(bars: Dict[str, Sequence[Bar]],
                     config_version=CONFIG_VERSION)
                 entry_bar[symbol] = index
                 entry_orders[symbol] = order
+                contended.append({
+                    "symbol": symbol, "outcome": "ENTERED",
+                    "reasons": [],
+                    "capital_used_before": round(
+                        daily_capital_used - decision.capital_required, 2)})
+
+            # Keep the allocation record only where candidates actually
+            # COMPETED - one qualifying candidate is not a portfolio
+            # decision, and recording every bar would bury the bars
+            # where the envelope was the binding constraint.
+            if len(contended) > 1 and any(
+                    c["outcome"] == "ENTERED" for c in contended):
+                allocations.append({"bar": index, "timestamp": timestamp,
+                                    "candidates": contended})
 
             # The age of the data at the NEXT bar is measured from this
             # one. Set at the end of the iteration so a halt - a hole in
@@ -365,9 +409,31 @@ def run(bars: Dict[str, Sequence[Bar]],
         unfillable_orders=broker.unfillable_orders,
         positions_open_at_end=manager.open_count,
         rejections=rejections, performance=performance,
+        allocations=allocations,
         dataset_id=dataset_id, dataset_checksum=dataset_checksum,
         config_name=config_name, config_deployable=config_deployable,
         warnings=warnings)
+
+
+def _candidate_sequence(series: Dict, config: ReplayConfig) -> List[str]:
+    """The order candidates are offered the day's remaining capital.
+
+    Deterministic by construction. The previous behaviour iterated the
+    bars dict, so `{"AAA":..., "BBB":..., "CCC":...}` and the same three
+    symbols in reverse produced DIFFERENT trades - the first two to be
+    offered capital took it. Same dataset, different experiment.
+    """
+    order = (config.candidate_order or "ALPHABETICAL").upper()
+    if order == "ALPHABETICAL":
+        return sorted(series)
+    if order == "AS_SUPPLIED":
+        # Available deliberately, for a caller testing the ordering
+        # effect itself. Not the default, because it is only
+        # reproducible if the caller's dict order is.
+        return list(series)
+    raise ValueError(
+        f"unknown candidate_order {config.candidate_order!r}; a replay "
+        f"whose candidate order is undefined is not reproducible")
 
 
 def _bar_gap_seconds(previous: Optional[str], current: Optional[str],

@@ -787,6 +787,55 @@ MUTATIONS = [
         new="        return False  # MUTATION",
         expect=["breach", "stop", "planned risk", "1R"],
     ),
+    # --- several symbols, one envelope. The engine already shared the
+    # --- capital; WHICH candidates got it depended on the order the
+    # --- caller built the bars dict in, so the same dataset supplied
+    # --- differently was a different experiment.
+    Mutation(
+        name="candidate-order-follows-the-dict",
+        description="let the bars dict decide who is offered the day's "
+                    "remaining capital",
+        path=RPL_ENGINE,
+        old='    if order == "ALPHABETICAL":\n        return sorted(series)',
+        new='    if order == "ALPHABETICAL":\n'
+            "        return list(series)  # MUTATION",
+        expect=["dict order", "deterministic", "reversing"],
+    ),
+    Mutation(
+        name="accept-an-undefined-candidate-order",
+        description="run a replay whose candidate order is not defined, "
+                    "and therefore is not reproducible",
+        path=RPL_ENGINE,
+        old='    raise ValueError(\n'
+            '        f"unknown candidate_order {config.candidate_order!r}; '
+            'a replay "',
+        new="    return list(series)  # MUTATION\n"
+            '    raise ValueError(\n'
+            '        f"unknown candidate_order {config.candidate_order!r}; '
+            'a replay "',
+        expect=["unknown", "order", "refused"],
+    ),
+    Mutation(
+        name="never-record-a-contested-bar",
+        description="leave 'why candidate A and not B' unanswerable, "
+                    "since aggregate refusal counts cannot answer it",
+        path=RPL_ENGINE,
+        old='            if len(contended) > 1 and any(\n'
+            '                    c["outcome"] == "ENTERED" for c in contended):',
+        new="            if False:  # MUTATION",
+        expect=["contested", "allocation", "unexplainable"],
+    ),
+    Mutation(
+        name="record-only-the-winning-candidates",
+        description="log what entered and not what was refused, which "
+                    "is the half that explains the decision",
+        path=RPL_ENGINE,
+        old='                    contended.append({\n'
+            '                        "symbol": symbol, "outcome": "REFUSED",',
+        new='                    _skip = ({  # MUTATION\n'
+            '                        "symbol": symbol, "outcome": "REFUSED",',
+        expect=["refused", "candidate", "envelope"],
+    ),
     # --- canonical datasets. "AAPL, last 250 days" means something
     # --- different every day, so a dataset is addressed by its content
     # --- and the address is verified on every read.
