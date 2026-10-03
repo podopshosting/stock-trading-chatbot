@@ -120,7 +120,8 @@ def run(bars: Dict[str, Sequence[Bar]],
         config: Optional[ReplayConfig] = None,
         evidence: Optional[Sequence[Dict]] = None,
         catalyst_for=None,
-        regime_for=None) -> ReplayResult:
+        regime_for=None,
+        spread_pct: float = 0.05) -> ReplayResult:
     """Replay the pipeline over `bars`.
 
     `bars` maps symbol to a chronological bar series. `catalyst_for` and
@@ -140,7 +141,7 @@ def run(bars: Dict[str, Sequence[Bar]],
         starting_cash=config.starting_cash,
         slippage_bps=config.slippage_bps,
         partial_fill_probability=config.partial_fill_probability,
-        seed=config.seed))
+        seed=config.seed), spread_pct=spread_pct)
     manager = PositionManager(broker=broker, execution_available=True)
     journal = InMemoryJournal()
 
@@ -201,7 +202,8 @@ def run(bars: Dict[str, Sequence[Bar]],
                 stats["decisions"] += 1
                 decision, hypothesis = _decide(
                     symbol, sym_series, clock, config, feed,
-                    catalyst_for, regime_for, manager, daily_capital_used)
+                    catalyst_for, regime_for, manager, daily_capital_used,
+                    spread_pct)
 
                 if decision is None:
                     continue
@@ -303,7 +305,7 @@ def _unified_timeline(series: Dict[str, PointInTimeSeries]) -> List[str]:
 
 
 def _decide(symbol, sym_series, clock, config, feed, catalyst_for,
-            regime_for, manager, daily_capital_used):
+            regime_for, manager, daily_capital_used, spread_pct=0.05):
     """Run the live decision pipeline at the current bar."""
     closes = sym_series.closes_through_now()
     if len(closes) < 2:
@@ -348,7 +350,12 @@ def _decide(symbol, sym_series, clock, config, feed, catalyst_for,
         market_session="OPEN", minutes_to_close=120.0,
         trading_enabled=True, execution_available=True,
         price=bar.close,
-        spread_pct=0.05,
+        # The spread the broker is actually quoting. This used to be the
+        # literal 0.05, so a replay could not test the spread gate at
+        # all: a scenario could widen the broker's spread and the risk
+        # context would still report five basis points. A gate that the
+        # harness can never make fire is not a tested gate.
+        spread_pct=spread_pct,
         dollar_volume=max(bar.volume * bar.close,
                           config.risk_limits.min_dollar_volume),
         quote_age_seconds=0.0,

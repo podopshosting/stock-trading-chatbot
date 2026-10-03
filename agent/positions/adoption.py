@@ -34,6 +34,21 @@ from ..broker.provenance import (
 from ..observability import log_event
 from .models import ExitPlan, StopMechanism
 
+# How many sessions back to look for the evidence that proves a
+# position is the agent's own.
+#
+# An orphan is, by its nature, usually from an EARLIER session: the
+# order was placed, the fill arrived late, and the cycle that would
+# have recorded it had ended. Looking only at the current session finds
+# no decision, the reconstruction cannot be performed, provenance
+# degrades to a bare prefix match, and the position is refused as
+# UNKNOWN_ORIGIN - safe, and exactly useless for the case adoption
+# exists to handle.
+#
+# Found by running the real DRAM position against Monday's session
+# date: 0 decisions, proven=False, not adopted.
+DEFAULT_EVIDENCE_LOOKBACK_DAYS = 5
+
 INTEGRITY_COMPLETE = "COMPLETE"
 INTEGRITY_PARTIAL = "PARTIAL"
 INTEGRITY_UNKNOWN = "UNKNOWN"
@@ -43,6 +58,39 @@ INTEGRITY_UNKNOWN = "UNKNOWN"
 # and a later review must be able to tell the difference.
 PLAN_ORIGINAL = "RECOVERED_FROM_DECISION"
 PLAN_RECONSTRUCTED = "RECONSTRUCTED_FROM_RISK_LIMIT"
+
+
+def _session_window(session_date: str, days: int) -> List[str]:
+    """`session_date` and the calendar days before it, most recent first.
+
+    Calendar days, not trading days: a few extra dates that hold
+    nothing cost one empty query each, whereas missing the session an
+    order was placed in loses the evidence entirely.
+    """
+    from datetime import date, timedelta
+    try:
+        anchor = date.fromisoformat(str(session_date)[:10])
+    except (TypeError, ValueError):
+        return [session_date]
+    return [str(anchor - timedelta(days=offset)) for offset in range(days)]
+
+
+def _gather(source, session_date: str, days: int, errors: List[str],
+            label: str):
+    """Collect rows across the lookback window.
+
+    Returns (rows, degraded). `degraded` is True if ANY session could
+    not be read - the caller must not treat a partial sweep as complete,
+    because a missing session is exactly where the evidence might be.
+    """
+    rows, degraded = [], False
+    for date_str in _session_window(session_date, days):
+        try:
+            rows.extend(list(source.for_session(date_str) or []))
+        except Exception as exc:                          # noqa: BLE001
+            degraded = True
+            errors.append(f"{label} unreadable for {date_str}: {exc}")
+    return rows, degraded
 
 
 def _recover_stop_distance_pct(risk_decision_id: Optional[str],
@@ -140,7 +188,9 @@ def _synthetic_entry_order(position: Dict, client_order_id: Optional[str],
 def adopt_external_positions(broker, position_manager, *, session_date: str,
                              ledger=None, decisions=None,
                              max_trade_risk: float = 2.0,
-                             config_version: str = "") -> Dict:
+                             config_version: str = "",
+                             evidence_lookback_days: int =
+                             DEFAULT_EVIDENCE_LOOKBACK_DAYS) -> Dict:
     """Reconcile the venue's positions into the agent's own store.
 
     Never raises. Everything that could not be established is reported,
@@ -153,6 +203,7 @@ def adopt_external_positions(broker, position_manager, *, session_date: str,
         "preexisting": [], "unknown_origin": [], "refused": [],
         "adopted_symbols": [], "classifications": [],
         "integrity": INTEGRITY_COMPLETE,
+        "evidence_lookback_days": evidence_lookback_days,
         "blocks_new_exposure": False,
         "errors": [],
     }
@@ -194,21 +245,23 @@ def adopt_external_positions(broker, position_manager, *, session_date: str,
         out["integrity"] = INTEGRITY_PARTIAL
         out["errors"].append(f"broker order history unreadable: {exc}")
 
+    # Both sources are swept across the lookback window, not just the
+    # current session. See DEFAULT_EVIDENCE_LOOKBACK_DAYS.
     ledger_rows = []
     if ledger is not None:
-        try:
-            ledger_rows = list(ledger.for_session(session_date))
-        except Exception as exc:                          # noqa: BLE001
+        ledger_rows, degraded = _gather(
+            ledger, session_date, evidence_lookback_days, out["errors"],
+            "order ledger")
+        if degraded:
             out["integrity"] = INTEGRITY_PARTIAL
-            out["errors"].append(f"order ledger unreadable: {exc}")
 
     decision_rows = []
     if decisions is not None:
-        try:
-            decision_rows = list(decisions.for_session(session_date) or [])
-        except Exception as exc:                          # noqa: BLE001
+        decision_rows, degraded = _gather(
+            decisions, session_date, evidence_lookback_days, out["errors"],
+            "decision log")
+        if degraded:
             out["integrity"] = INTEGRITY_PARTIAL
-            out["errors"].append(f"decision log unreadable: {exc}")
 
     for position in positions:
         symbol = position.get("symbol")

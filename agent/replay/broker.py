@@ -34,7 +34,14 @@ class ReplayBroker:
 
     def __init__(self, clock: ReplayClock,
                  series: Dict[str, PointInTimeSeries],
-                 config: Optional[PaperBrokerConfig] = None):
+                 config: Optional[PaperBrokerConfig] = None,
+                 spread_pct: float = 0.05):
+        # The quoted spread, as a PERCENT of price. Default 0.05%
+        # matches what this used to hardcode. Configurable so a
+        # scenario can test the spread gate against a spread that
+        # is actually wide - otherwise 'the gate works' is a claim
+        # about a number the harness could never vary.
+        self.spread_fraction = spread_pct / 100.0
         self.clock = clock
         self.series = series
         self.paper = PaperBroker(config or PaperBrokerConfig())
@@ -53,7 +60,7 @@ class ReplayBroker:
             if self.clock.index >= len(series):
                 continue
             bar = series.current()
-            spread = max(0.01, bar.close * 0.0005)
+            spread = max(0.01, bar.close * self.spread_fraction)
             self.paper.set_quote(Quote(
                 symbol=symbol, bid=bar.close - spread / 2,
                 ask=bar.close + spread / 2, last=bar.close,

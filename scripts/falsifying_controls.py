@@ -86,6 +86,7 @@ RPL_CLOCK = REPO / "agent" / "replay" / "clock.py"
 RPL_DATA = REPO / "agent" / "replay" / "data.py"
 RPL_BROKER = REPO / "agent" / "replay" / "broker.py"
 RPL_ENGINE = REPO / "agent" / "replay" / "engine.py"
+RPL_SCENARIOS = REPO / "agent" / "replay" / "scenarios.py"
 
 ORC_MODELS = REPO / "agent" / "orchestration" / "models.py"
 ORC_DAY = REPO / "agent" / "orchestration" / "day.py"
@@ -784,6 +785,50 @@ MUTATIONS = [
         new="        return False  # MUTATION",
         expect=["breach", "stop", "planned risk", "1R"],
     ),
+    # --- scenarios: named market conditions, built on purpose. The
+    # --- first version produced 119 decisions and zero entries, so
+    # --- every scenario looked safe and none tested anything.
+    Mutation(
+        name="flatten-the-scenario-drift",
+        description="remove the trend from the bar generator, so the "
+                    "harness never trades and every scenario reads as "
+                    "safe for the wrong reason",
+        path=RPL_SCENARIOS,
+        old="    rng, out, price = random.Random(seed), [], start",
+        new="    rng, out, price = random.Random(seed), [], start\n"
+            "    drift = 0.0  # MUTATION",
+        expect=["control", "entry", "trades"],
+    ),
+    Mutation(
+        name="remove-the-gap-from-the-gap-scenario",
+        description="open the post-gap bar at the previous close, so "
+                    "the scenario that exists to breach a stop no "
+                    "longer breaches it",
+        path=RPL_SCENARIOS,
+        old="    series.append(_bar(len(series), floor, floor * 1.001,\n"
+            "                       floor * 0.995, floor * 0.998))",
+        new="    series.append(_bar(len(series), last, last * 1.001,\n"
+            "                       last * 0.995, last * 0.998))  # MUTATION",
+        expect=["gap", "planned risk", "breach"],
+    ),
+    Mutation(
+        name="hardcode-the-spread-in-the-replay-risk-context",
+        description="feed the risk gate a literal spread, so a scenario "
+                    "can widen the market and the gate never sees it",
+        path=RPL_ENGINE,
+        old="        spread_pct=spread_pct,",
+        new="        spread_pct=0.05,  # MUTATION",
+        expect=["spread", "risk context", "refuses", "untestable"],
+    ),
+    Mutation(
+        name="hardcode-the-replay-broker-spread",
+        description="publish a fixed quote spread, so the configured "
+                    "spread is stored and never used",
+        path=RPL_BROKER,
+        old="            spread = max(0.01, bar.close * self.spread_fraction)",
+        new="            spread = max(0.01, bar.close * 0.0005)  # MUTATION",
+        expect=["published", "spread", "configured"],
+    ),
     # --- Milestone 12: replay and lookahead ------------------------------
     Mutation(
         name="let-the-clock-go-backwards",
@@ -1357,6 +1402,49 @@ MUTATIONS = [
         old="MAX_EXIT_ATTEMPTS = 3",
         new="MAX_EXIT_ATTEMPTS = 9  # MUTATION",
         expect=["bound", "both sides", "mirror"],
+    ),
+    # --- an orphan's evidence lives in the session its order was
+    # --- placed in, not the one that discovers it. Looking only at the
+    # --- current session found 0 decisions for the real DRAM position
+    # --- against the following Monday and refused to adopt it.
+    Mutation(
+        name="look-for-evidence-in-only-one-session",
+        description="search the current session alone, so a position "
+                    "discovered the next trading day cannot be proved",
+        path=POS_ADOPT,
+        old="DEFAULT_EVIDENCE_LOOKBACK_DAYS = 5",
+        new="DEFAULT_EVIDENCE_LOOKBACK_DAYS = 1  # MUTATION",
+        expect=["earlier", "session", "swept", "window"],
+    ),
+    Mutation(
+        name="collapse-the-evidence-window",
+        description="return only the anchor date from the session window",
+        path=POS_ADOPT,
+        old="    return [str(anchor - timedelta(days=offset)) "
+            "for offset in range(days)]",
+        new="    return [str(anchor)]  # MUTATION",
+        expect=["earlier", "session", "swept"],
+    ),
+    Mutation(
+        name="sweep-the-evidence-window-forwards",
+        description="look at future sessions instead of past ones, "
+                    "where an orphan's evidence cannot be",
+        path=POS_ADOPT,
+        old="for offset in range(days)]",
+        new="for offset in range(-days, 0)]  # MUTATION",
+        expect=["earlier", "session", "swept"],
+    ),
+    Mutation(
+        name="an-unreadable-session-keeps-integrity-complete",
+        description="report a partial evidence sweep as complete, when "
+                    "the unread session is exactly where the proof "
+                    "might have been",
+        path=POS_ADOPT,
+        old='            degraded = True\n'
+            '            errors.append(f"{label} unreadable for {date_str}: {exc}")',
+        new='            errors.append(  # MUTATION\n'
+            '                f"{label} unreadable for {date_str}: {exc}")',
+        expect=["unreadable", "degrades", "integrity", "partial"],
     ),
     # --- adoption: taking back a position the agent provably created.
     # --- The DRAM position on 2026-10-02 was the agent's own and could

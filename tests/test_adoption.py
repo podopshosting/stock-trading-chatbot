@@ -386,3 +386,122 @@ class TestEachLayerOfTheProofGateIndependently(unittest.TestCase):
         self.assertEqual(out["adopted"], 0)
         self.assertTrue(out["blocks_new_exposure"])
         self.assertEqual(list(mgr.open_positions()), [])
+
+
+class TestEvidenceIsFoundAcrossSessions(unittest.TestCase):
+    """An orphan is usually from an EARLIER session.
+
+    The order was placed, the fill arrived late, and the cycle that
+    would have recorded it had ended. So the decision that proves the
+    position is the agent's own sits in the session where the order was
+    placed - not in the session that discovers it.
+
+    Looking only at the current session found 0 decisions for the real
+    DRAM position when tested against the following Monday's date:
+    provenance degraded to a bare prefix match, `proven` was False, and
+    the position was refused as UNKNOWN_ORIGIN. Safe, and exactly
+    useless for the case adoption exists to handle.
+    """
+
+    def _venue(self):
+        return Venue(positions=[dram_position()],
+                     orders=[{"symbol": "DRAM", "id": "d7eaecdd",
+                              "client_order_id": DRAM_CLI,
+                              "status": "filled"}])
+
+    class DatedDecisions:
+        """A decision log where rows belong to ONE session, so a
+        single-session read genuinely misses them."""
+
+        def __init__(self, rows_by_date, raises_for=()):
+            self._rows = rows_by_date
+            self._raises_for = set(raises_for)
+            self.queried = []
+
+        def for_session(self, session_date, symbol=None):
+            self.queried.append(session_date)
+            if session_date in self._raises_for:
+                raise RuntimeError(f"unreadable for {session_date}")
+            return self._rows.get(session_date, [])
+
+    def test_a_decision_from_an_earlier_session_still_proves_it(self):
+        decisions = self.DatedDecisions({"2026-10-02": [decision_row()]})
+        mgr = manager()
+        out = adopt_external_positions(
+            self._venue(), mgr, session_date="2026-10-05",
+            decisions=decisions)
+        self.assertEqual(out["adopted"], 1)
+        self.assertEqual(out["classifications"][0]["evidence"],
+                         "RECONSTRUCTED_CLIENT_ID")
+        self.assertTrue(out["classifications"][0]["proven"])
+
+    def test_the_window_is_actually_swept(self):
+        decisions = self.DatedDecisions({"2026-10-02": [decision_row()]})
+        adopt_external_positions(self._venue(), manager(),
+                                 session_date="2026-10-05",
+                                 decisions=decisions)
+        self.assertIn("2026-10-05", decisions.queried)
+        self.assertIn("2026-10-02", decisions.queried,
+                      "the session the order was placed in was not read")
+
+    def test_evidence_beyond_the_window_is_not_found(self):
+        """The control: the lookback is bounded, so a decision old
+        enough still fails - and fails CLOSED, as UNKNOWN_ORIGIN."""
+        decisions = self.DatedDecisions({"2026-01-01": [decision_row()]})
+        mgr = manager()
+        out = adopt_external_positions(
+            self._venue(), mgr, session_date="2026-10-05",
+            decisions=decisions)
+        self.assertEqual(out["adopted"], 0)
+        self.assertEqual(out["unknown_origin"], ["DRAM"])
+        self.assertTrue(out["blocks_new_exposure"])
+        self.assertEqual(list(mgr.open_positions()), [])
+
+    def test_the_lookback_is_configurable_and_reported(self):
+        decisions = self.DatedDecisions({"2026-10-02": [decision_row()]})
+        out = adopt_external_positions(
+            self._venue(), manager(), session_date="2026-10-05",
+            decisions=decisions, evidence_lookback_days=2)
+        self.assertEqual(out["evidence_lookback_days"], 2)
+        self.assertEqual(out["adopted"], 0,
+                         "2026-10-02 is outside a 2-day window")
+
+    def test_one_unreadable_session_degrades_integrity(self):
+        """A missing session is exactly where the evidence might be, so
+        a partial sweep must not report COMPLETE."""
+        decisions = self.DatedDecisions(
+            {"2026-10-02": [decision_row()]}, raises_for=["2026-10-04"])
+        out = adopt_external_positions(
+            self._venue(), manager(), session_date="2026-10-05",
+            decisions=decisions)
+        self.assertEqual(out["integrity"], INTEGRITY_PARTIAL)
+        self.assertTrue(any("2026-10-04" in e for e in out["errors"]))
+
+    def test_a_malformed_session_date_does_not_crash_the_sweep(self):
+        decisions = self.DatedDecisions({"not-a-date": [decision_row()]})
+        out = adopt_external_positions(
+            self._venue(), manager(), session_date="not-a-date",
+            decisions=decisions)
+        self.assertEqual(out["discovered"], 1)
+        self.assertEqual(decisions.queried, ["not-a-date"])
+
+    def test_the_ledger_is_swept_over_the_window_too(self):
+        """A ledger row for the order is the STRONGER proof, and it is
+        filed under the session the order was placed in."""
+        row = ExternalOrderRecord(
+            client_order_id=DRAM_CLI, session_date="2026-10-02",
+            symbol="DRAM", side="BUY", requested_quantity=DRAM_QTY,
+            requested_notional=30.02, risk_decision_id=DRAM_DECISION)
+        row.filled_quantity = DRAM_QTY
+        row.average_fill_price = DRAM_ENTRY
+
+        class DatedLedger(InMemoryOrderLedger):
+            def for_session(self, session_date):
+                return [row] if session_date == "2026-10-02" else []
+
+        out = adopt_external_positions(
+            Venue(positions=[dram_position()], orders=[]), manager(),
+            session_date="2026-10-05", ledger=DatedLedger())
+        self.assertEqual(out["adopted"], 1)
+        self.assertEqual(out["classifications"][0]["evidence"],
+                         "LEDGER_RECORD")
