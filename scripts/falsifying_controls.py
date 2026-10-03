@@ -60,6 +60,8 @@ BRK_POLLER = REPO / "agent" / "broker" / "order_poller.py"
 BRK_EXEC = REPO / "agent" / "broker" / "execution.py"
 BRK_MODELS = REPO / "agent" / "broker" / "models.py"
 
+TESTS_INIT = REPO / "tests" / "__init__.py"
+API_HANDLER = REPO / "lambda-micro" / "agent-api" / "handler.py"
 POS_MODELS = REPO / "agent" / "positions" / "models.py"
 POS_ADOPT = REPO / "agent" / "positions" / "adoption.py"
 
@@ -130,6 +132,46 @@ class Mutation:
 
 
 MUTATIONS = [
+    Mutation(
+        name="let-the-suite-reach-real-aws",
+        description="restore the real AWS endpoint so tests write to the "
+                    "production dev tables again",
+        path=TESTS_INIT,
+        old='os.environ["AWS_ENDPOINT_URL_DYNAMODB"] = "http://127.0.0.1:1"',
+        new='os.environ.pop("AWS_ENDPOINT_URL_DYNAMODB", None)  # MUTATION',
+        expect=["hermetic", "protected", "closed_port", "dynamodb"],
+    ),
+    Mutation(
+        name="let-a-named-profile-back-in",
+        description="stop clearing AWS_PROFILE, so the administrator "
+                    "profile governs the suite again",
+        path=TESTS_INIT,
+        old='os.environ.pop("AWS_PROFILE", None)\n'
+            'os.environ.pop("AWS_DEFAULT_PROFILE", None)',
+        new='pass  # MUTATION\n'
+            'os.environ.pop("AWS_DEFAULT_PROFILE", None)',
+        expect=["profile", "hermetic"],
+    ),
+    Mutation(
+        name="silently-prefer-one-date-parameter",
+        description="when date and session_date disagree, pick one instead "
+                    "of refusing - answering a question nobody asked",
+        path=API_HANDLER,
+        old='    if canonical and legacy and canonical != legacy:\n'
+            '        raise _DateConflict(legacy, canonical)',
+        new='    if False:  # MUTATION\n'
+            '        raise _DateConflict(legacy, canonical)',
+        expect=["disagree", "conflict", "400"],
+    ),
+    Mutation(
+        name="ignore-the-canonical-date-parameter",
+        description="read only the legacy `date`, so a request carrying "
+                    "session_date silently gets today",
+        path=API_HANDLER,
+        old='    canonical = (params.get("session_date") or "").strip() or None',
+        new='    canonical = None  # MUTATION',
+        expect=["session_date", "honoured", "disagree"],
+    ),
     Mutation(
         name="macd-fixed-multiplier",
         description="restore `signal = macd * 0.9` (the original defect)",

@@ -405,6 +405,40 @@ def handle_evaluate(event) -> Dict:
 def _query(event) -> Dict[str, str]:
     return dict(event.get("queryStringParameters") or {})
 
+class _DateConflict(Exception):
+    """Both date parameters were supplied and they disagree."""
+
+    def __init__(self, date_value, session_value):
+        self.date_value = date_value
+        self.session_value = session_value
+        super().__init__("date and session_date disagree")
+
+
+def _requested_session_date(event, default=None):
+    """The session a caller asked about.
+
+    CANONICAL: `session_date`. Chosen because that is what EVERY
+    response calls the field, so it is the name a caller sends back
+    after reading one. `date` is still accepted: ten routes read it and
+    links exist.
+
+    If both are supplied and they DISAGREE, this raises rather than
+    picking one. Silently preferring either would answer a question
+    nobody asked - which is the failure this whole helper exists to
+    close. Earlier, a request carrying `session_date` hit a route that
+    only read `date`, got today's empty partition back, and the
+    response echoed `session_date: <today>` - indistinguishable from an
+    authoritative "nothing happened on the day you asked about".
+    """
+    params = _query(event)
+    canonical = (params.get("session_date") or "").strip() or None
+    legacy = (params.get("date") or "").strip() or None
+    if canonical and legacy and canonical != legacy:
+        raise _DateConflict(legacy, canonical)
+    return canonical or legacy or (default or today_market_date())
+
+
+
 
 def _int_param(params: Dict, name: str, default: int, cap: int) -> int:
     try:
@@ -644,8 +678,7 @@ def handle_signals_latest(event) -> Dict:
                                               "symbol"})
         return _response(200, {"found": True, "result": row})
 
-    session_date = (params.get("session_date")
-                    or _session_date())
+    session_date = _requested_session_date(event, _session_date())
     run = store.latest_run(session_date)
     if not run:
         return _response(404, {"found": False, "session_date": session_date,
@@ -663,8 +696,7 @@ def handle_scanner_signals(event) -> Dict:
     if store is None:
         return _response(503, {"error": "signal store unavailable"})
 
-    session_date = (params.get("session_date")
-                    or _session_date())
+    session_date = _requested_session_date(event, _session_date())
     run = store.latest_run(session_date)
     if not run:
         return _response(404, {"found": False,
@@ -782,7 +814,7 @@ def handle_scanner_evidence(event) -> Dict:
     if store is None:
         return _response(503, {"error": "evidence store unavailable"})
 
-    session_date = params.get("session_date") or _session_date()
+    session_date = _requested_session_date(event, _session_date())
     run = store.latest_run(session_date) if hasattr(store, "latest_run") else None
     if not run:
         return _response(404, {"found": False, "session_date": session_date,
@@ -955,7 +987,7 @@ def handle_orders(event) -> Dict:
     submission path lives there, and an API that cannot reach it cannot
     submit. Two tests enforce that textually.
     """
-    session_date = _query(event).get("date") or today_market_date()
+    session_date = _requested_session_date(event)
     rows, error = _safe(lambda: OrderLedgerView(
         table_name=os.environ.get("AGENT_JOURNAL_TABLE",
                                   "stock-agent-dev-journal")
@@ -991,7 +1023,7 @@ def handle_positions(event) -> Dict:
     An unreadable store is still reported as unreadable, which is not
     the same as reporting none.
     """
-    session_date = _query(event).get("date") or today_market_date()
+    session_date = _requested_session_date(event)
     store, error = _safe(lambda: DynamoDBPositionStore(
         table_name=os.environ.get("AGENT_POSITIONS_TABLE",
                                   "stock-agent-dev-positions")
@@ -1020,7 +1052,7 @@ def handle_positions(event) -> Dict:
 
 
 def handle_journal(event) -> Dict:
-    session_date = _query(event).get("date") or today_market_date()
+    session_date = _requested_session_date(event)
     try:
         trades = _journal().list_trades(session_date=session_date)
     except Exception as exc:                              # noqa: BLE001
@@ -1044,7 +1076,7 @@ def handle_performance(event) -> Dict:
     NO_EDGE_DEMONSTRATED for any sample too small to support a claim,
     whichever way the numbers happen to point.
     """
-    session_date = _query(event).get("date") or today_market_date()
+    session_date = _requested_session_date(event)
     try:
         trades = _journal().list_trades(session_date=session_date)
     except Exception as exc:                              # noqa: BLE001
@@ -1387,7 +1419,7 @@ def _autonomy_context(session_date):
 def handle_autonomy(event) -> Dict:
     """What the agent is doing, in one read. Placed beside nothing that
     can place an order: every field is a stored record."""
-    session_date = _query(event).get("date") or today_market_date()
+    session_date = _requested_session_date(event)
     ctx = _autonomy_context(session_date)
     nxt = next_cycle_time()
     return _response(200, {
@@ -1423,7 +1455,7 @@ def handle_autonomy(event) -> Dict:
 
 def handle_decisions(event) -> Dict:
     q = _query(event)
-    date = q.get("date") or today_market_date()
+    date = _requested_session_date(event)
     cfg, journal_table = _autonomy_tables()
     rows, e = _safe(lambda: DynamoDBDecisionLog(
         table_name=journal_table).for_session(
@@ -1453,7 +1485,7 @@ def handle_sessions(event) -> Dict:
 
 
 def handle_session_report(event) -> Dict:
-    date = _query(event).get("date") or today_market_date()
+    date = _requested_session_date(event)
     cfg, journal_table = _autonomy_tables()
     report, e = _safe(lambda: DynamoDBSessionStore(
         table_name=journal_table).get_report(date))
@@ -1473,7 +1505,7 @@ def handle_ask(event) -> Dict:
     query = (q.get("q") or "").strip()
     if not query:
         return _response(400, {"error": "q is required"})
-    session_date = q.get("date") or today_market_date()
+    session_date = _requested_session_date(event)
 
     # A company question is answered from company intelligence; anything
     # operational from the session records. Both are deterministic, and
@@ -1695,7 +1727,7 @@ def handle_why_no_trade(event) -> Dict:
     was wrong.
     """
     from agent.autonomy.inactivity import explain_inactivity
-    session_date = _query(event).get("date") or today_market_date()
+    session_date = _requested_session_date(event)
     cfg, journal_table = _autonomy_tables()
     rows, decision_error = _safe(lambda: DynamoDBDecisionLog(
         table_name=journal_table).for_session(session_date), [])
@@ -1720,7 +1752,7 @@ def handle_shadow(event) -> Dict:
     and "no comparisons exist" are not the same claim, and only one of
     them is evidence that the simulator is calibrated.
     """
-    session_date = _query(event).get("date") or today_market_date()
+    session_date = _requested_session_date(event)
     cfg, journal_table = _autonomy_tables()
     rows, read_error = _safe(lambda: DynamoDBShadowStore(
         table_name=journal_table).for_session(session_date), [])
@@ -1814,6 +1846,20 @@ def lambda_handler(event, context):
 
     try:
         return handler(event)
+    except _DateConflict as conflict:
+        # 400, not a silent preference. A caller who sent two different
+        # dates asked two questions; answering one of them without
+        # saying so is the failure mode this replaces.
+        return _response(400, {
+            "error": "date and session_date disagree",
+            "date": conflict.date_value,
+            "session_date": conflict.session_value,
+            "canonical": "session_date",
+            "detail": ("send one, or send both with the same value. "
+                       "`date` is accepted for compatibility; "
+                       "`session_date` is canonical because that is what "
+                       "every response calls the field."),
+        })
     except Exception as e:
         # Report the failure without leaking internals into a public body.
         log_event("provider_error", operation=f"{method} {path}",
