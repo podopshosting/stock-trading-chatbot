@@ -105,6 +105,13 @@ EVENTS = frozenset({
     "position_preexisting_external",
     "position_unknown_origin",
     "adoption_positions_unreadable",
+    # the cycle's own summary of an adoption pass, and its failure.
+    # adoption is best-effort inside the cycle: a failure leaves the
+    # position unmanaged, which is the state it was already in, and
+    # raising would also stop the EXITS - the one thing that must
+    # keep working while halted.
+    "positions_adopted",
+    "adoption_failed",
     "position_opened",
     "position_reduced",
     "position_closed",

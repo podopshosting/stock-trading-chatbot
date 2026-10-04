@@ -60,6 +60,7 @@ from agent.positions import (
     DynamoDBPositionStore, PositionManager, PositionState,
     PositionStoreError,
 )
+from agent.positions.adoption import adopt_external_positions
 from agent.providers import AlpacaProvider, CachedProvider, MemoryCache
 from agent.risk import DynamoDBHaltStore, RiskLimits
 from agent.scanner import DynamoDBScannerStore
@@ -406,6 +407,50 @@ def _run(session_date: str) -> Dict:
 
     decisions = DynamoDBDecisionLog(table_name=os.environ.get(
         "AGENT_JOURNAL_TABLE", "stock-agent-dev-journal"))
+
+    # ADOPT the agent's own positions that the store does not know about.
+    #
+    # agent/positions/adoption.py existed and was never called from here
+    # - zero call sites - so a position the agent itself opened could sit
+    # at the venue unmanaged indefinitely. That is the DRAM situation:
+    # reconciliation saw a broker position the agent did not hold, raised
+    # RECONCILIATION_MISMATCH and EMERGENCY_STOP, and halted. Correctly,
+    # and permanently, because nothing ever closed the gap.
+    #
+    # Placed AFTER the store has been loaded into the manager above. That
+    # order is what makes it idempotent: adoption recognises an
+    # already-managed symbol only if the manager was populated first.
+    # Verified against the real paper account - run once it adopts, run
+    # again it reports already_managed and the position id is unchanged.
+    #
+    # Only a position whose provenance is PROVEN is adopted.
+    # PREEXISTING_EXTERNAL and UNKNOWN_ORIGIN are never adopted and
+    # never auto-closed; they block new exposure instead.
+    # One ledger, shared with the orchestrator below: adoption must read
+    # the same evidence the exit will be written into, or the two could
+    # disagree about what the agent has already sent.
+    external_order_ledger = (DynamoDBOrderLedger(table_name=JOURNAL_TABLE)
+                             if external is not None else None)
+    adoption_result = None
+    try:
+        adoption_result = adopt_external_positions(
+            broker, manager, session_date=session_date,
+            ledger=external_order_ledger, decisions=decisions,
+            max_trade_risk=RiskLimits().max_trade_risk,
+            config_version=versions.get("config", ""))
+        if adoption_result.get("adopted"):
+            log_event("positions_adopted",
+                      symbols=adoption_result.get("adopted_symbols"),
+                      session_date=session_date,
+                      integrity=adoption_result.get("integrity"))
+    except Exception as exc:                              # noqa: BLE001
+        # Never fatal. A failed adoption leaves the position unmanaged,
+        # which is the state we were already in, and reconciliation will
+        # halt on it as it already does. Raising here would also stop
+        # the EXITS, which is the one thing that must keep working.
+        log_event("adoption_failed", detail=f"{type(exc).__name__}: "
+                                            f"{str(exc)[:200]}")
+
     orchestrator = MarketDayOrchestrator(
         broker=broker, position_manager=manager, journal=journal,
         halt_store=DynamoDBHaltStore(table_name=JOURNAL_TABLE,
@@ -424,8 +469,7 @@ def _run(session_date: str) -> Dict:
         # ledger would add writes without adding recoverability. It uses
         # the journal table that already exists, so there is no new
         # table and no permission change.
-        order_ledger=(DynamoDBOrderLedger(table_name=JOURNAL_TABLE)
-                      if external is not None else None),
+        order_ledger=external_order_ledger,
         cohort=cohort)
 
     # --- daily counters from the JOURNAL, not from memory --------------
