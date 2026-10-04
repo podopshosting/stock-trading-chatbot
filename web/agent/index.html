@@ -374,6 +374,18 @@
        nothing on this page ever called them. -->
   <section class="card" style="margin-bottom:var(--gap)">
     <h2>Orders <span class="empty" id="ordersDate"></span></h2>
+    <p class="sub">External order lifecycle and exposure state. Counts and
+      exposure are always for the WHOLE session, never for the filtered
+      symbol — exposure is what gates new entries.</p>
+    <p>
+      <label for="ordersSymbol"><b>Symbol</b></label>
+      <select id="ordersSymbol" style="margin:0 6px">
+        <option value="">ALL SYMBOLS</option>
+      </select>
+      <button type="button" id="ordersUseAnalyzed">Use analysed symbol</button>
+      <button type="button" id="ordersClearFilter">Clear filter</button>
+      <span id="ordersFilterNote" class="empty"></span>
+    </p>
     <dl class="kv" id="ordersSummary"><dd class="empty">Loading…</dd></dl>
     <div id="ordersBody"><p class="empty">Loading…</p></div>
   </section>
@@ -2541,6 +2553,24 @@
     document.getElementById("simRun").addEventListener("click", runSimulation);
     document.getElementById("predGo")
       .addEventListener("click", generatePrediction);
+    document.getElementById("ordersSymbol")
+      .addEventListener("change", function () {
+        ORDERS_SYMBOL = this.value;
+        loadOrders();
+      });
+    document.getElementById("ordersUseAnalyzed")
+      .addEventListener("click", function () {
+        if (!ANALYZED_SYMBOL) { return; }
+        ORDERS_SYMBOL = ANALYZED_SYMBOL;
+        document.getElementById("ordersSymbol").value = ANALYZED_SYMBOL;
+        loadOrders();
+      });
+    document.getElementById("ordersClearFilter")
+      .addEventListener("click", function () {
+        ORDERS_SYMBOL = "";
+        document.getElementById("ordersSymbol").value = "";
+        loadOrders();
+      });
     document.getElementById("hypUseQuote").addEventListener("click", function () {
       // Only the price already fetched by the analysis. Nothing here
       // fetches a fresh quote: a hypothetical must not look like a
@@ -2691,6 +2721,77 @@
         "scored as wrong."));
     }
 
+    // MODEL PERFORMANCE, on the chronological holdout.
+    //
+    // Rendered BEFORE the live predictions' track record, because a
+    // reader who sees "LOGISTIC_DIRECTION: DOWN 17%" first will read it
+    // as information. The holdout verdict is what says whether it is.
+    var st = run.statistical;
+    if (st) {
+      node.appendChild(el("h3", null, "Model performance — holdout"));
+      if (st.status !== "FITTED") {
+        node.appendChild(el("p", "empty",
+          st.status + ": " + (st.detail || "no model was fitted")));
+      } else {
+        var sp = st.split || {};
+        node.appendChild(el("p", "empty",
+          "Chronological split, never shuffled: train " +
+          ((sp.train || {}).rows) + " / validation " +
+          ((sp.validation || {}).rows) + " / holdout " +
+          ((sp.holdout || {}).rows) + " timestamps. " +
+          (st.note || "")));
+        var cp = (st.class_prior || {}).distribution;
+        if (cp) {
+          node.appendChild(el("p", "empty",
+            "Training class distribution: " + JSON.stringify(cp) +
+            ". The bar is the hardest trivial baseline, not 0.50 — a " +
+            "two-class predictor cannot score on FLAT rows at all."));
+        }
+        var ht = el("table");
+        var hh = el("tr");
+        ["model", "n", "metric", "value", "baseline", "baseline value",
+         "verdict"].forEach(function (h) {
+          hh.appendChild(el("th", null, h));
+        });
+        ht.appendChild(hh);
+        Object.keys(st.holdout || {}).sort().forEach(function (model) {
+          var h = st.holdout[model];
+          var tr = el("tr");
+          var isAcc = h.accuracy !== undefined;
+          [model, h.sample_size,
+           isAcc ? "accuracy" : "MAE",
+           isAcc ? h.accuracy : h.mae,
+           h.baseline_name,
+           isAcc ? h.baseline_accuracy : h.baseline_mae,
+           h.verdict
+          ].forEach(function (c) {
+            tr.appendChild(el("td", null, String(c)));
+          });
+          ht.appendChild(tr);
+        });
+        node.appendChild(ht);
+        var losers = Object.keys(st.holdout || {}).filter(function (m) {
+          return st.holdout[m].beats_baseline !== true;
+        });
+        if (losers.length) {
+          node.appendChild(el("p", "err",
+            "NO DEMONSTRATED PREDICTIVE EDGE: " + losers.join(", ") +
+            " did not beat the baseline on the chronological holdout. " +
+            "Individual live predictions above are not evidence against " +
+            "this — they have no outcome yet."));
+        }
+        // Convergence, where it applies. A non-converged fit still
+        // returns coefficients, so silence here would read as success.
+        Object.keys(st.holdout || {}).forEach(function (m) {
+          if (st.holdout[m].converged === false) {
+            node.appendChild(el("p", "err",
+              m + " did NOT converge, so its coefficients are where " +
+              "training stopped rather than where it settled."));
+          }
+        });
+      }
+    }
+
     // The track record.
     var bf = run.backfill_report || (run.backfill || {}).report;
     if (bf && bf.by_model) {
@@ -2739,6 +2840,18 @@
               "calls are anti-correlated with the size of the move."
             : "No model beat it. There is no demonstrated edge.")));
       }
+      if (bf.verdict) {
+        node.appendChild(el(
+          "p", bf.verdict.verdict === "ABOVE_BASELINE" ? "empty" : "err",
+          "Backfill verdict: " + bf.verdict.verdict + " — " +
+          (bf.verdict.detail || "")));
+      }
+      if (bf.baseline_comparison && bf.baseline_comparison.baselines) {
+        node.appendChild(el("p", "empty",
+          "Baselines measured on these outcomes: " +
+          JSON.stringify(bf.baseline_comparison.baselines) +
+          ". A model must beat the hardest of these."));
+      }
       if (bf.overall_note) {
         node.appendChild(el("p", "empty", bf.overall_note));
       }
@@ -2777,11 +2890,17 @@
   }
 
   // ---- orders ----------------------------------------------------------
+  var ORDERS_SYMBOL = "";
+
   function loadOrders() {
     var sum = document.getElementById("ordersSummary");
     var body = document.getElementById("ordersBody");
     document.getElementById("ordersDate").textContent = "— " + SESSION_DATE;
-    get(dated("/agent/orders")).then(function (d) {
+    var path = dated("/agent/orders");
+    if (ORDERS_SYMBOL) {
+      path += "&symbol=" + encodeURIComponent(ORDERS_SYMBOL);
+    }
+    get(path).then(function (d) {
       // kv() takes an array and clears its parent on each call, so this
       // is one call rather than three - three would leave only the last.
       // read_integrity is included because it says whether the list can
@@ -2790,8 +2909,37 @@
       kv(sum, [["recorded", d.total_recorded],
                ["outstanding", d.outstanding],
                ["read integrity", d.read_integrity || "UNKNOWN"]]);
+      // Populate the symbol list from the UNFILTERED session, so
+      // removing the filter is always possible and a phantom or
+      // unknown-origin row cannot be hidden by having filtered it out.
+      var sel = document.getElementById("ordersSymbol");
+      var note = document.getElementById("ordersFilterNote");
+      if (!ORDERS_SYMBOL) {
+        var seen = {};
+        (d.orders || []).forEach(function (o) {
+          if (o.symbol) { seen[o.symbol] = true; }
+        });
+        var keep = sel.value;
+        sel.innerHTML = "";
+        var all = el("option", null, "ALL SYMBOLS");
+        all.value = ""; sel.appendChild(all);
+        Object.keys(seen).sort().forEach(function (s) {
+          var o = el("option", null, s); o.value = s; sel.appendChild(o);
+        });
+        sel.value = keep;
+        note.className = "empty";
+        note.textContent = (d.orders || []).length + " order(s) this session";
+      } else if (d.filter_note) {
+        note.className = "empty";
+        note.textContent = d.filter_note;
+      }
+
       var orders = d.orders || [];
-      if (!orders.length) { emptyForDate(body, "orders"); return; }
+      if (!orders.length) {
+        emptyForDate(body, ORDERS_SYMBOL
+          ? "orders for " + ORDERS_SYMBOL : "orders");
+        return;
+      }
       body.innerHTML = "";
       var tbl = el("table");
       var hd = el("tr");

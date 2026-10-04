@@ -144,6 +144,27 @@ def _terminal(payload: Dict, state: str, reason: str = "") -> Dict:
     payload["terminal_state"] = state
     payload["invoked_at"] = _now_iso()
     payload["code_sha"] = os.environ.get("AGENT_CODE_SHA", "unknown")
+    # EXECUTION MODE, recorded here because nothing recorded it.
+    #
+    # The read API has always rendered
+    # snapshot.get("execution_mode") or "UNKNOWN", and no writer ever
+    # set the field - so the dashboard reported UNKNOWN permanently
+    # rather than transiently, and the pre-market readiness check
+    # counted it as unmet. A field that is read and never written is
+    # not a gap in the data; it is a gap between two halves of the
+    # same contract.
+    #
+    # Derived from the POLICY, not from the environment variable read a
+    # second time. policy_from_environment converts LIVE to DISABLED -
+    # it does not raise, because a deployment told to go live must stop
+    # rather than error into something retryable - so the mode reported
+    # here can never be LIVE even if the variable says so. Reading the
+    # variable directly would have reported LIVE while the agent was
+    # DISABLED, which is the one direction of error that matters.
+    payload.setdefault(
+        "execution_mode",
+        str(getattr(policy_from_environment(
+            os.environ.get("AGENT_EXECUTION_MODE")), "mode", "UNKNOWN")))
     if reason:
         payload.setdefault("reason", reason)
     payload.setdefault("orders_submitted", 0)

@@ -442,6 +442,10 @@ def handle_replay(event) -> Dict:
     regime_detail = None
     dataset_id = None
     dataset_checksum = None
+    # Declared here, not created inside a branch and read back out of
+    # locals(). Only the HISTORICAL path sets it; SCENARIO runs have no
+    # provider provenance, and None says so.
+    provider_provenance = None
     bars: Dict[str, Any] = {}
     scenario_name = None
     symbol = None
@@ -562,7 +566,7 @@ def handle_replay(event) -> Dict:
                 "on EVERY bar - the long-only regime gate is DISABLED, so "
                 "this run describes the strategy without its market filter")
         dataset_id = f"alpaca:{symbol}:{timeframe}:{len(series)}"
-        provider_provenance = str(provenance) if provenance else None
+        provider_provenance = str(provenance) if provenance else None  # noqa: F841
         import hashlib
         h = hashlib.sha256()
         for b in series:
@@ -629,7 +633,7 @@ def handle_replay(event) -> Dict:
         "scenario": scenario_name,
         "dataset_id": dataset_id,
         "dataset_checksum": dataset_checksum,
-        "provider_provenance": locals().get("provider_provenance"),
+        "provider_provenance": provider_provenance,
         "code_sha": _code_sha(),
         "regime_source": regime_source,
         "regime_is_synthetic": d.get("regime_is_synthetic", True),
@@ -834,6 +838,9 @@ def handle_predict(event) -> Dict:
     from agent.prediction import maturation as PM
     from agent.prediction import metrics as PMET
     from agent.prediction import models as PMOD
+    from agent.prediction import splits as PS
+    from agent.prediction import statistical as PST
+    from agent.prediction import targets as PT
 
     interval = {"1day": 86400.0, "1hour": 3600.0, "15min": 900.0,
                 "5min": 300.0, "1min": 60.0}[timeframe]
@@ -848,18 +855,192 @@ def handle_predict(event) -> Dict:
     backfill: List[Any] = []
     warmup = 60
 
+    # Statistical models, fitted on a CHRONOLOGICAL training split of
+    # this symbol's own history. Trained here rather than loaded,
+    # because a model artifact stored and reused across datasets would
+    # need provenance this endpoint cannot yet verify - and a model
+    # applied to data it was not fitted for is the leak this whole
+    # package is built to avoid.
+    stat_rows = []
+    for i in range(warmup, len(bars) - 6):
+        r = PF.build(bars, i, symbol, dataset_id=dataset_id,
+                     dataset_checksum=checksum)
+        if r is None:
+            continue
+        vec = PF.numeric_vector(r)
+        if vec is None:
+            continue
+        d = PT.direction(bars, i, horizons[1], interval)
+        fr = PT.forward_return(bars, i, horizons[1], interval)
+        if not d.resolved or not fr.resolved:
+            continue
+        stat_rows.append({"feature_time": r.feature_time,
+                          "feature_hash": r.feature_hash,
+                          "vector": vec, "label": d.value,
+                          "value": fr.value})
+
+    statistical: Dict[str, Any] = {"status": "NOT_FITTED"}
+    # Declared before the branch so the live-prediction section below
+    # can test them directly. locals().get() worked and read as though
+    # the names might not exist, which is exactly the doubt a reader
+    # should not have to resolve.
+    logistic = None
+    ridge = None
+    split = PS.chronological_split([r["feature_time"] for r in stat_rows])
+    if split is None:
+        statistical = {
+            "status": "INSUFFICIENT_DATA",
+            "rows": len(stat_rows),
+            "detail": ("too few usable rows for three non-empty "
+                       "chronological splits; a holdout of zero rows "
+                       "reports no error and would read as a perfect "
+                       "score")}
+    else:
+        train = [r for r in stat_rows
+                 if split.assigned(r["feature_time"]) == PS.TRAIN]
+        held = [r for r in stat_rows
+                if split.assigned(r["feature_time"]) == PS.HOLDOUT]
+        prior = PS.class_prior([r["label"] for r in train])
+        logistic = PST.train_logistic(
+            [r["vector"] for r in train], [r["label"] for r in train],
+            training_start=split.train_start,
+            training_end=split.train_end, trained_at=_now(),
+            dataset_hash=checksum,
+            feature_schema_version=PF.FEATURE_SCHEMA_VERSION,
+            code_sha=_code_sha())
+        ridge = PST.train_ridge(
+            [r["vector"] for r in train], [r["value"] for r in train],
+            training_start=split.train_start,
+            training_end=split.train_end, trained_at=_now(),
+            dataset_hash=checksum,
+            feature_schema_version=PF.FEATURE_SCHEMA_VERSION,
+            code_sha=_code_sha())
+
+        holdout_report: Dict[str, Any] = {}
+        if logistic and held:
+            scored = [(PST.predict_logistic(logistic, r["vector"]),
+                       r["label"]) for r in held]
+            scored = [(pred, lab) for pred, lab in scored
+                      if pred is not None]
+            if scored:
+                acc = sum(1 for pred, lab in scored
+                          if pred[0] == lab) / len(scored)
+                majority = prior.get("majority")
+                base = (sum(1 for _, lab in scored if lab == majority)
+                        / len(scored))
+                holdout_report["LOGISTIC_DIRECTION"] = {
+                    "sample_size": len(scored),
+                    "accuracy": round(acc, 6),
+                    "baseline_name": f"ALWAYS_{majority}",
+                    "baseline_accuracy": round(base, 6),
+                    "beats_baseline": acc > base,
+                    "verdict": ("ABOVE_BASELINE" if acc > base
+                                else "NO_DEMONSTRATED_PREDICTIVE_EDGE"),
+                    "converged": logistic.converged,
+                }
+        if ridge and held:
+            pairs = [(PST.predict_ridge(ridge, r["vector"]), r["value"])
+                     for r in held]
+            pairs = [(pred, actual) for pred, actual in pairs
+                     if pred is not None]
+            if pairs and train:
+                mae = sum(abs(pred - actual)
+                          for pred, actual in pairs) / len(pairs)
+                mean_of_train = (sum(r["value"] for r in train)
+                                 / len(train))
+                base_mae = sum(abs(mean_of_train - actual)
+                               for _, actual in pairs) / len(pairs)
+                holdout_report["RIDGE_FORWARD_RETURN"] = {
+                    "sample_size": len(pairs),
+                    "mae": round(mae, 6),
+                    "rmse": round((sum((pred - actual) ** 2
+                                       for pred, actual in pairs)
+                                   / len(pairs)) ** 0.5, 6),
+                    "baseline_name": "PREDICT_TRAINING_MEAN",
+                    "baseline_mae": round(base_mae, 6),
+                    "beats_baseline": mae < base_mae,
+                    "verdict": ("ABOVE_BASELINE" if mae < base_mae
+                                else "NO_DEMONSTRATED_PREDICTIVE_EDGE"),
+                }
+        statistical = {
+            "status": "FITTED",
+            "split": split.to_dict(),
+            "class_prior": prior,
+            "artifacts": {
+                k: v.to_dict() for k, v in
+                (("LOGISTIC_DIRECTION", logistic),
+                 ("RIDGE_FORWARD_RETURN", ridge)) if v is not None},
+            "holdout": holdout_report,
+            "note": ("Scaler, class prior and coefficients are fitted "
+                     "on the TRAINING split only. The holdout is "
+                     "scored once and not tuned against."),
+        }
+
     # The live prediction, at the last bar.
     record = PF.build(bars, len(bars) - 1, symbol, dataset_id=dataset_id,
                       dataset_checksum=checksum)
     if record is None:
         return _response(422, {
             "error": "no feature record could be built at the last bar"})
+    baseline_models = (PMOD.NO_SKILL, PMOD.PREVIOUS_RETURN_SIGN,
+                       PMOD.MOMENTUM, PMOD.MEAN_REVERSION,
+                       PMOD.CURRENT_SIGNAL_ENGINE, PMOD.ALWAYS_UP,
+                       PMOD.ALWAYS_DOWN)
     for p in PMOD.predict_all_baselines(record, generated_at=_now(),
-                                        horizons=horizons):
+                                        horizons=horizons,
+                                        models=baseline_models):
         d = p.to_dict()
         d["status"] = PMOD.PENDING
         d["horizon_bars"] = round(p.horizon_minutes * 60.0 / interval, 2)
         live.append(d)
+
+    # The statistical models, at the middle horizon they were fitted
+    # for. Shown at that horizon ONLY: a model fitted on two-bar
+    # forward returns has no claim about five bars, and displaying one
+    # under another horizon would be a fabrication.
+    arts = (statistical.get("artifacts") or {})
+    live_vector = PF.numeric_vector(record)
+    if live_vector is not None and arts:
+        if "LOGISTIC_DIRECTION" in arts:
+            out = (PST.predict_logistic(logistic, live_vector)
+                   if logistic else None)
+            if out:
+                live.append({
+                    "model": "LOGISTIC_DIRECTION",
+                    "model_version": logistic.model_version,
+                    "prediction": out[0],
+                    # A real probability, from a model that computed
+                    # one. NOT called confidence: that word implies
+                    # calibrated semantics, measured separately.
+                    "probability": out[1],
+                    "deterministic": False,
+                    "horizon_minutes": horizons[1],
+                    "horizon_bars": round(
+                        horizons[1] * 60.0 / interval, 2),
+                    "status": PMOD.PENDING,
+                    "feature_time": record.feature_time,
+                    "detail": ("fitted on the training split of this "
+                               "symbol's own history"),
+                })
+        if "RIDGE_FORWARD_RETURN" in arts:
+            value = (PST.predict_ridge(ridge, live_vector)
+                     if ridge else None)
+            if value is not None:
+                live.append({
+                    "model": "RIDGE_FORWARD_RETURN",
+                    "model_version": ridge.model_version,
+                    "prediction": f"{value:+.4f}%",
+                    "probability": None,
+                    "deterministic": False,
+                    "horizon_minutes": horizons[1],
+                    "horizon_bars": round(
+                        horizons[1] * 60.0 / interval, 2),
+                    "status": PMOD.PENDING,
+                    "feature_time": record.feature_time,
+                    "detail": ("forward RETURN, not profit: a small "
+                               "positive forecast is not an edge once "
+                               "the spread is paid"),
+                })
 
     # Backfill, so the card can show a track record rather than only a
     # fresh unanswerable claim.
@@ -869,7 +1050,8 @@ def handle_predict(event) -> Dict:
         if r is None:
             continue
         backfill.extend(PMOD.predict_all_baselines(
-            r, generated_at=_now(), horizons=horizons))
+            r, generated_at=_now(), horizons=horizons,
+            models=baseline_models))
     outcomes = PM.mature_all(backfill, {symbol: bars},
                              evaluated_at=_now(),
                              bar_interval_seconds=interval,
@@ -891,6 +1073,7 @@ def handle_predict(event) -> Dict:
             "feature_schema_version": PF.FEATURE_SCHEMA_VERSION,
             "model_version": PMOD.MODEL_SCHEMA_VERSION,
             "live_predictions": live,
+        "statistical": statistical,
             "backfill_report": report,
         }))
         persisted = True
@@ -913,6 +1096,7 @@ def handle_predict(event) -> Dict:
         "horizons_minutes": horizons,
         "feature_record": record.to_dict(),
         "live_predictions": live,
+        "statistical": statistical,
         "live_note": (
             "Every live prediction is PENDING: its horizon has not "
             "elapsed. A forecast about the future has no outcome yet, "

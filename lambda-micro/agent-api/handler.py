@@ -1115,26 +1115,21 @@ def handle_performance(event) -> Dict:
     return _response(200, describe_perf(trades))
 
 
-def handle_pipeline(event) -> Dict:
-    """Every stage for one symbol, kept separate.
+def _pipeline_stages(symbol: str) -> Dict[str, Dict]:
+    """Every stage for one symbol. THE single implementation.
 
-    This is the endpoint the dashboard uses. It deliberately returns the
-    stages side by side rather than a composite score: a single number
-    would hide which stage drove the outcome, and the whole point of the
-    decomposition is to be able to distrust one stage without
-    distrusting all of them.
+    Extracted from handle_pipeline so chat routes to the SAME
+    computation the Analyze button uses. A second arithmetic path in
+    chat would be a second system, and it would be a user who found the
+    disagreement rather than a test.
+
+    Raises ProviderError / SymbolNotFound; the HTTP wrapper turns those
+    into a 502, and chat reports them as a service failure rather than
+    as a statement about the symbol.
     """
-    symbol = _query(event).get("symbol")
-    if not symbol:
-        return _response(400, {"error": "symbol is required"})
     symbol = symbol.upper()
-
     stages: Dict[str, Dict] = {}
-    try:
-        hypothesis, signal, catalyst, regime = _hypothesis_for(symbol)
-    except (ProviderError, SymbolNotFound) as exc:
-        return _response(502, {"error": "provider unavailable",
-                               "detail": str(exc)[:200]})
+    hypothesis, signal, catalyst, regime = _hypothesis_for(symbol)
 
     stages["quantitative"] = {
         "direction": signal.get("direction"),
@@ -1181,6 +1176,27 @@ def handle_pipeline(event) -> Dict:
         price=signal.get("price"),
         quote_age_seconds=quality.get("age_seconds")))
     stages["risk"] = decision.as_dict()
+    return stages
+
+
+def handle_pipeline(event) -> Dict:
+    """Every stage for one symbol, kept separate.
+
+    This is the endpoint the dashboard uses. It deliberately returns the
+    stages side by side rather than a composite score: a single number
+    would hide which stage drove the outcome, and the whole point of the
+    decomposition is to be able to distrust one stage without
+    distrusting all of them.
+    """
+    symbol = _query(event).get("symbol")
+    if not symbol:
+        return _response(400, {"error": "symbol is required"})
+    symbol = symbol.upper()
+    try:
+        stages = _pipeline_stages(symbol)
+    except (ProviderError, SymbolNotFound) as exc:
+        return _response(502, {"error": "provider unavailable",
+                               "detail": str(exc)[:200]})
 
     return _response(200, {
         "symbol": symbol,
@@ -1520,6 +1536,218 @@ def handle_session_report(event) -> Dict:
                            "written": report is not None, "read_error": e})
 
 
+
+SIM_SERVICE_URL = os.environ.get(
+    "SIM_SERVICE_URL",
+    "https://wggumxk6ekwgpnbudtofkoo47q0yattv.lambda-url.us-east-2.on.aws")
+
+
+def _call_sim(path: str, payload: Optional[Dict] = None,
+              timeout: float = 45.0):
+    """Call the simulation service. Returns (body, error).
+
+    The simulation service is a SEPARATE Lambda because agent.replay
+    imports a paper broker and this API's safety property is that it
+    has none. Chat reaching it over HTTP preserves that: this process
+    still cannot construct a broker.
+
+    A timeout is an error with a reason, not an empty answer: a replay
+    can legitimately take longer than a chat request should wait.
+    """
+    import urllib.error
+    import urllib.request
+    url = SIM_SERVICE_URL.rstrip("/") + path
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode()
+        headers["Content-Type"] = "application/json"
+    try:
+        request = urllib.request.Request(url, data=data, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return json.loads(resp.read()), None
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code}: {exc.read().decode()[:200]}"
+    except Exception as exc:                                  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _answer_symbol_question(intent, session_date: str) -> Optional[Dict]:
+    """Dispatch a stock question to the service that owns the answer."""
+    from agent import chat_symbols
+    symbol = intent.symbol
+
+    if intent.intent in (chat_symbols.ANALYZE, chat_symbols.WHY_WOULD,
+                         chat_symbols.WHY_WOULD_NOT,
+                         chat_symbols.SIGNALS):
+        # The same pipeline the Analyze button calls.
+        try:
+            stages = _pipeline_stages(symbol)
+        except Exception as exc:                              # noqa: BLE001
+            return {"answer": (f"I could not analyse {symbol}: "
+                               f"{type(exc).__name__}"),
+                    "grounded": False, "sources": [],
+                    "llm_used": False, "intent": intent.intent,
+                    "session_date": session_date}
+        risk = stages.get("risk") or {}
+        quant = stages.get("quantitative") or {}
+        hypothesis = stages.get("hypothesis") or {}
+        regime = stages.get("regime") or {}
+
+        if intent.intent == chat_symbols.SIGNALS:
+            answer = (
+                f"{symbol} signals: direction {quant.get('direction')}, "
+                f"agreement between independent groups "
+                f"{quant.get('signal_agreement')}, magnitude "
+                f"{quant.get('signal_magnitude')}, band "
+                f"{quant.get('strength_band')} "
+                f"({quant.get('buy_groups')} group(s) voting buy, "
+                f"{quant.get('sell_groups')} selling). Agreement is NOT "
+                f"a probability.")
+        else:
+            approved = risk.get("approved")
+            reasons = risk.get("reasons") or []
+            verdict = ("WOULD be approved" if approved is True
+                       else "would NOT be approved")
+            answer = (
+                f"{symbol} {verdict} right now. Hypothesis: "
+                f"{hypothesis.get('strategy')} "
+                f"({hypothesis.get('status')}), strength "
+                f"{hypothesis.get('hypothesis_strength')}. Regime "
+                f"{regime.get('regime')}, posture "
+                f"{regime.get('risk_posture')}.")
+            if reasons:
+                answer += " Every reason the Risk Governor gave: " \
+                          + "; ".join(str(r) for r in reasons)
+            answer += (" This is analysis, not an instruction to trade, "
+                       "and nothing here places an order.")
+        return {"answer": answer, "grounded": True,
+                "sources": ["pipeline", "risk", "hypothesis", "signals"],
+                "llm_used": False, "intent": intent.intent,
+                "symbol": symbol, "session_date": session_date,
+                "composite_score": None,
+                "composite_score_note": (
+                    "deliberately absent; each stage is reported "
+                    "separately")}
+
+    if intent.intent == chat_symbols.PREDICTION:
+        body, error = _call_sim("/sim/predict",
+                                {"symbol": symbol, "days": 250,
+                                 "timeframe": "1day"}, timeout=60.0)
+        if error:
+            return {"answer": (f"The prediction service could not be "
+                               f"reached for {symbol}: {error}. This is "
+                               f"a service failure, not a statement "
+                               f"about {symbol}."),
+                    "grounded": False, "sources": [], "llm_used": False,
+                    "intent": intent.intent, "session_date": session_date}
+        stat = (body or {}).get("statistical") or {}
+        holdout = stat.get("holdout") or {}
+        bf = ((body or {}).get("backfill") or {}).get("report") or {}
+        verdict = (bf.get("verdict") or {}).get("verdict")
+        lines = [f"Research-only predictions for {symbol}. "
+                 f"NOT used for execution."]
+        for p in (body or {}).get("live_predictions", []):
+            if p.get("model") in ("LOGISTIC_DIRECTION",
+                                  "RIDGE_FORWARD_RETURN"):
+                prob = p.get("probability")
+                lines.append(
+                    f"{p['model']} at {p.get('horizon_bars')} bar(s): "
+                    f"{p.get('prediction')}"
+                    + (f" (probability {prob})" if prob is not None
+                       else ""))
+        for model, h in holdout.items():
+            metric = ("accuracy " + str(h.get("accuracy"))
+                      if "accuracy" in h else "MAE " + str(h.get("mae")))
+            lines.append(
+                f"{model} on the chronological holdout: {metric} "
+                f"against {h.get('baseline_name')} at "
+                f"{h.get('baseline_accuracy', h.get('baseline_mae'))} "
+                f"over {h.get('sample_size')} sample(s) - "
+                f"{h.get('verdict')}.")
+        if verdict:
+            lines.append(f"Backfilled baselines: {verdict}.")
+        if verdict == "NO_DEMONSTRATED_PREDICTIVE_EDGE" or any(
+                h.get("beats_baseline") is not True
+                for h in holdout.values()):
+            lines.append(
+                "NO DEMONSTRATED PREDICTIVE EDGE. These are measurements, "
+                "not recommendations, and a single live prediction is not "
+                "evidence against the holdout result.")
+        return {"answer": " ".join(lines), "grounded": True,
+                "sources": ["prediction service", "holdout evaluation"],
+                "llm_used": False, "intent": intent.intent,
+                "symbol": symbol, "session_date": session_date,
+                "mode": "RESEARCH_ONLY"}
+
+    if intent.intent == chat_symbols.SCENARIO:
+        if not intent.scenario:
+            body, error = _call_sim("/sim/scenarios")
+            names = sorted(s["id"] for s in (body or {}).get(
+                "scenarios", [])) if body else []
+            return {"answer": ("Name a scenario. The canonical library "
+                               "is: " + ", ".join(names)
+                               if names else
+                               "The scenario library could not be read: "
+                               + str(error)),
+                    "grounded": bool(names), "sources": ["scenarios"],
+                    "llm_used": False, "intent": intent.intent,
+                    "session_date": session_date}
+        body, error = _call_sim(
+            "/sim/replay", {"mode": "SCENARIO",
+                            "scenario": intent.scenario}, timeout=60.0)
+        if error:
+            return {"answer": (f"The simulation service could not run "
+                               f"{intent.scenario}: {error}"),
+                    "grounded": False, "sources": [], "llm_used": False,
+                    "intent": intent.intent, "session_date": session_date}
+        a = (body or {}).get("assumptions") or {}
+        s = (body or {}).get("summary") or {}
+        return {"answer": (
+            f"Ran {intent.scenario} as {a.get('run_id')}. Assumptions "
+            f"first: regime {a.get('regime_source')} "
+            f"(synthetic={a.get('regime_is_synthetic')}), stop model "
+            f"{a.get('stop_model')}, config {a.get('config_name')} "
+            f"(deployable={a.get('config_deployable')}), "
+            f"{'VALID' if a.get('valid') else 'VOID'}. Result: "
+            f"{s.get('trades')} trade(s), net {s.get('net_pnl')}, "
+            f"{s.get('stop_breaches')} stop breach(es), worst R "
+            f"{s.get('worst_r')}. The scenario symbol is synthetic; "
+            f"{intent.symbol} was not used."),
+            "grounded": True, "sources": ["simulation service"],
+            "llm_used": False, "intent": intent.intent,
+            "run_id": a.get("run_id"), "session_date": session_date}
+
+    if intent.intent == chat_symbols.REPLAY:
+        months = intent.months or 6
+        days = min(2000, max(60, months * 21))
+        body, error = _call_sim(
+            "/sim/replay", {"mode": "HISTORICAL", "symbol": symbol,
+                            "days": days, "timeframe": "1day",
+                            "regime_source": "NONE"}, timeout=70.0)
+        if error:
+            return {"answer": (f"The simulation service could not replay "
+                               f"{symbol}: {error}"),
+                    "grounded": False, "sources": [], "llm_used": False,
+                    "intent": intent.intent, "session_date": session_date}
+        a = (body or {}).get("assumptions") or {}
+        s = (body or {}).get("summary") or {}
+        return {"answer": (
+            f"Replayed {symbol} over {days} bars as {a.get('run_id')}. "
+            f"Regime source {a.get('regime_source')} - with NO regime "
+            f"the long-only gate refuses every candidate, so this is a "
+            f"CONTROL run and {s.get('trades')} trade(s) is the expected "
+            f"result, not a performance figure. Dataset "
+            f"{a.get('dataset_checksum')}. Ask for a permissive-regime "
+            f"run from the workbench if you want the counterfactual, "
+            f"which measures the strategy WITHOUT its market filter."),
+            "grounded": True, "sources": ["simulation service"],
+            "llm_used": False, "intent": intent.intent,
+            "run_id": a.get("run_id"), "session_date": session_date}
+
+    return None
+
+
 def handle_ask(event) -> Dict:
     """Answer a question from STORED records. GET, because the API's
     invariant is exactly one POST.
@@ -1576,6 +1804,31 @@ def handle_ask(event) -> Dict:
             date_resolution = resolution.to_dict()
             if resolution.resolved:
                 session_date = resolution.resolved_date
+
+    # STOCK QUESTIONS route to the services the UI already uses.
+    #
+    # "Analyze AAPL" must give the same answer as pressing Analyze, so
+    # it calls the same pipeline rather than computing a second opinion
+    # here. A chat path with its own arithmetic is a second system that
+    # will disagree with the first, and the disagreement gets found by a
+    # user rather than a test.
+    from agent import chat_symbols
+    symbol_intent = chat_symbols.classify(query)
+    if symbol_intent.actionable:
+        routed = _answer_symbol_question(symbol_intent, session_date)
+        if routed:
+            return _response(200, routed)
+    elif symbol_intent.intent and not symbol_intent.symbol:
+        # Understood the question, could not identify the stock. Asking
+        # is better than analysing one at random: English is full of
+        # three-letter uppercase words.
+        return _response(200, {
+            "answer": (f"I understood this as {symbol_intent.intent} but "
+                       f"could not identify a ticker. Name it explicitly, "
+                       f"for example $AAPL."),
+            "grounded": True, "sources": [], "llm_used": False,
+            "intent": symbol_intent.intent, "session_date": session_date,
+        })
 
     # A company question is answered from company intelligence; anything
     # operational from the session records. Both are deterministic, and
