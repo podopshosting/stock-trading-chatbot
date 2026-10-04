@@ -37,7 +37,28 @@ run_test_gate() {
     return 0
   fi
   echo "==> test gate"
-  if ! ( cd "$REPO" && python3 -m unittest discover -s tests -t . \
+  # EXPLICIT CREDENTIAL BOUNDARY.
+  #
+  # This script exports AWS_PROFILE so it can deploy. Running the test
+  # gate in that same environment is what turned the unit suite into an
+  # integration suite: tests/test_cycle_handler.py invokes the real
+  # cycle handler, which built real DynamoDB clients, which then
+  # succeeded. Every deploy wrote two phantom order intents, cycle
+  # snapshots and health streak records into the deployed dev tables.
+  #
+  # The test phase now runs with credentials REMOVED from its
+  # environment. tests/__init__.py seals the suite anyway - that is
+  # layer three - but a deploy script that hands credentials to a test
+  # run is a boundary error regardless of whether something downstream
+  # catches it, and the two phases genuinely have different authority.
+  #
+  # env -u is used rather than setting empty values: an empty
+  # AWS_PROFILE is still a profile name to botocore.
+  if ! ( cd "$REPO" && env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
+            -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY \
+            -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
+            -u RUN_AWS_INTEGRATION_TESTS \
+            python3 -m unittest discover -s tests -t . \
             > /tmp/agent-deploy-tests.log 2>&1 ); then
     echo "FATAL: the test suite is RED; refusing to deploy." >&2
     grep -E '^(FAIL|ERROR):' /tmp/agent-deploy-tests.log | head -20 >&2
@@ -46,6 +67,22 @@ run_test_gate() {
   fi
   tail -1 /tmp/agent-deploy-tests.log | sed 's/^/    /'
   grep -E '^Ran ' /tmp/agent-deploy-tests.log | sed 's/^/    /'
+
+  # And prove the suite stayed inside the process. The suite passing
+  # says the tests agree with the code; it says nothing about whether
+  # they reached AWS. For weeks they did.
+  echo "==> hermeticity gate"
+  if ! ( cd "$REPO" && env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE \
+            -u RUN_AWS_INTEGRATION_TESTS \
+            python3 scripts/verify_test_hermeticity.py \
+            > /tmp/agent-deploy-hermetic.log 2>&1 ); then
+    echo "FATAL: the test suite is not hermetic; refusing to deploy." >&2
+    grep -aE "^(FAIL|NOT RUN|AWS calls)" /tmp/agent-deploy-hermetic.log \
+      | head -10 >&2
+    exit 1
+  fi
+  grep -aE "^(AWS calls|blocked attempts|PASS)" \
+    /tmp/agent-deploy-hermetic.log | sed 's/^/    /'
 }
 
 

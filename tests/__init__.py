@@ -30,6 +30,20 @@ module at a time produced no writes - the write needed the credentials
 that happened to be exported in that shell. "It passes locally" and
 "it is hermetic" are different claims, and only the second one matters.
 
+LAYERS
+------
+
+Four, because the incident was a single-layer failure and repeating
+that shape would be learning the wrong lesson:
+
+1. Credentials neutralised (below).
+2. Endpoints pointed at a closed port (below).
+3. The CALL blocked before any socket, by tests/support/aws_seal.py.
+   This holds even if layers 1 and 2 are removed.
+4. Integration tests must opt in with RUN_AWS_INTEGRATION_TESTS=1.
+   Credentials existing is not permission - that inference is what
+   turned the unit suite into a writer.
+
 HOW
 ---
 
@@ -92,3 +106,14 @@ PROTECTED_TABLES = (
     "stock-agent-dev-signals",
     "stock-agent-dev-evidence",
 )
+
+
+# Layer 3: block the call itself.
+#
+# Installed AFTER the environment is set, so an integration run - which
+# skips the seal - still gets a sane region. install() is a no-op when
+# RUN_AWS_INTEGRATION_TESTS=1, which is how real-AWS tests opt out.
+from tests.support import aws_seal                            # noqa: E402
+
+if not aws_seal.integration_mode():
+    aws_seal.install()
