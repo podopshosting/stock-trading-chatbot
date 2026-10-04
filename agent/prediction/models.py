@@ -43,6 +43,23 @@ MODEL_SCHEMA_VERSION = "models-v1.0.0"
 # process boundaries and a renamed enum member would stop matching
 # historical rows.
 NO_SKILL = "NO_SKILL"
+# Dataset-aware baselines.
+#
+# NO_SKILL alone is the WRONG bar, and measurement proved it. The
+# direction target has three classes - on 3,312 resolved AAPL-and-peers
+# targets: UP 0.4472, DOWN 0.3928, FLAT 0.1600 - while NO_SKILL only
+# ever says UP or DOWN. A uniform two-class flip on a three-class target
+# expects (P(UP)+P(DOWN))/2 = 0.4200, and NO_SKILL measured 0.4182. It
+# was behaving correctly; 0.50 was never its expectation.
+#
+# ALWAYS_UP scores 0.4472 on the same data, which beats every model
+# tried so far. A model that cannot beat "always say UP" has not
+# demonstrated anything, and against an assumed 0.50 it would have
+# looked like a near miss instead.
+MAJORITY_CLASS = "MAJORITY_CLASS"
+RANDOM_CLASS_PRIOR = "RANDOM_CLASS_PRIOR"
+ALWAYS_UP = "ALWAYS_UP"
+ALWAYS_DOWN = "ALWAYS_DOWN"
 PREVIOUS_RETURN_SIGN = "PREVIOUS_RETURN_SIGN"
 MOMENTUM = "MOMENTUM"
 MEAN_REVERSION = "MEAN_REVERSION"
@@ -51,7 +68,13 @@ LOGISTIC_DIRECTION = "LOGISTIC_DIRECTION"
 RIDGE_FORWARD_RETURN = "RIDGE_FORWARD_RETURN"
 
 DETERMINISTIC_MODELS = (NO_SKILL, PREVIOUS_RETURN_SIGN, MOMENTUM,
-                        MEAN_REVERSION, CURRENT_SIGNAL_ENGINE)
+                        MEAN_REVERSION, CURRENT_SIGNAL_ENGINE,
+                        MAJORITY_CLASS, RANDOM_CLASS_PRIOR, ALWAYS_UP,
+                        ALWAYS_DOWN)
+# The bar a model must clear. Reported together, because clearing the
+# coin flip while losing to "always say UP" is not an edge.
+REFERENCE_BASELINES = (NO_SKILL, MAJORITY_CLASS, RANDOM_CLASS_PRIOR,
+                       ALWAYS_UP, ALWAYS_DOWN)
 PROBABILISTIC_MODELS = (LOGISTIC_DIRECTION,)
 REGRESSION_MODELS = (RIDGE_FORWARD_RETURN,)
 BASELINE_MODELS = DETERMINISTIC_MODELS
@@ -275,7 +298,70 @@ def _current_signal_engine(record: FeatureRecord, horizon: int):
                              if agreement is not None else ""))
 
 
+def _always(label: str):
+    """A constant predictor. Trivial, and the hardest bar to clear.
+
+    Reported because a constant can beat every rule in a market with a
+    directional drift, and a model that loses to one has measured the
+    drift rather than learned anything.
+    """
+    def fn(record: FeatureRecord, horizon: int):              # noqa: ARG001
+        return label, None, f"always predicts {label}"
+    return fn
+
+
+def _majority_class(record: FeatureRecord, horizon: int):
+    """The most frequent class IN THE TRAINING DATA.
+
+    Not computed here: this module has no training set, and inferring
+    "majority" from the single record in front of it would be a
+    different and meaningless predictor. The class prior is supplied by
+    the caller through the feature record so the choice stays
+    attributable, and the model ABSTAINS rather than guessing when it
+    is absent.
+    """
+    prior = record.values.get("class_prior_majority")
+    if prior is None:
+        return (ABSTAIN, None,
+                "no class prior supplied; the majority class is a "
+                "property of the training set, not of one observation")
+    return str(prior), None, f"training-set majority class is {prior}"
+
+
+def _random_class_prior(record: FeatureRecord, horizon: int):
+    """A draw from the training class distribution, seeded.
+
+    Harder to beat than a uniform flip, because it already knows how
+    often each class occurs. Seeded from the feature hash for the same
+    reason NO_SKILL is: an unseeded draw makes "better than chance"
+    unfalsifiable.
+    """
+    prior = record.values.get("class_prior_distribution")
+    if not isinstance(prior, dict) or not prior:
+        return (ABSTAIN, None,
+                "no class prior distribution supplied")
+    seed = int(hashlib.sha256(
+        f"prior:{record.feature_hash}:{horizon}".encode()
+    ).hexdigest()[:8], 16)
+    # Deterministic inverse-CDF draw over a SORTED distribution, so the
+    # same prior always yields the same class for the same input.
+    total = sum(float(v) for v in prior.values())
+    if total <= 0:
+        return ABSTAIN, None, "class prior sums to zero"
+    point = (seed % 10_000_000) / 10_000_000.0 * total
+    running = 0.0
+    for label in sorted(prior):
+        running += float(prior[label])
+        if point <= running:
+            return label, None, f"drawn from prior {prior}"
+    return sorted(prior)[-1], None, f"drawn from prior {prior}"
+
+
 BASELINE_FUNCTIONS = {
+    MAJORITY_CLASS: _majority_class,
+    RANDOM_CLASS_PRIOR: _random_class_prior,
+    ALWAYS_UP: _always(UP),
+    ALWAYS_DOWN: _always(DOWN),
     NO_SKILL: _no_skill,
     PREVIOUS_RETURN_SIGN: _previous_return_sign,
     MOMENTUM: _momentum,

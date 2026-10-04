@@ -181,6 +181,30 @@ def score_group(predictions: Sequence[PredictionRecord],
             }
         result["per_class"] = per_class
 
+        # BALANCED ACCURACY: the mean of per-class recall.
+        #
+        # Plain accuracy on an imbalanced target rewards predicting the
+        # majority. On the real data UP occurs 44.7% of the time, so
+        # "always UP" scores 0.4472 and beat every model tried - a
+        # number that looks like skill and is not. Balanced accuracy
+        # cannot be gamed that way: a constant predictor scores
+        # 1/n_classes however skewed the data.
+        recalls = [v["recall"] for v in per_class.values()
+                   if v["recall"] is not None]
+        result["balanced_accuracy"] = (round(_mean(recalls), 6)
+                                       if recalls else None)
+        result["balanced_accuracy_note"] = (
+            "mean of per-class recall over the classes that OCCUR. A "
+            "constant predictor scores 1/n_classes no matter how skewed "
+            "the target, which plain accuracy does not penalise.")
+        result["classes_observed"] = len(recalls)
+
+        # F1 per class, where both precision and recall are defined.
+        for label, v in per_class.items():
+            pr, rc = v["precision"], v["recall"]
+            v["f1"] = (round(2 * pr * rc / (pr + rc), 6)
+                       if pr and rc and (pr + rc) > 0 else None)
+
         # Information coefficient: the predicted sign against the
         # realised return. Measures whether the call carries information
         # about MAGNITUDE, which accuracy alone cannot show.
@@ -228,6 +252,91 @@ def score_group(predictions: Sequence[PredictionRecord],
             "calibrate")
 
     return result
+
+
+def baseline_comparison(predictions: Sequence[PredictionRecord],
+                        outcomes: Dict[str, PredictionOutcome]) -> Dict:
+    """What the trivial baselines score on THESE outcomes.
+
+    Computed from the realised labels actually present, not assumed. An
+    assumed 0.50 is wrong for a three-class target: a two-class
+    predictor cannot score on the FLAT rows at all, so its expectation
+    is (P(UP)+P(DOWN))/2 - which measured 0.4200 against NO_SKILL's
+    observed 0.4182.
+    """
+    realized = []
+    for prediction in predictions:
+        outcome = outcomes.get(prediction.prediction_id)
+        if (outcome is None or outcome.status != MATURED
+                or outcome.realized_direction is None):
+            continue
+        realized.append(outcome.realized_direction)
+    if not realized:
+        return {"sample_size": 0,
+                "note": ("no matured outcome carries a realised "
+                         "direction, so no baseline can be computed")}
+    n = len(realized)
+    counts: Dict[str, int] = {}
+    for label in realized:
+        counts[label] = counts.get(label, 0) + 1
+    distribution = {k: round(v / n, 6) for k, v in counts.items()}
+    majority = max(counts.items(), key=lambda kv: kv[1])[0]
+    two_class = sum(v for k, v in distribution.items()
+                    if k in (UP, DOWN))
+    return {
+        "sample_size": n,
+        "class_distribution": distribution,
+        "majority_class": majority,
+        "baselines": {
+            f"ALWAYS_{majority}": distribution[majority],
+            "UNIFORM_TWO_CLASS_FLIP": round(two_class / 2.0, 6),
+            "RANDOM_CLASS_PRIOR": round(
+                sum(v * v for v in distribution.values()), 6),
+            "BALANCED_ACCURACY_OF_ANY_CONSTANT": round(
+                1.0 / max(1, len(counts)), 6),
+        },
+        "hardest_baseline": max(
+            [(f"ALWAYS_{majority}", distribution[majority]),
+             ("UNIFORM_TWO_CLASS_FLIP", round(two_class / 2.0, 6)),
+             ("RANDOM_CLASS_PRIOR",
+              round(sum(v * v for v in distribution.values()), 6))],
+            key=lambda kv: kv[1]),
+        "note": ("A model must beat the HARDEST of these, not 0.50. "
+                 "Measured on real data, ALWAYS_UP scored 0.4472 and "
+                 "beat every model tried."),
+    }
+
+
+def verdict(group: Dict, comparison: Dict) -> Dict:
+    """Does this group beat the hardest trivial baseline?
+
+    Said in words, because a table of numbers invites the reader to
+    find the one that looks best.
+    """
+    acc = group.get("directional_accuracy")
+    hardest = (comparison or {}).get("hardest_baseline")
+    if acc is None or hardest is None:
+        return {"verdict": "NOT_MEASURABLE",
+                "detail": ("no directional accuracy or no baseline; "
+                           "nothing can be concluded")}
+    name, value = hardest
+    if not group.get("comparable"):
+        return {"verdict": "SAMPLE_TOO_SMALL",
+                "detail": (f"{group.get('sample_size')} scored "
+                           f"prediction(s) is below the comparable "
+                           f"threshold; the number is reported but no "
+                           f"comparison is justified")}
+    if acc > value:
+        return {"verdict": "ABOVE_BASELINE",
+                "detail": (f"{acc} beats {name} at {value}. Check the "
+                           f"information coefficient before reading "
+                           f"that as skill: a model can be more often "
+                           f"right while its calls are anti-correlated "
+                           f"with the size of the move."),
+                "baseline": name, "baseline_value": value}
+    return {"verdict": "NO_DEMONSTRATED_PREDICTIVE_EDGE",
+            "detail": f"{acc} does not beat {name} at {value}.",
+            "baseline": name, "baseline_value": value}
 
 
 def _time_bucket(feature_time: str) -> str:
@@ -282,4 +391,11 @@ def report(predictions: Sequence[PredictionRecord],
     out["by_model_and_horizon"] = group(
         lambda p: f"{p.model}@{p.horizon_minutes}m")
     out["totals"] = score_group(predictions, index)
+    out["baseline_comparison"] = baseline_comparison(predictions, index)
+    out["verdict"] = verdict(out["totals"], out["baseline_comparison"])
+    # Per model too, so one model clearing the bar cannot be read off
+    # an aggregate that it dragged up.
+    out["verdict_by_model"] = {
+        model: verdict(group, out["baseline_comparison"])
+        for model, group in out["by_model"].items()}
     return out

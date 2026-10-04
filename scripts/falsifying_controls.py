@@ -61,6 +61,10 @@ BRK_EXEC = REPO / "agent" / "broker" / "execution.py"
 BRK_MODELS = REPO / "agent" / "broker" / "models.py"
 
 TESTS_INIT = REPO / "tests" / "__init__.py"
+PRED_MATURE = REPO / "agent" / "prediction" / "maturation.py"
+PRED_SPLITS = REPO / "agent" / "prediction" / "splits.py"
+PRED_WF = REPO / "agent" / "prediction" / "walkforward.py"
+PRED_STAT = REPO / "agent" / "prediction" / "statistical.py"
 API_HANDLER = REPO / "lambda-micro" / "agent-api" / "handler.py"
 POS_MODELS = REPO / "agent" / "positions" / "models.py"
 POS_ADOPT = REPO / "agent" / "positions" / "adoption.py"
@@ -132,6 +136,55 @@ class Mutation:
 
 
 MUTATIONS = [
+    Mutation(
+        name="drop-the-prediction-dataset-checksum-check",
+        description="mature a prediction against any series sharing its "
+                    "timestamps, which scores it against prices it never saw",
+        path=PRED_MATURE,
+        old='    if (dataset_checksum is not None\n'
+            '            and prediction.dataset_checksum is not None\n'
+            '            and dataset_checksum != prediction.dataset_checksum):',
+        new='    if False:  # MUTATION',
+        expect=["dataset mismatch", "checksum", "VOID", "different"],
+    ),
+    Mutation(
+        name="fit-the-scaler-on-everything",
+        description="compute scaling statistics over all rows, leaking "
+                    "future extremes into historical features",
+        path=PRED_SPLITS,
+        old='            sd = (sum((c - mean) ** 2 for c in column)\n'
+            '                  / (len(column) - 1)) ** 0.5',
+        new='            sd = 1.0  # MUTATION',
+        expect=["scaling", "future", "extreme", "constant"],
+    ),
+    Mutation(
+        name="let-a-fold-train-on-its-own-prediction-window",
+        description="stop checking that predictions post-date training, "
+                    "so a fold may be fitted on what it predicts",
+        path=PRED_WF,
+        old='        if ft <= fold.train_end:',
+        new='        if False:  # MUTATION',
+        expect=["leak", "training", "predates", "at or before"],
+    ),
+    Mutation(
+        name="fold-flat-outcomes-into-up",
+        description="train the classifier on FLAT rows as though they "
+                    "were rises",
+        path=PRED_STAT,
+        old="             if lab in (UP, DOWN) and len(v) == len(feature_names)]",
+        new="             if len(v) == len(feature_names)]  # MUTATION",
+        expect=["flat", "excluded"],
+    ),
+    Mutation(
+        name="report-accuracy-without-balancing",
+        description="drop balanced accuracy, so predicting the majority "
+                    "class looks like skill",
+        path=REPO / "agent" / "prediction" / "metrics.py",
+        old='        result["balanced_accuracy"] = (round(_mean(recalls), 6)\n'
+            '                                       if recalls else None)',
+        new='        result["balanced_accuracy"] = None  # MUTATION',
+        expect=["balanced"],
+    ),
     Mutation(
         name="let-the-suite-reach-real-aws",
         description="restore the real AWS endpoint so tests write to the "
