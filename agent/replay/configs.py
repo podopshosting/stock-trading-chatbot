@@ -32,6 +32,60 @@ from ..risk import RiskLimits
 # Stamped on every result from a non-deployable configuration.
 TEST_ONLY_LABEL = "TEST_CONFIGURATION_ONLY"
 
+# Labels for what a run may be CALLED.
+#
+# Only a run matching FAITHFUL_LIVE_POLICY may be described as a
+# historical strategy replay. Everything else is a counterfactual, and
+# saying so is not a caveat - it is the difference between measuring
+# the deployed strategy and measuring a different one.
+HISTORICAL_STRATEGY_REPLAY = "HISTORICAL_STRATEGY_REPLAY"
+HISTORICAL_SYNTHETIC_POLICY = "HISTORICAL_SYNTHETIC_POLICY"
+
+# What the faithful profile pins. Checked, not assumed: classify_run
+# below refuses the faithful label unless every one of these holds.
+FAITHFUL_REGIME_SOURCE = "OBSERVED_RECONSTRUCTED"
+FAITHFUL_STOP_MODEL = "DECISION"
+
+
+def classify_run(*, regime_source: str, stop_model: str,
+                 config_name: str, deployable: bool) -> dict:
+    """What this run may be called, and why not the other thing.
+
+    Measured on real data, the two axes do NOT contribute equally:
+
+      SYNTHETIC_PERMISSIVE / FIXED      26 entries  net -$2.82
+      SYNTHETIC_PERMISSIVE / DECISION   42 entries  net -$8.42
+      OBSERVED_RECONSTRUCTED / FIXED    24 entries  net -$0.11
+      OBSERVED_RECONSTRUCTED / DECISION 40 entries  net -$6.42  <- faithful
+
+    The regime gate removed only 2 of 42 trades, so the permissive
+    regime was distorting the trade COUNT far less than feared. The
+    STOP MODEL dominates. Both still have to be pinned, because
+    "distorted less than feared" is not the same as faithful.
+    """
+    reasons = []
+    if regime_source != FAITHFUL_REGIME_SOURCE:
+        reasons.append(
+            f"regime source is {regime_source}, not "
+            f"{FAITHFUL_REGIME_SOURCE} - a manufactured regime measures "
+            f"the strategy without its market filter")
+    if stop_model != FAITHFUL_STOP_MODEL:
+        reasons.append(
+            f"stop model is {stop_model}, not {FAITHFUL_STOP_MODEL} - "
+            f"live derives the stop, target and trail from "
+            f"decision.stop_distance_pct, so a fixed 3/6/3 is a "
+            f"different strategy")
+    if not deployable:
+        reasons.append(
+            f"config {config_name} is not deployable")
+    if reasons:
+        return {"label": HISTORICAL_SYNTHETIC_POLICY,
+                "faithful": False,
+                "may_be_called_strategy_performance": False,
+                "why_not": reasons}
+    return {"label": HISTORICAL_STRATEGY_REPLAY, "faithful": True,
+            "may_be_called_strategy_performance": True, "why_not": []}
+
 DEFAULT_NAME = "DEFAULT_LIVE_CONFIG"
 
 
