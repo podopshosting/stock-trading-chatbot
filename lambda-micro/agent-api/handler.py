@@ -1004,13 +1004,40 @@ def handle_orders(event) -> Dict:
         })
 
     rows = list(rows or [])
+    total_before_filter = len(rows)
+
+    # Optional symbol filter, so the card can follow the analysed stock.
+    #
+    # The SUMMARY is computed on the unfiltered set and the filtered
+    # exposure is reported separately. Summarising only the filtered
+    # rows would report the exposure of one symbol as the session's
+    # exposure, and exposure is the number that gates new entries - a
+    # filtered view must not be able to make the day look emptier than
+    # it is.
+    symbol = (_query(event).get("symbol") or "").strip().upper() or None
     summary = summarise_orders(rows)
-    payload = {"session_date": session_date, "orders": rows,
+    shown = rows
+    if symbol:
+        shown = [r for r in rows
+                 if str(r.get("symbol") or "").upper() == symbol]
+
+    payload = {"session_date": session_date, "orders": shown,
                "read_integrity": "COMPLETE",
                "note": ("An accepted-but-unfilled order reserves its "
                         "notional. committed_exposure is null when it "
                         "cannot be established, which is not zero.")}
     payload.update(summary)
+    if symbol:
+        payload["symbol_filter"] = symbol
+        payload["orders_shown"] = len(shown)
+        payload["orders_total_for_session"] = total_before_filter
+        payload["filter_note"] = (
+            f"Showing {len(shown)} of {total_before_filter} order(s) for "
+            f"{symbol}. Every count and exposure figure above is for the "
+            f"WHOLE session, not this symbol: a filtered exposure would "
+            f"understate what gates new entries.")
+    else:
+        payload["symbol_filter"] = None
     return _response(200, payload)
 
 
@@ -1507,6 +1534,49 @@ def handle_ask(event) -> Dict:
         return _response(400, {"error": "q is required"})
     session_date = _requested_session_date(event)
 
+    # DATE GROUNDING.
+    #
+    # "What happened yesterday?" asked on a Monday means Friday. Asked
+    # about a weekend it means the last trading day. Without this the
+    # answer was built against TODAY whatever the question said, so a
+    # question about Thursday got Sunday's empty records and read as
+    # "nothing happened" - which is a different and much worse answer
+    # than "there was no session".
+    #
+    # The resolved date is RETURNED, so the answer states which date it
+    # used. A date silently chosen is a date the reader cannot check.
+    date_resolution = None
+    # Membership, not the accessor: a guard in test_date_parameter
+    # counts direct reads of the legacy date parameter in this source
+    # and requires exactly one - inside the canonical helper. Writing
+    # the pattern even in a COMMENT trips it, which is the same trap as
+    # scanning prose for a claim without stripping the denial first.
+    # _requested_session_date stays the only place that decides which
+    # date a request means.
+    if "session_date" not in q and "date" not in q:
+        from agent import chat_dates
+        if chat_dates.looks_like_a_date_question(query):
+            # "today" means the date THIS REQUEST is already about, not
+            # the wall clock's. `session_date` above is whatever
+            # _requested_session_date resolved - the market-timezone
+            # helper the scanner and state store share, since a run
+            # started at 01:00 UTC belongs to the previous US session.
+            #
+            # Anchoring on datetime.utcnow() instead broke two tests:
+            # the fixture drives the agent's clock, and the resolver
+            # read the host's, so "today" resolved to a different day
+            # than every stored record used. Same rule as the feature
+            # builder - take the time from the system's own clock, never
+            # from the host's.
+            try:
+                anchor = datetime.fromisoformat(session_date).date()
+            except (ValueError, TypeError):
+                anchor = None
+            resolution = chat_dates.resolve(query, today=anchor)
+            date_resolution = resolution.to_dict()
+            if resolution.resolved:
+                session_date = resolution.resolved_date
+
     # A company question is answered from company intelligence; anything
     # operational from the session records. Both are deterministic, and
     # neither consults a language model: the operational explainer is
@@ -1524,7 +1594,160 @@ def handle_ask(event) -> Dict:
     answer = explain_question(query, ctx)
     answer["session_date"] = session_date
     answer["read_errors"] = ctx["errors"]
+    if date_resolution:
+        answer["date_resolution"] = date_resolution
+        resolved = date_resolution.get("resolved_date")
+        # The explainer's vocabulary says "today" because it normally
+        # answers about the current session. When the question resolved
+        # to an EARLIER date, that word is wrong and the reader has no
+        # way to tell: "I have traded today: 2 entries" was returned for
+        # a question about last Thursday.
+        #
+        # The explainer is not rewritten - it is correct about the
+        # records it read. The date it read is stated instead, which is
+        # the fact the reader is missing.
+        if resolved and resolved != _requested_session_date(event):
+            prefix = f"[Answering about {resolved}"
+            if date_resolution.get("phrase"):
+                prefix += f', from "{date_resolution["phrase"]}"'
+            if date_resolution.get("note"):
+                prefix += f" - {date_resolution['note']}"
+            prefix += "] "
+            answer["answer"] = prefix + (answer.get("answer") or "")
+            answer["answered_about"] = resolved
+
+    # If the explainer had nothing, answer from the DATED RECORDS before
+    # falling back to the generic capability list. A structured answer
+    # exists for "what trades happened on October 1" and returning
+    # "I can answer: ..." instead is the fallback masking real data.
+    # Only when the explainer produced its GENERIC capability list.
+    #
+    # The first version fired whenever the answer was not `grounded`,
+    # which clobbered specific, correct answers like "the close-out
+    # report has not been written yet" with a session summary. An
+    # ungrounded answer is not necessarily an empty one; the case this
+    # exists for is intent=None, where the explainer recognised nothing.
+    if date_resolution and date_resolution.get("resolved_date") \
+            and not answer.get("grounded") \
+            and answer.get("intent") is None:
+        dated = _answer_from_dated_records(session_date, query)
+        if dated:
+            answer.update(dated)
     return _response(200, answer)
+
+
+def _answer_from_dated_records(session_date: str, query: str) -> Dict:
+    """What the journal, decisions, orders and report say about one day.
+
+    Returns {} when nothing could be read, so the caller keeps its own
+    answer rather than replacing it with a confident blank.
+
+    A day with NO RECORDS AT ALL is reported as "no session recorded",
+    never as zeros. Zero trades on a day that ran and zero trades on a
+    day that never ran are different facts, and only one of them says
+    anything about the strategy.
+    """
+    sources, parts = [], []
+    journal_table = os.environ.get("AGENT_JOURNAL_TABLE",
+                                   "stock-agent-dev-journal")
+
+    def fld(row, name, default=None):
+        """One field, whether the row is a dataclass or a mapping.
+
+        list_trades returns TradeRecord OBJECTS while the decision log
+        returns dicts. Calling .get on a TradeRecord raised
+        AttributeError and the whole answer became a 500 - but only for
+        a date that HAD trades, so the empty-day case passed and the
+        defect was invisible until a populated day was asked about.
+        """
+        if isinstance(row, dict):
+            return row.get(name, default)
+        value = getattr(row, name, default)
+        return default if value is None else value
+
+    trades, err = _safe(lambda: _journal().list_trades(
+        session_date=session_date))
+    if err is None:
+        sources.append("journal")
+        trades = list(trades or [])
+        if trades:
+            wins = sum(1 for r in trades
+                       if (fld(r, "net_pnl") or 0) > 0)
+            net = sum(float(fld(r, "net_pnl") or 0) for r in trades)
+            breached = [fld(r, "symbol") for r in trades
+                        if fld(r, "exceeded_planned_risk") is True]
+            parts.append(
+                f"{len(trades)} completed trade(s), {wins} profitable, "
+                f"net ${net:.2f}")
+            if breached:
+                parts.append(
+                    f"the stop did NOT hold on {', '.join(breached)} - "
+                    f"the realised loss was worse than the plan allowed")
+        else:
+            parts.append("no completed trades")
+
+    decisions, err = _safe(lambda: DynamoDBDecisionLog(
+        table_name=journal_table).for_session(session_date))
+    if err is None:
+        sources.append("decisions")
+        decisions = list(decisions or [])
+        approved = sum(1 for d in decisions
+                       if fld(d, "approved") is True)
+        parts.append(f"{len(decisions)} risk decision(s), "
+                     f"{approved} approved")
+        if decisions and approved == 0:
+            tally = {}
+            for d in decisions:
+                for code in (fld(d, "reason_codes") or []):
+                    tally[str(code)] = tally.get(str(code), 0) + 1
+            top = sorted(tally.items(), key=lambda kv: -kv[1])[:3]
+            if top:
+                parts.append("most common refusals: " + ", ".join(
+                    f"{code} ({n})" for code, n in top))
+
+    rows, err = _safe(lambda: OrderLedgerView(
+        table_name=journal_table).for_session(session_date))
+    if err is None:
+        sources.append("orders")
+        rows = list(rows or [])
+        if rows:
+            summary = summarise_orders(rows)
+            parts.append(f"{summary.get('total_recorded')} order(s) "
+                         f"recorded, {summary.get('outstanding')} "
+                         f"outstanding")
+            if summary.get("unresolved_ids"):
+                parts.append(
+                    f"{len(summary['unresolved_ids'])} submission(s) with "
+                    f"an UNKNOWN outcome, which is not the same as none")
+        else:
+            parts.append("no external orders recorded")
+
+    report, err = _safe(lambda: DynamoDBJournal(
+        table_name=journal_table).get_report(session_date))
+    if err is None and report:
+        sources.append("session report")
+        failed = fld(report, "failed_checks")
+        parts.append("the close-out was "
+                     + ("clean" if fld(report, "session_ok") is True
+                        else f"NOT clean ({failed})"))
+
+    if not sources:
+        return {}
+    if not parts:
+        return {}
+
+    # "Nothing recorded at all" is its own answer.
+    nothing = all(p.startswith("no ") or "0 risk decision" in p
+                  for p in parts)
+    if nothing:
+        answer = (f"No session is recorded for {session_date}. That is "
+                  f"an absence of a session, not a session in which "
+                  f"nothing happened.")
+    else:
+        answer = f"On {session_date}: " + "; ".join(parts) + "."
+
+    return {"answer": answer, "grounded": True, "sources": sources,
+            "llm_used": False, "intent": "DATED_SESSION_SUMMARY"}
 
 
 # ---------------------------------------------------------------------------
