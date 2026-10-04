@@ -735,6 +735,225 @@ def handle_run_detail(event) -> Dict:
                            "result": item.get("result")})
 
 
+
+# --------------------------------------------------------------------
+# Research predictions
+#
+# RESEARCH_ONLY throughout. The prediction package may not import the
+# broker, risk, hypothesis, position, scanner or orchestration modules
+# and a test reads its source to prove it, so nothing reachable from
+# here can place an order.
+# --------------------------------------------------------------------
+PREDICTION_PARTITION = "PREDICTION"
+
+
+def _load_bars_for(symbol: str, days: int, timeframe: str):
+    """Real bars, or (None, reason). Never raises.
+
+    A provider failure is DATA failing, not the predictor failing, and
+    the caller needs to be told which.
+    """
+    intervals = {"1day": 86400.0, "1hour": 3600.0, "15min": 900.0,
+                 "5min": 300.0, "1min": 60.0}
+    if timeframe not in intervals:
+        return None, f"unknown timeframe {timeframe!r}", None
+    try:
+        import boto3
+        from agent.config import AgentConfig
+        from agent.providers import AlpacaProvider
+        from agent.replay.data import Bar
+        cfg = AgentConfig()
+        sm = boto3.client("secretsmanager", region_name=cfg.storage.region)
+        creds = json.loads(sm.get_secret_value(
+            SecretId=cfg.storage.alpaca_secret_id)["SecretString"])
+        provider = AlpacaProvider(
+            api_key_id=creds["api_key_id"],
+            api_secret_key=creds["api_secret_key"],
+            quote_feed=os.environ.get("ALPACA_QUOTE_FEED", "sip"))
+        raw = provider.get_bars(symbol, timeframe=timeframe, limit=days)
+    except Exception as exc:                                  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}", None
+    source = getattr(raw, "bars", None)
+    if source is None:
+        return None, f"provider returned {type(raw).__name__}", None
+    bars = []
+    for b in source:
+        try:
+            bars.append(Bar(timestamp=str(b.timestamp), open=float(b.open),
+                            high=float(b.high), low=float(b.low),
+                            close=float(b.close),
+                            volume=float(b.volume or 0.0)))
+        except (AttributeError, TypeError, ValueError) as exc:
+            return None, f"a bar could not be converted: {exc}", None
+    if not bars:
+        return None, "the provider returned no bars", None
+    import hashlib
+    h = hashlib.sha256()
+    for b in bars:
+        h.update(f"{b.timestamp}|{b.open}|{b.high}|{b.low}|{b.close}|"
+                 f"{b.volume}".encode())
+    return bars, None, h.hexdigest()[:32]
+
+
+def handle_predict(event) -> Dict:
+    """Generate research predictions for one symbol, and persist them.
+
+    Predictions are made at the LAST bar, which is the only point a
+    caller can act on - and because its horizon has not elapsed, every
+    one of them is PENDING. That is the honest state for a forecast
+    about the future, and it is reported as such rather than scored.
+
+    Backfilled predictions over earlier bars are generated too, so the
+    card can show whether the models have ever been right. Those mature
+    immediately because their horizons are in the past.
+    """
+    body = _body(event)
+    symbol = _normalise_symbol(body.get("symbol"))
+    if not symbol:
+        return _response(400, {"error": "symbol must be a ticker"})
+    try:
+        days = int(body.get("days", 250))
+    except (TypeError, ValueError):
+        return _response(400, {"error": "days must be an integer"})
+    if not 60 <= days <= 2000:
+        return _response(400, {
+            "error": "days must be between 60 and 2000",
+            "why": ("features need history before they mean anything; "
+                    "a shorter series produces numbers rather than "
+                    "features")})
+    timeframe = str(body.get("timeframe") or "1day").lower()
+
+    bars, why, checksum = _load_bars_for(symbol, days, timeframe)
+    if bars is None:
+        return _response(502, {
+            "error": f"could not load history for {symbol}: {why}",
+            "distinction": ("the predictor is fine; the market data "
+                            "could not be fetched")})
+
+    from agent.prediction import features as PF
+    from agent.prediction import maturation as PM
+    from agent.prediction import metrics as PMET
+    from agent.prediction import models as PMOD
+
+    interval = {"1day": 86400.0, "1hour": 3600.0, "15min": 900.0,
+                "5min": 300.0, "1min": 60.0}[timeframe]
+    # Horizons expressed in MINUTES, as the targets module requires, so
+    # on daily bars one bar ahead is 1440 minutes. Stating the bar
+    # multiple too, because "a 1440-minute horizon" on daily data is
+    # easy to misread as intraday.
+    horizons = [int(round(interval / 60.0 * n)) for n in (1, 2, 5)]
+    dataset_id = f"alpaca:{symbol}:{timeframe}:{len(bars)}"
+
+    live: List[Dict] = []
+    backfill: List[Any] = []
+    warmup = 60
+
+    # The live prediction, at the last bar.
+    record = PF.build(bars, len(bars) - 1, symbol, dataset_id=dataset_id,
+                      dataset_checksum=checksum)
+    if record is None:
+        return _response(422, {
+            "error": "no feature record could be built at the last bar"})
+    for p in PMOD.predict_all_baselines(record, generated_at=_now(),
+                                        horizons=horizons):
+        d = p.to_dict()
+        d["status"] = PMOD.PENDING
+        d["horizon_bars"] = round(p.horizon_minutes * 60.0 / interval, 2)
+        live.append(d)
+
+    # Backfill, so the card can show a track record rather than only a
+    # fresh unanswerable claim.
+    for i in range(warmup, len(bars) - 6):
+        r = PF.build(bars, i, symbol, dataset_id=dataset_id,
+                     dataset_checksum=checksum)
+        if r is None:
+            continue
+        backfill.extend(PMOD.predict_all_baselines(
+            r, generated_at=_now(), horizons=horizons))
+    outcomes = PM.mature_all(backfill, {symbol: bars},
+                             evaluated_at=_now(),
+                             bar_interval_seconds=interval,
+                             dataset_checksum=checksum)
+    report = PMET.report(backfill, outcomes)
+
+    persisted, persist_error = False, None
+    pred_id = "predrun_" + (checksum or "unknown")[:16]
+    try:
+        tbl = _table()
+        tbl.put_item(Item=_decimalise({
+            "PK": f"{PREDICTION_PARTITION}#{symbol}",
+            "SK": f"{_now()}#{pred_id}",
+            "mode": RESEARCH_ONLY,
+            "symbol": symbol,
+            "dataset_id": dataset_id,
+            "dataset_checksum": checksum,
+            "code_sha": _code_sha(),
+            "feature_schema_version": PF.FEATURE_SCHEMA_VERSION,
+            "model_version": PMOD.MODEL_SCHEMA_VERSION,
+            "live_predictions": live,
+            "backfill_report": report,
+        }))
+        persisted = True
+    except Exception as exc:                                  # noqa: BLE001
+        persist_error = f"{type(exc).__name__}: {exc}"
+
+    return _response(200, {
+        "mode": RESEARCH_ONLY,
+        "execution_influence": (
+            "NONE - predictions do not affect scanner selection, "
+            "hypotheses, the Risk Governor, sizing, exits or any order"),
+        "symbol": symbol,
+        "generated_at": _now(),
+        "dataset_id": dataset_id,
+        "dataset_checksum": checksum,
+        "code_sha": _code_sha(),
+        "feature_schema_version": PF.FEATURE_SCHEMA_VERSION,
+        "model_version": PMOD.MODEL_SCHEMA_VERSION,
+        "bar_interval_seconds": interval,
+        "horizons_minutes": horizons,
+        "feature_record": record.to_dict(),
+        "live_predictions": live,
+        "live_note": (
+            "Every live prediction is PENDING: its horizon has not "
+            "elapsed. A forecast about the future has no outcome yet, "
+            "and scoring one would require knowing the answer."),
+        "backfill": {
+            "predictions": len(backfill),
+            "report": report,
+            "note": ("Backfilled over earlier bars, which mature "
+                     "immediately because their horizons are in the "
+                     "past. This is the track record; the live "
+                     "prediction above is not evidence of anything."),
+        },
+        "persisted": persisted,
+        "persist_error": persist_error,
+    })
+
+
+def handle_prediction_runs(event) -> Dict:
+    """Persisted prediction runs for one symbol."""
+    symbol = _normalise_symbol(_query(event).get("symbol"))
+    if not symbol:
+        return _response(400, {"error": "symbol must be a ticker"})
+    try:
+        import boto3
+        resp = _table().query(
+            KeyConditionExpression=boto3.dynamodb.conditions.Key("PK").eq(
+                f"{PREDICTION_PARTITION}#{symbol}"),
+            ScanIndexForward=False, Limit=10)
+        rows = resp.get("Items") or []
+    except Exception as exc:                                  # noqa: BLE001
+        # A read failure is not an empty list: an empty list would claim
+        # no run exists, which is a different and unverified statement.
+        return _response(200, {"runs": [], "count": None,
+                               "read_error": f"{type(exc).__name__}: {exc}",
+                               "warning": ("runs could not be read; this "
+                                           "is NOT evidence that none "
+                                           "exist")})
+    return _response(200, {"runs": rows, "count": len(rows),
+                           "read_error": None, "mode": RESEARCH_ONLY})
+
+
 ROUTES = {
     ("GET", "/sim/scenarios"): handle_scenarios,
     ("GET", "/sim/configs"): handle_configs,
@@ -742,6 +961,8 @@ ROUTES = {
     ("POST", "/sim/replay"): handle_replay,
     ("GET", "/sim/runs"): handle_runs,
     ("GET", "/sim/run"): handle_run_detail,
+    ("POST", "/sim/predict"): handle_predict,
+    ("GET", "/sim/predictions"): handle_prediction_runs,
 }
 
 

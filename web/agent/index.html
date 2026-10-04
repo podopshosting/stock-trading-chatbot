@@ -358,7 +358,15 @@
       on scanner selection, hypotheses, the Risk Governor, sizing, exits or
       any order. The prediction package may not import the decision path and
       a test asserts it.</p>
-    <div id="predictions"><p class="empty">—</p></div>
+    <p>
+      <button type="button" id="predGo">Generate research prediction</button>
+      <label for="predDays" style="margin-left:10px"><b>Bars</b></label>
+      <input id="predDays" type="number" value="250" min="60" max="2000"
+             style="width:6em;margin:0 6px">
+      <span id="predNote" class="empty"></span>
+    </p>
+    <div id="predictions"><p class="empty">No research prediction
+      generated for this symbol yet.</p></div>
   </section>
 
   <!-- Orders, journal and decisions for the SELECTED session.
@@ -2043,6 +2051,7 @@
           note.textContent = "analysed " + chk.symbol +
             (c ? "" : " (company intelligence unavailable)");
           if (typeof loadOrders === "function") { loadOrders(); }
+          if (typeof loadPredictions === "function") { loadPredictions(); }
         });
       })
       .catch(function (e) {
@@ -2530,6 +2539,8 @@
     document.getElementById("simScenarioPick")
       .addEventListener("change", renderScenarioDetail);
     document.getElementById("simRun").addEventListener("click", runSimulation);
+    document.getElementById("predGo")
+      .addEventListener("click", generatePrediction);
     document.getElementById("hypUseQuote").addEventListener("click", function () {
       // Only the price already fetched by the analysis. Nothing here
       // fetches a fresh quote: a hypothetical must not look like a
@@ -2548,42 +2559,190 @@
   }
 
   // ---- predictions -------------------------------------------------
+  //
+  // RESEARCH ONLY, and the card says so in three places: the heading
+  // pill, the influence line, and every table. A reader who sees a
+  // forecast on a trading dashboard will assume it is used for trading
+  // unless told otherwise repeatedly.
   function loadPredictions() {
     var node = document.getElementById("predictions");
+    if (!ANALYZED_SYMBOL) {
+      node.innerHTML = "";
+      node.appendChild(el("p", "empty",
+        "Analyse a symbol first, then generate a research prediction."));
+      return;
+    }
     node.innerHTML = "";
-    node.appendChild(el("p", "empty",
-      "PREDICTION MODE: RESEARCH_ONLY"));
-    // Honest state. The target definitions and their leakage controls
-    // exist; no model has been built, so there is nothing to show and
-    // saying "NOT_GENERATED" is the only truthful render.
-    kv(el("dl", "kv"), []);
-    var tbl = el("table");
-    var hd = el("tr");
-    ["model", "15m", "30m", "60m", "status"].forEach(function (h) {
-      hd.appendChild(el("th", null, h));
+    node.appendChild(el("p", "empty", "Looking for stored runs for " +
+                                      ANALYZED_SYMBOL + "…"));
+    simGet("/sim/predictions?symbol=" + encodeURIComponent(ANALYZED_SYMBOL))
+      .then(function (d) {
+        node.innerHTML = "";
+        if (d.read_error) {
+          node.appendChild(el("p", "err", "Stored runs could not be read: "
+            + d.read_error + " — this is NOT evidence that none exist."));
+          return;
+        }
+        if (!(d.runs || []).length) {
+          node.appendChild(el("p", "empty",
+            "No research prediction generated for " + ANALYZED_SYMBOL +
+            " yet. Press the button above."));
+          return;
+        }
+        renderPredictionRun(node, d.runs[0]);
+      })
+      .catch(function (e) { showError(node, e); });
+  }
+
+  function generatePrediction() {
+    var note = document.getElementById("predNote");
+    var node = document.getElementById("predictions");
+    if (!ANALYZED_SYMBOL) {
+      note.className = "err";
+      note.textContent = "analyse a symbol first";
+      return;
+    }
+    note.className = "empty";
+    note.textContent = "generating for " + ANALYZED_SYMBOL +
+                       " — fetching bars, building features, " +
+                       "backfilling…";
+    node.innerHTML = "";
+    node.appendChild(el("p", "empty", "Working…"));
+    simPost("/sim/predict", {
+      symbol: ANALYZED_SYMBOL,
+      days: parseInt(document.getElementById("predDays").value, 10),
+      timeframe: "1day"
+    }).then(function (d) {
+      note.textContent = "generated" + (d.persisted ? " and persisted"
+                                                    : " (NOT PERSISTED)");
+      renderPredictionRun(node, d, true);
+    }).catch(function (e) {
+      note.className = "err"; note.textContent = e.message;
+      showError(node, e);
     });
-    tbl.appendChild(hd);
-    ["previous-return sign", "momentum", "mean reversion",
-     "signal-engine direction", "no-skill control"].forEach(function (m) {
-      var tr = el("tr");
-      tr.appendChild(el("td", null, m));
-      ["NOT_GENERATED", "NOT_GENERATED", "NOT_GENERATED",
-       "NOT_GENERATED"].forEach(function (c) {
-        tr.appendChild(el("td", null, c));
-      });
-      tbl.appendChild(tr);
-    });
-    node.appendChild(tbl);
-    node.appendChild(el("p", "empty",
-      "No research prediction has been generated for any symbol. The " +
-      "target definitions and their leakage controls are implemented " +
-      "(FORWARD_RETURN, DIRECTION, MFE, MAE, STOP_BEFORE_TARGET at 5/15/" +
-      "30/60 minutes); the baseline models and the generation endpoint " +
-      "are not built yet, so there is nothing to display and nothing is " +
-      "invented to fill the gap."));
+  }
+
+  function renderPredictionRun(node, run, fresh) {
+    node.innerHTML = "";
     node.appendChild(el("p", "err",
-      "A deterministic baseline will never be shown with a fabricated " +
-      "probability, and signal agreement is NOT a prediction probability."));
+      "RESEARCH ONLY — NOT USED FOR EXECUTION. " +
+      (run.execution_influence ||
+       "Predictions do not affect scanner selection, hypotheses, the " +
+       "Risk Governor, sizing, exits or any order.")));
+
+    var meta = el("dl", "kv"); node.appendChild(meta);
+    kv(meta, [
+      ["symbol", unk(run.symbol)],
+      ["generated", unk(run.generated_at || (run.SK || "").split("#")[0])],
+      ["dataset", unk(run.dataset_id)],
+      ["dataset checksum", unk(run.dataset_checksum)],
+      ["code sha", unk(run.code_sha)],
+      ["feature schema", unk(run.feature_schema_version)],
+      ["model version", unk(run.model_version)],
+      ["mode", unk(run.mode)]
+    ]);
+
+    // The live predictions, side by side, horizon across the top.
+    var live = run.live_predictions || [];
+    if (live.length) {
+      node.appendChild(el("h3", null, "Model comparison — live"));
+      if (run.live_note) {
+        node.appendChild(el("p", "empty", run.live_note));
+      }
+      var horizons = [];
+      live.forEach(function (p) {
+        var label = (p.horizon_bars ? p.horizon_bars + "b"
+                                    : p.horizon_minutes + "m");
+        if (horizons.indexOf(label) === -1) { horizons.push(label); }
+      });
+      var byModel = {};
+      live.forEach(function (p) {
+        var label = (p.horizon_bars ? p.horizon_bars + "b"
+                                    : p.horizon_minutes + "m");
+        byModel[p.model] = byModel[p.model] || {};
+        // A probability is shown ONLY when the model computed one. A
+        // deterministic rule gets its bare call: inventing "58%" here
+        // would chart a fabrication beside a real likelihood.
+        byModel[p.model][label] =
+          p.prediction + (p.probability === null ||
+                          p.probability === undefined
+                            ? "" : " (" +
+                              Math.round(p.probability * 100) + "%)");
+      });
+      var tbl = el("table");
+      var hd = el("tr");
+      hd.appendChild(el("th", null, "model"));
+      horizons.forEach(function (h) { hd.appendChild(el("th", null, h)); });
+      hd.appendChild(el("th", null, "status"));
+      tbl.appendChild(hd);
+      Object.keys(byModel).forEach(function (model) {
+        var tr = el("tr");
+        tr.appendChild(el("td", null, model));
+        horizons.forEach(function (h) {
+          tr.appendChild(el("td", null, byModel[model][h] || "—"));
+        });
+        tr.appendChild(el("td", null, "PENDING"));
+        tbl.appendChild(tr);
+      });
+      node.appendChild(tbl);
+      node.appendChild(el("p", "empty",
+        "ABSTAIN means the model declined to make a claim — not that it " +
+        "expects no movement. It is excluded from accuracy rather than " +
+        "scored as wrong."));
+    }
+
+    // The track record.
+    var bf = run.backfill_report || (run.backfill || {}).report;
+    if (bf && bf.by_model) {
+      node.appendChild(el("h3", null, "Track record — backfilled"));
+      var bnote = (run.backfill || {}).note;
+      if (bnote) { node.appendChild(el("p", "empty", bnote)); }
+      var t2 = el("table");
+      var h2 = el("tr");
+      ["model", "scored", "accuracy", "info coeff", "abstained",
+       "pending", "void", "comparable"].forEach(function (h) {
+        h2.appendChild(el("th", null, h));
+      });
+      t2.appendChild(h2);
+      var control = (bf.by_model["NO_SKILL"] || {}).directional_accuracy;
+      Object.keys(bf.by_model).sort().forEach(function (model) {
+        var g = bf.by_model[model];
+        var tr = el("tr");
+        var acc = g.directional_accuracy;
+        [model, g.sample_size,
+         acc === null || acc === undefined ? "—" : acc.toFixed(4),
+         g.information_coefficient === null ||
+         g.information_coefficient === undefined
+           ? "—" : g.information_coefficient.toFixed(4),
+         g.abstained, g.pending, g.void,
+         g.comparable ? "yes" : "NO"
+        ].forEach(function (c) { tr.appendChild(el("td", null, String(c))); });
+        t2.appendChild(tr);
+      });
+      node.appendChild(t2);
+
+      // The only comparison that matters, stated rather than left for
+      // the reader to compute.
+      if (control !== null && control !== undefined) {
+        var beat = [];
+        Object.keys(bf.by_model).forEach(function (m) {
+          var g = bf.by_model[m];
+          if (m === "NO_SKILL" || !g.comparable) { return; }
+          if (g.directional_accuracy > control) { beat.push(m); }
+        });
+        node.appendChild(el("p", beat.length ? "empty" : "err",
+          "NO_SKILL (a seeded coin flip) scored " + control.toFixed(4) +
+          ". " + (beat.length
+            ? "Above it on accuracy: " + beat.join(", ") +
+              ". Check the information coefficient before reading that " +
+              "as skill — a model can be more often right while its " +
+              "calls are anti-correlated with the size of the move."
+            : "No model beat it. There is no demonstrated edge.")));
+      }
+      if (bf.overall_note) {
+        node.appendChild(el("p", "empty", bf.overall_note));
+      }
+    }
   }
 
   // ---- session date ----------------------------------------------------
