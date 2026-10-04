@@ -526,9 +526,44 @@ def _off_hours(phase, session_date, session, state_service, sessions,
 
     # A successful skip is a successful invocation: it resets the failure
     # streak rather than being invisible to it.
+    #
+    # AND clears the NON-LATCHING condition that streak raised.
+    #
+    # REPEATED_CYCLE_FAILURE has TWO raise paths: the early-abort above
+    # (added because an early abort never reaches orchestration) and
+    # day.py:513. It has only ONE clear path, day.py:519, inside
+    # orchestration - which a market-closed skip returns before
+    # reaching. So a condition raised by the abort path could only be
+    # cleared by a path requiring an open market, and no amount of
+    # successful weekend invocation could recover it.
+    #
+    # Observed directly: after one SKIPPED_MARKET_CLOSED invocation the
+    # streak went 4 -> 0 while the condition stayed raised with its
+    # original timestamp. A non-latching condition whose cause has
+    # demonstrably passed is a latching condition nobody declared.
+    #
+    # This CANNOT clear a latching condition, and not merely because it
+    # names a non-latching one:
+    #   - health.py:93-98  LATCHING holds 7 conditions and
+    #     REPEATED_CYCLE_FAILURE is not one of them
+    #   - health.py:222-223  clear_condition returns False for any
+    #     LATCHING condition when cleared_by is falsy
+    # cleared_by=None is therefore load-bearing: even with the wrong
+    # condition passed, EMERGENCY_STOP, RECONCILIATION_MISMATCH and
+    # UNEXPECTED_BROKER_POSITION are refused by the store itself. The
+    # safety property is the store's refusal, not this call site's care.
     if health is not None:
         try:
-            health.record_cycle(True)
+            streak = health.record_cycle(True)
+            # Only when the streak is genuinely back to zero. Clearing
+            # on any successful cycle would drop the condition while a
+            # failure run was still in progress.
+            if streak == 0:
+                if health.clear_condition(Condition.REPEATED_CYCLE_FAILURE,
+                                          cleared_by=None):
+                    log_event("health_condition_cleared",
+                              condition="REPEATED_CYCLE_FAILURE",
+                              detail="a successful cycle reset the streak")
         except Exception as exc:                          # noqa: BLE001
             out["health_record_error"] = f"{type(exc).__name__}"[:60]
     return _write_terminal(out)
